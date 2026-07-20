@@ -1,0 +1,16 @@
+question: "첨부 파일의 첫 줄만 정확히 그대로 한 줄로 답해줘. 다른 말은 절대 하지 마."
+files:
+  - "../../chatgpt-shared/assets/attachment-live-smoke.txt"
+output_dir: "./reports/chatgpt-pro-live"
+output_name: "chatgpt-pro-live-attachment-smoke"
+formats:
+  - "md"
+chat_url: "https://chatgpt.com/"
+mode_label: "Pro"
+browser_channel: "chrome"
+auto_launch_debug_browser: true
+close_existing_profile_browser: false
+cdp_port: 9222
+login_wait_seconds: 180
+headless: false
+timeout_seconds: 600

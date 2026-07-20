@@ -1,0 +1,70 @@
+{
+  "name": "codexpro-automation",
+  "version": "1.0.0",
+  "private": false,
+  "description": "Safe ChatGPT web workflows for Codex using an external contract-validated agbrowse runtime",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ventianima-lab/codexpro-automation.git"
+  },
+  "homepage": "https://github.com/ventianima-lab/codexpro-automation#readme",
+  "bugs": {
+    "url": "https://github.com/ventianima-lab/codexpro-automation/issues"
+  },
+  "keywords": [
+    "codex",
+    "chatgpt",
+    "agbrowse",
+    "automation"
+  ],
+  "files": [
+    "bin/chatgpt_agbrowse_bridge.py",
+    "bin/chatgpt_agbrowse_composer.py",
+    "bin/chatgpt_agbrowse_contract.py",
+    "bin/chatgpt_agbrowse_run.py",
+    "bin/chatgpt_agbrowse_state.py",
+    "bin/chatgpt_agbrowse_tabs.py",
+    "bin/chatgpt_prompt_profiles.py",
+    "bin/chatgpt_web_multi_runtime.py",
+    "bin/chatgpt_web_multi_upstream.py",
+    "bin/codexpro_agbrowse_app.py",
+    "bin/codexpro_mcp_identity.py",
+    "bin/codexpro_project_app_manager.py",
+    "bin/codexpro_project_cloudflare_bootstrap.ps1",
+    "bin/mcp_resource_guard.py",
+    "docs/",
+    "skills/chatgpt-thinking-browser/SKILL.md",
+    "skills/chatgpt-thinking-browser/scripts/run_chatgpt_thinking.py",
+    "skills/chatgpt-thinking-browser/scripts/run_thinking_browser.py",
+    "skills/chatgpt-pro-browser/SKILL.md",
+    "skills/chatgpt-pro-browser/agents/openai.yaml",
+    "skills/chatgpt-pro-browser/scripts/run_chatgpt_pro.py",
+    "skills/chatgpt-pro-browser/scripts/run_pro_browser.py",
+    "skills/chatgpt-deep-research-browser/SKILL.md",
+    "skills/chatgpt-deep-research-browser/agents/openai.yaml",
+    "skills/chatgpt-deep-research-browser/scripts/run_chatgpt_deep_research.py",
+    "skills/chatgpt-deep-research-browser/scripts/run_deep_research_browser.py",
+    "skills/web-multi-gpt/SKILL.md",
+    "skills/chatgpt-pro-plan-handoff/SKILL.md",
+    "skills/chatgpt-pro-plan-handoff/scripts/handoff_contract.py",
+    "skills/chatgpt-pro-plan-handoff/scripts/run_pro_plan_handoff.py",
+    "skills/chatgpt-pro-plan-handoff/scripts/workspace_guard.py",
+    "skills/chatgpt-pro-plan-handoff/schemas/",
+    "skills/chatgpt-question-designer/SKILL.md",
+    "skills/chatgpt-question-designer/agents/openai.yaml",
+    "install-manifest.json",
+    "install.ps1",
+    "doctor.ps1",
+    "update.ps1",
+    "uninstall.ps1",
+    "rollback.ps1",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "SECURITY.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {}
+}

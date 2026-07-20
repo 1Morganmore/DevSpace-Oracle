@@ -1,0 +1,21 @@
+question: "첨부 문서를 바탕으로 핵심 요약과 실행 권고안을 정리해줘."
+files: []
+output_dir: "./reports/chatgpt-pro"
+output_name: "chatgpt-pro-report"
+formats:
+  - "md"
+  - "docx"
+chat_url: "https://chatgpt.com/"
+mode_label: "Pro"
+mode_variant: null
+search_enabled: false
+browser_channel: "chrome"
+auto_launch_debug_browser: true
+close_existing_profile_browser: false
+cdp_port: 9222
+login_wait_seconds: 300
+# Optional: if you already opened a compatible Chrome session yourself,
+# attach to it directly instead of auto-launching:
+# connect_over_cdp_url: "http://127.0.0.1:9222"
+headless: false
+timeout_seconds: 1200

@@ -1,0 +1,18 @@
+question: "띵킹 확장 모드로 아주 짧게 한 문장만 답해줘."
+files: []
+output_dir: "./reports/chatgpt-thinking-live"
+output_name: "chatgpt-thinking-live-smoke"
+formats:
+  - "md"
+chat_url: "https://chatgpt.com/"
+mode_label: "Thinking"
+mode_variant: "Expanded"
+search_enabled: false
+browser_channel: "chrome"
+auto_launch_debug_browser: true
+close_existing_profile_browser: false
+cdp_port: 9222
+# connect_over_cdp_url: "http://127.0.0.1:9222"
+login_wait_seconds: 300
+headless: false
+timeout_seconds: 900

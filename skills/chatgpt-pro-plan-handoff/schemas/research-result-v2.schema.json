@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex.chatgpt.research-result/v2",
+  "type": "object",
+  "required": ["schema", "workflow_id", "stage", "attempt_index", "nonce", "question_sha256", "source_snapshot_sha256", "status", "findings", "sources"],
+  "properties": {
+    "schema": {"const": "codex.chatgpt.research-result/v2"},
+    "workflow_id": {"type": "string", "minLength": 1},
+    "stage": {"const": "deep-research"},
+    "attempt_index": {"const": 1},
+    "nonce": {"type": "string", "minLength": 16},
+    "question_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_snapshot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "status": {"const": "complete"},
+    "findings": {"type": "array"},
+    "sources": {"type": "array", "items": {"type": "object"}}
+  },
+  "additionalProperties": true
+}

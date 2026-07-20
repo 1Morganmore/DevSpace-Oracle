@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex.chatgpt.gate/v2",
+  "type": "object",
+  "required": ["schema", "workflow_id", "gate", "policy", "decision_inputs", "decision_inputs_sha256", "decision", "artifact"],
+  "properties": {
+    "schema": {"const": "codex.chatgpt.gate/v2"},
+    "workflow_id": {"type": "string", "minLength": 1},
+    "gate": {"enum": ["research", "advisory"]},
+    "policy": {"enum": ["auto", "require", "skip"]},
+    "decision_inputs": {"type": "object"},
+    "decision_inputs_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decision": {"enum": ["run", "skip"]},
+    "artifact": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}

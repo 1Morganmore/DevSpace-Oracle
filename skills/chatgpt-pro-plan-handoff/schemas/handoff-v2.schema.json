@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"codex.chatgpt.handoff/v2","type":"object","required":["schema","workflow_id","state","question_sha256","source_snapshot_sha256","plan","review","research_descriptor","advisory_descriptor"],"properties":{"schema":{"const":"codex.chatgpt.handoff/v2"},"state":{"const":"PLAN_READY"}},"additionalProperties":true}

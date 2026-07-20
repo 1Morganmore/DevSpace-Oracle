@@ -1,0 +1,19 @@
+question: "첨부 파일의 첫 줄만 정확히 그대로 한 줄로 답해줘. 다른 말은 절대 하지 말고, 웹 검색이 켜져 있어도 첨부 파일 내용을 우선해서 답해줘."
+files:
+  - "../../chatgpt-shared/assets/attachment-live-smoke.txt"
+output_dir: "./reports/chatgpt-thinking-live"
+output_name: "chatgpt-thinking-live-attachment-smoke"
+formats:
+  - "md"
+chat_url: "https://chatgpt.com/"
+mode_label: "Thinking"
+mode_variant: "Expanded"
+search_enabled: true
+browser_channel: "chrome"
+auto_launch_debug_browser: true
+close_existing_profile_browser: false
+cdp_port: 9222
+# connect_over_cdp_url: "http://127.0.0.1:9222"
+login_wait_seconds: 300
+headless: false
+timeout_seconds: 900

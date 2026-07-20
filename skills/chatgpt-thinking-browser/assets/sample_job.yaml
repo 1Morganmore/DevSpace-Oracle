@@ -1,0 +1,20 @@
+question: "첨부 문서를 바탕으로 웹 검색까지 포함해 핵심 쟁점을 정리해줘."
+files:
+  - "../../chatgpt-shared/assets/attachment-live-smoke.txt"
+output_dir: "./reports/chatgpt-thinking"
+output_name: "chatgpt-thinking-report"
+formats:
+  - "md"
+  - "docx"
+chat_url: "https://chatgpt.com/"
+mode_label: "Thinking"
+mode_variant: "Expanded"
+search_enabled: true
+browser_channel: "chrome"
+auto_launch_debug_browser: true
+close_existing_profile_browser: false
+cdp_port: 9222
+# connect_over_cdp_url: "http://127.0.0.1:9222"
+login_wait_seconds: 300
+headless: false
+timeout_seconds: 1800

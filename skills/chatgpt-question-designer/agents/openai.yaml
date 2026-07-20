@@ -1,0 +1,4 @@
+interface:
+  display_name: "ChatGPT Question Designer"
+  short_description: "Anti-sycophancy GPT question design."
+  default_prompt: "Design a GPT/browser question that seeks objections, missing evidence, counterexamples, alternatives, and conclusion-change triggers."

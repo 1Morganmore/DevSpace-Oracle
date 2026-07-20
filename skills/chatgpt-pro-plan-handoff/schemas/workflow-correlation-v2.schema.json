@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"codex.chatgpt.workflow-correlation/v2","type":"object","required":["schema","workflow_id","stage","attempt_index","nonce","question_sha256","source_snapshot_sha256"],"properties":{"schema":{"const":"codex.chatgpt.workflow-correlation/v2"}},"additionalProperties":true}

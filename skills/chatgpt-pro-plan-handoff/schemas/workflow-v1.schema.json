@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex.chatgpt.pro-plan-handoff/v1",
+  "type": "object",
+  "required": ["schema", "workflow_mode", "workflow_id", "question", "workspace", "context"],
+  "properties": {
+    "schema": {"const": "codex.chatgpt.pro-plan-handoff/v1"},
+    "workflow_mode": {"enum": ["pro-plan-to-gpt-orchestrator", "gpt-comprehensive"]},
+    "workflow_id": {"type": "string", "minLength": 1},
+    "question": {"type": "string", "minLength": 1},
+    "workspace": {
+      "type": "object",
+      "required": ["root", "allowed_write_paths"],
+      "properties": {
+        "root": {"type": "string", "minLength": 1},
+        "handoff_root": {"type": "string"},
+        "chatgpt_app_name": {"type": "string", "minLength": 1},
+        "allowed_write_paths": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "forbidden_paths": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": true
+    },
+    "context": {
+      "type": "object",
+      "required": ["candidate_paths"],
+      "properties": {
+        "candidate_paths": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "policy_paths": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": true
+    },
+    "pro_plan": {"type": "object"},
+    "web_multi_gpt": {"type": "object"},
+    "review": {"type": "object"},
+    "stale_guard": {
+      "type": "object",
+      "properties": {
+        "include_git_head": {"type": "boolean"},
+        "include_dirty_status": {"type": "boolean"},
+        "max_plan_age_seconds": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": true
+    },
+    "output_dir": {"type": "string"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"workflow_mode": {"const": "gpt-comprehensive"}}},
+      "then": {
+        "properties": {
+          "workspace": {"required": ["chatgpt_app_name"]}
+        }
+      }
+    }
+  ],
+  "not": {"required": ["runtime_run_identity"]},
+  "additionalProperties": true
+}

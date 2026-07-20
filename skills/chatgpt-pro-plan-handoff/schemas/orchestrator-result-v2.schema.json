@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex.chatgpt.orchestrator-result/v2",
+  "type": "object",
+  "required": ["schema", "workflow_id", "stage", "attempt_index", "nonce", "question_sha256", "source_snapshot_sha256", "input_plan_sha256", "input_research_descriptor_sha256", "input_advisory_descriptor_sha256", "input_review_sha256", "status", "changed_files", "commands", "blockers"],
+  "properties": {
+    "schema": {"const": "codex.chatgpt.orchestrator-result/v2"},
+    "workflow_id": {"type": "string", "minLength": 1},
+    "stage": {"const": "gpt-orchestrator"},
+    "attempt_index": {"const": 1},
+    "nonce": {"type": "string", "minLength": 16},
+    "question_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_snapshot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "input_plan_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "input_research_descriptor_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "input_advisory_descriptor_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "input_review_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "status": {"enum": ["complete", "blocked", "stale-or-conflicted"]},
+    "changed_files": {"type": "array", "items": {"type": "string"}},
+    "commands": {"type": "array", "items": {"type": "string"}},
+    "blockers": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}

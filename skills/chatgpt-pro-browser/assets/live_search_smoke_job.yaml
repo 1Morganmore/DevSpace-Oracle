@@ -1,0 +1,16 @@
+question: "Reply with exactly one short line."
+files: []
+output_dir: "./reports/chatgpt-pro-live"
+output_name: "chatgpt-pro-live-search-smoke"
+formats:
+  - "md"
+chat_url: "https://chatgpt.com/"
+mode_label: "Pro"
+search_enabled: true
+browser_channel: "chrome"
+auto_launch_debug_browser: true
+close_existing_profile_browser: false
+cdp_port: 9222
+login_wait_seconds: 180
+headless: false
+timeout_seconds: 600
