@@ -510,6 +510,43 @@ def _plain_assistant_answer(page_text: str) -> str | None:
     return answer or None
 
 
+def _terminal_visible_assistant_answer(page_text: str) -> str | None:
+    """Extract a completed answer from ChatGPT's visible-text layout.
+
+    ``agbrowse text`` does not always prefix the assistant block with
+    ``ChatGPT said:``.  Completed thinking responses do expose a stable
+    elapsed-work line immediately before the answer and sources/footer
+    controls immediately after it.
+    """
+    lines = [line.rstrip() for line in str(page_text or "").splitlines()]
+    start_indexes: list[int] = []
+    elapsed_patterns = (
+        re.compile(r"^\s*\d+(?:\s*[hms]\s*\d*)*\s*동안\s*(?:처리함|작업함|생각함)\s*$", re.IGNORECASE),
+        re.compile(r"^\s*(?:Thought|Worked|Reasoned)\s+for\s+\d+.*$", re.IGNORECASE),
+    )
+    for index, line in enumerate(lines):
+        if any(pattern.fullmatch(line) for pattern in elapsed_patterns):
+            start_indexes.append(index)
+    if not start_indexes:
+        return None
+
+    start = start_indexes[-1] + 1
+    terminal_markers = {
+        "출처",
+        "Sources",
+        "응답 작업",
+        "ChatGPT는 실수를 할 수 있습니다. 중요한 정보는 재차 확인하세요.",
+        "ChatGPT can make mistakes. Check important info.",
+    }
+    end = len(lines)
+    for index in range(start, len(lines)):
+        if lines[index].strip() in terminal_markers:
+            end = index
+            break
+    answer = "\n".join(lines[start:end]).strip()
+    return answer or None
+
+
 def _web_multi_assistant_answer(page_text: str) -> str | None:
     """Extract one complete Web Multi payload from visible ChatGPT text."""
     start_marker = "<<<WEB_MULTI_HEADER_V1>>>"
@@ -2814,6 +2851,165 @@ class Bridge:
         completed = self.runner(command, env, timeout)
         return completed, self._evidence(run_dir, name, completed)
 
+    def _recover_exact_bound_url_terminal(
+        self,
+        run_dir: str,
+        *,
+        doctor_evidence: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Capture a completed exact doctor-bound conversation without another session poll."""
+        state_file, record = self.store.load(run_dir)
+        conversation_url = str(record.get("conversation_url") or "")
+        target_id = str(record.get("current_target_id") or "")
+        if (
+            record.get("phase") not in {"URL_BOUND", "RESPONSE_IN_PROGRESS", "RECOVERING"}
+            or not target_id
+            or not STATE.CANONICAL_CHAT_RE.fullmatch(conversation_url)
+        ):
+            return record
+
+        manifest = _load_manifest(record)
+        executable = record_executable(record)
+        env = bridge_env(manifest)
+        try:
+            switched, switch_evidence = self._run_recovery_command(
+                run_dir=state_file.parent,
+                name="exact-url-terminal-switch",
+                command=[executable, "tab-switch", target_id, "--json"],
+                env=env,
+                timeout=30,
+            )
+            active, active_evidence = self._run_recovery_command(
+                run_dir=state_file.parent,
+                name="exact-url-terminal-active",
+                command=[executable, "active-tab", "--json"],
+                env=env,
+                timeout=30,
+            )
+            status_completed, status_evidence = self._run_recovery_command(
+                run_dir=state_file.parent,
+                name="exact-url-terminal-status",
+                command=[
+                    executable,
+                    "web-ai",
+                    "status",
+                    "--vendor",
+                    "chatgpt",
+                    "--url",
+                    conversation_url,
+                    "--json",
+                ],
+                env=env,
+                timeout=60,
+            )
+            snapshot_completed, snapshot_evidence = self._run_recovery_command(
+                run_dir=state_file.parent,
+                name="exact-url-terminal-snapshot",
+                command=[executable, "web-ai", "snapshot", "--vendor", "chatgpt", "--json"],
+                env=env,
+                timeout=60,
+            )
+            text_completed, text_evidence = self._run_recovery_command(
+                run_dir=state_file.parent,
+                name="exact-url-terminal-text",
+                command=[executable, "text"],
+                env=env,
+                timeout=60,
+            )
+        except Exception:
+            # The exact-session poll remains the conservative fallback when
+            # public read-only page inspection is temporarily unavailable.
+            return self.store.load(run_dir)[1]
+
+        if any(
+            completed.returncode != 0
+            for completed in (switched, active, status_completed, snapshot_completed, text_completed)
+        ):
+            return self.store.load(run_dir)[1]
+        try:
+            active_payload = _json_output(active.stdout)
+            status_payload = _json_output(status_completed.stdout)
+            snapshot_payload = _json_output(snapshot_completed.stdout)
+        except BridgeError:
+            return self.store.load(run_dir)[1]
+
+        active_target = str(active_payload.get("targetId") or active_payload.get("target_id") or "")
+        active_url = str(active_payload.get("url") or active_payload.get("tab", {}).get("url") or "")
+        try:
+            active_url = STATE.canonical_conversation_url(active_url)
+        except STATE.StateError:
+            return self.store.load(run_dir)[1]
+        if active_target != target_id or active_url != conversation_url:
+            return self.store.load(run_dir)[1]
+
+        page_text = text_completed.stdout or ""
+        answer = (
+            _web_multi_assistant_answer(page_text)
+            or _plain_assistant_answer(page_text)
+            or _terminal_visible_assistant_answer(page_text)
+            or _web_multi_assistant_answer(str(snapshot_payload.get("text") or ""))
+            or _plain_assistant_answer(str(snapshot_payload.get("text") or ""))
+            or _terminal_visible_assistant_answer(str(snapshot_payload.get("text") or ""))
+        )
+        streaming = _streaming_state(status_payload)
+        if streaming is not False or not answer:
+            return self.store.load(run_dir)[1]
+
+        command_evidence = {
+            "doctor": sanitize_evidence(dict(doctor_evidence or {})),
+            "switch": switch_evidence,
+            "active": active_evidence,
+            "status": status_evidence,
+            "snapshot": snapshot_evidence,
+            "text": text_evidence,
+        }
+        terminal_error = provider_terminal_error_ui(answer)
+        if terminal_error is not None:
+            return self._record_provider_terminal_failure(
+                run_dir,
+                answer_text=answer,
+                provider_status="exact-url-adjudicated-terminal",
+                command_evidence=command_evidence,
+                detection=terminal_error,
+            )
+
+        answer_path = state_file.parent / "answer.md"
+        answer_path.write_text(answer.rstrip() + "\n", encoding="utf-8")
+        descriptor = {
+            "path": str(answer_path),
+            "sha256": STATE.sha256_file(answer_path),
+            "bytes": answer_path.stat().st_size,
+            "provider_status": "exact-url-adjudicated-terminal",
+            "evidence": command_evidence,
+        }
+        adjudication_path = state_file.parent / "exact-url-adjudication.json"
+        write_json_atomic(
+            adjudication_path,
+            sanitize_evidence(
+                {
+                    "schema": "codex.chatgpt.exact-url-adjudication/v1",
+                    "run_id": record["run_id"],
+                    "session_id": record.get("session_id"),
+                    "target_id": target_id,
+                    "conversation_url": conversation_url,
+                    "streaming": False,
+                    "answer": descriptor,
+                    "evidence": command_evidence,
+                }
+            ),
+        )
+        self.store.transition(run_dir, "RESULT_CAPTURED", result=descriptor)
+        self.store.transition(run_dir, "VERIFIED")
+        return self.store.transition(
+            run_dir,
+            "COMPLETE",
+            recovery_event={
+                "kind": "exact-url-adjudication-complete",
+                "adjudication_evidence": str(adjudication_path),
+                "adjudication_sha256": STATE.sha256_file(adjudication_path),
+            },
+        )
+
     def _recovery_tabs(
         self,
         *,
@@ -4354,8 +4550,40 @@ class Bridge:
             except BridgeError as exc:
                 payload = {"ok": False, "status": "doctor-json-invalid", "error": exc.envelope()}
             envelope = normalize_envelope(payload)
-            url = envelope.get("conversation_url") or record.get("conversation_url")
-            target_id = str(envelope.get("target_id") or "") or record.get("current_target_id")
+            doctor_url = str(envelope.get("conversation_url") or "")
+            saved_url = str(record.get("conversation_url") or "")
+            doctor_canonical = (
+                STATE.canonical_conversation_url(doctor_url)
+                if STATE.CANONICAL_CHAT_RE.fullmatch(doctor_url)
+                else ""
+            )
+            saved_canonical = (
+                STATE.canonical_conversation_url(saved_url)
+                if STATE.CANONICAL_CHAT_RE.fullmatch(saved_url)
+                else ""
+            )
+            if doctor_canonical and saved_canonical and doctor_canonical != saved_canonical:
+                return self.store.transition(
+                    run_dir,
+                    "BLOCKED_TARGET_AMBIGUOUS",
+                    block_code="RECOVERY_DOCTOR_CANONICAL_URL_MISMATCH",
+                    recovery_event={
+                        "kind": "doctor-canonical-url-mismatch",
+                        "doctor_url": doctor_canonical,
+                        "saved_url": saved_canonical,
+                        "evidence": doctor_evidence,
+                    },
+                )
+            # A rebooted/stale session doctor may report the ChatGPT root
+            # composer.  It must never displace an already persisted exact
+            # conversation identity.
+            url = saved_canonical or doctor_canonical
+            doctor_target_id = str(envelope.get("target_id") or "")
+            target_id = (
+                record.get("current_target_id")
+                if saved_canonical and not doctor_canonical
+                else doctor_target_id or record.get("current_target_id")
+            )
             if envelope["ok"] and url and STATE.CANONICAL_CHAT_RE.fullmatch(str(url)):
                 live_target_evidence: dict[str, Any] | None = None
                 try:
@@ -4416,7 +4644,7 @@ class Bridge:
                             )
                 except BridgeError:
                     live_target_evidence = None
-                return self._bind_conversation_url(
+                bound = self._bind_conversation_url(
                     run_dir,
                     conversation_url=str(url),
                     target_id=str(target_id) if target_id else None,
@@ -4426,6 +4654,12 @@ class Bridge:
                         "evidence": doctor_evidence,
                         "live_target": live_target_evidence,
                     },
+                )
+                if bound.get("phase") == "BLOCKED_TARGET_AMBIGUOUS":
+                    return bound
+                return self._recover_exact_bound_url_terminal(
+                    run_dir,
+                    doctor_evidence=doctor_evidence,
                 )
             doctor_evidence = {"command_evidence": doctor_evidence, "envelope": sanitize_evidence(envelope)}
         return self._recover_from_history(

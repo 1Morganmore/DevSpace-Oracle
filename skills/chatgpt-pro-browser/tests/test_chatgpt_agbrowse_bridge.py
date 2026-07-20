@@ -1621,6 +1621,118 @@ def test_recovery_doctor_rebinds_only_saved_canonical_url(tmp_path: Path):
     assert recovered["conversation_url"] == "https://chatgpt.com/c/c1"
 
 
+def test_recovery_doctor_captures_completed_exact_url_without_second_poll(tmp_path: Path):
+    commands: list[list[str]] = []
+    mode = {"recovery": False}
+
+    def runner(command, env, timeout):
+        commands.append(command)
+        if not mode["recovery"]:
+            return completed(
+                {
+                    "ok": True,
+                    "status": "sent",
+                    "sessionId": "session-stale-poll",
+                    "targetId": "target-exact",
+                    "conversationUrl": "https://chatgpt.com/c/exact-complete",
+                }
+            )
+        if command[1:] == ["tabs", "--json"]:
+            return raw_completed(
+                json.dumps(
+                    [
+                        {
+                            "targetId": "target-exact",
+                            "url": "https://chatgpt.com/c/exact-complete",
+                            "type": "page",
+                        }
+                    ]
+                )
+            )
+        if command[1:3] == ["web-ai", "sessions"]:
+            return completed(
+                {
+                    "ok": True,
+                    "status": "reattached",
+                    "sessionId": "session-stale-poll",
+                    "targetId": "stale-root-target",
+                    "conversationUrl": "https://chatgpt.com/",
+                }
+            )
+        if command[1] == "tab-switch":
+            return raw_completed("ok")
+        if command[1:] == ["active-tab", "--json"]:
+            return completed(
+                {
+                    "ok": True,
+                    "targetId": "target-exact",
+                    "url": "https://chatgpt.com/c/exact-complete",
+                }
+            )
+        if command[1:3] == ["web-ai", "status"]:
+            return completed(
+                {
+                    "ok": True,
+                    "status": "ready",
+                    "url": "https://chatgpt.com/c/exact-complete",
+                    "capabilities": [
+                        {
+                            "capabilityId": "chatgpt-response-streaming",
+                            "state": "ok",
+                            "evidence": {"streaming": False},
+                        }
+                    ],
+                }
+            )
+        if command[1:3] == ["web-ai", "snapshot"]:
+            return completed({"snapshotId": "snapshot-exact", "text": "final exact answer"})
+        if command[1] == "text":
+            return raw_completed(
+                "prompt-run-owned.txt\n"
+                "더 보기\n"
+                "87m 33s 동안 처리함\n"
+                "CODEX_EXECUTION_SUMMARY\n\n"
+                "final exact answer\n\n"
+                "출처\n"
+                "ChatGPT는 실수를 할 수 있습니다. 중요한 정보는 재차 확인하세요."
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+    bridge, record = prepared_bridge(tmp_path, runner)
+    run_dir = record["run_dir"]
+    bridge.send(run_dir)
+    bridge.store.transition(run_dir, "RECOVERY_REQUIRED", recovery_event={"kind": "stale-poll"})
+    mode["recovery"] = True
+
+    recovered = bridge.recover(run_dir)
+
+    assert recovered["phase"] == "COMPLETE"
+    assert recovered["result"]["provider_status"] == "exact-url-adjudicated-terminal"
+    assert Path(recovered["result"]["path"]).read_text(encoding="utf-8").strip() == (
+        "CODEX_EXECUTION_SUMMARY\n\nfinal exact answer"
+    )
+    assert Path(run_dir, "exact-url-adjudication.json").is_file()
+    assert not any(command[1:3] == ["web-ai", "poll"] for command in commands)
+
+
+def test_terminal_visible_answer_without_chatgpt_said_label():
+    page_text = (
+        "prompt-run-owned.txt\n"
+        "더 보기\n"
+        "87m 33s 동안 처리함\n"
+        "CODEX_EXECUTION_SUMMARY\n\n"
+        "status: COMPLETE\n"
+        "files: 3\n\n"
+        "출처\n"
+        "ChatGPT는 실수를 할 수 있습니다. 중요한 정보는 재차 확인하세요.\n"
+        "매우 높음\n"
+    )
+
+    assert BRIDGE._terminal_visible_assistant_answer(page_text) == (
+        "CODEX_EXECUTION_SUMMARY\n\nstatus: COMPLETE\nfiles: 3"
+    )
+
+
 def test_run_owned_prompt_alias_is_unique_hashed_and_used_for_send(tmp_path: Path):
     bridge, record = prepared_bridge(tmp_path, lambda *_: completed({"ok": True}))
     manifest = BRIDGE.STATE.load_manifest(Path(record["manifest_path"]))
