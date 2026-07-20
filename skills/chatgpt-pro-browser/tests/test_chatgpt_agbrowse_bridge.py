@@ -1713,6 +1713,57 @@ def test_recovery_doctor_captures_completed_exact_url_without_second_poll(tmp_pa
     )
     assert Path(run_dir, "exact-url-adjudication.json").is_file()
     assert not any(command[1:3] == ["web-ai", "poll"] for command in commands)
+    assert not any(command[1:3] == ["web-ai", "sessions"] for command in commands)
+
+
+def test_poll_captures_completed_exact_url_before_long_session_poll(tmp_path: Path):
+    commands: list[list[str]] = []
+
+    def runner(command, env, timeout):
+        commands.append(command)
+        if command[1:3] == ["web-ai", "send"]:
+            return completed(
+                {
+                    "ok": True,
+                    "status": "sent",
+                    "sessionId": "stale-session",
+                    "targetId": "exact-target",
+                    "conversationUrl": "https://chatgpt.com/c/already-finished",
+                }
+            )
+        if command[1:] == ["tabs", "--json"]:
+            return raw_completed(json.dumps([{"targetId": "exact-target", "url": "https://chatgpt.com/c/already-finished"}]))
+        if command[1] == "tab-switch":
+            return raw_completed("ok")
+        if command[1:] == ["active-tab", "--json"]:
+            return completed({"targetId": "exact-target", "url": "https://chatgpt.com/c/already-finished"})
+        if command[1:3] == ["web-ai", "status"]:
+            return completed(
+                {
+                    "ok": True,
+                    "capabilities": [
+                        {
+                            "capabilityId": "chatgpt-response-streaming",
+                            "evidence": {"streaming": False},
+                        }
+                    ],
+                }
+            )
+        if command[1:3] == ["web-ai", "snapshot"]:
+            return completed({"text": "3m 10s 동안 처리함\nFINAL_RESULT\nfinished"})
+        if command[1] == "text":
+            return raw_completed("prompt-owned.txt\n더 보기\n3m 10s 동안 처리함\nFINAL_RESULT\nfinished\n출처\nChatGPT는 실수를 할 수 있습니다.")
+        raise AssertionError(f"unexpected command: {command}")
+
+    bridge, record = prepared_bridge(tmp_path, runner)
+    run_dir = record["run_dir"]
+    bridge.send(run_dir)
+    bridge.store.transition(run_dir, "RECOVERY_REQUIRED", recovery_event={"kind": "stale-poll"})
+
+    done = bridge.poll(run_dir, timeout_seconds=14400)
+
+    assert done["phase"] == "COMPLETE"
+    assert not any(command[1:3] == ["web-ai", "poll"] for command in commands)
 
 
 def test_terminal_visible_answer_without_chatgpt_said_label():

@@ -1358,6 +1358,25 @@ class Bridge:
                 f"run is already terminal in phase {record.get('phase')}",
             )
 
+        # A stop request must not enter the heavier abandonment protocol when
+        # the exact conversation has already finished.  One direct exact-URL
+        # adjudication captures the answer, releases the lock, and performs
+        # the normal owned-tab cleanup.
+        if record.get("conversation_url") and record.get("phase") in {
+            "SEND_STARTED",
+            "RECOVERY_REQUIRED",
+            "RESPONSE_IN_PROGRESS",
+            "SUBMISSION_UNCERTAIN_IDENTITY_MISSING",
+            "BLOCKED_RECOVERY_EXHAUSTED",
+        }:
+            if record.get("phase") != "RECOVERING":
+                self.store.transition(run_dir, "RECOVERING")
+            direct = self._try_exact_url_terminal_now(run_dir)
+            if direct.get("phase") == "COMPLETE":
+                self.cleanup_completed(run_dir, explicit_user_request=False)
+                return self.store.load(run_dir)[1]
+            state_file, record = self.store.load(run_dir)
+
         authorization = {
             "schema": "codex.chatgpt.user-stop-authorization/v1",
             "explicit_user_request": True,
@@ -3515,6 +3534,62 @@ class Bridge:
         completed = self.runner(command, env, timeout)
         return completed, self._evidence(run_dir, name, completed)
 
+    def _try_exact_url_terminal_now(
+        self,
+        run_dir: str,
+        *,
+        tabs: list[dict[str, Any]] | None = None,
+        tabs_evidence: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Finish an exact, uniquely live conversation before waiting on stale session state."""
+        state_file, record = self.store.load(run_dir)
+        saved_url = str(record.get("conversation_url") or "")
+        if not STATE.CANONICAL_CHAT_RE.fullmatch(saved_url):
+            return record
+        canonical = STATE.canonical_conversation_url(saved_url)
+        manifest = _load_manifest(record)
+        executable = record_executable(record)
+        if tabs is None:
+            try:
+                tabs, tabs_evidence = self._recovery_tabs(
+                    run_dir=state_file.parent,
+                    name="exact-url-tabs",
+                    executable=executable,
+                    env=bridge_env(manifest),
+                )
+            except BridgeError:
+                return record
+        matches: list[dict[str, Any]] = []
+        for tab in tabs:
+            try:
+                if STATE.canonical_conversation_url(_tab_url(tab)) == canonical:
+                    matches.append(tab)
+            except STATE.StateError:
+                continue
+        if len(matches) != 1 or not _tab_id(matches[0]):
+            return record
+        target_id = _tab_id(matches[0])
+        if record.get("phase") == "SUBMITTED" or target_id != str(record.get("current_target_id") or ""):
+            record = self._bind_conversation_url(
+                run_dir,
+                conversation_url=canonical,
+                target_id=target_id,
+                rebind_reason="unique-exact-url-terminal-preflight",
+                recovery_event={
+                    "kind": "unique-exact-url-terminal-preflight",
+                    "tabs_evidence": sanitize_evidence(dict(tabs_evidence or {})),
+                },
+            )
+            if record.get("phase") == "BLOCKED_TARGET_AMBIGUOUS":
+                return record
+        return self._recover_exact_bound_url_terminal(
+            run_dir,
+            doctor_evidence={
+                "kind": "unique-exact-url-terminal-preflight",
+                "tabs_evidence": sanitize_evidence(dict(tabs_evidence or {})),
+            },
+        )
+
     def _recover_exact_bound_url_terminal(
         self,
         run_dir: str,
@@ -5083,6 +5158,14 @@ class Bridge:
             record = self.store.transition(run_dir, "RECOVERING")
         if record["phase"] not in {"SUBMITTED", "URL_BOUND", "RESPONSE_IN_PROGRESS", "RECOVERING"}:
             raise BridgeError("POLL_PHASE_INVALID", f"poll not allowed in phase {record['phase']}")
+        # A completed exact URL is stronger evidence than a stale/crashed
+        # session command.  Settle it immediately instead of waiting for the
+        # configured (often hours-long) poll timeout.
+        if record.get("conversation_url") and record.get("phase") == "RECOVERING":
+            direct = self._try_exact_url_terminal_now(run_dir)
+            if direct.get("phase") in {"COMPLETE", "PROVIDER_FAILED_TERMINAL", "BLOCKED_TARGET_AMBIGUOUS"}:
+                return direct
+            _, record = self.store.load(run_dir)
         manifest = _load_manifest(record)
         executable = record_executable(record)
         timeout = int(timeout_seconds or manifest.get("timeout_seconds") or 1800)
@@ -5196,6 +5279,15 @@ class Bridge:
             known_preexisting_target_ids = {_tab_id(tab) for tab in pre_doctor_tabs if _tab_id(tab)}
         except BridgeError:
             known_preexisting_target_ids = set()
+        # The persisted canonical URL is the shortest recovery authority.  If
+        # it has one live match and is already terminal, capture it and finish
+        # before doctor/history or any stale command timeout is consulted.
+        direct = self._try_exact_url_terminal_now(
+            run_dir,
+            tabs=pre_doctor_tabs if "pre_doctor_tabs" in locals() else None,
+        )
+        if direct.get("phase") in {"COMPLETE", "PROVIDER_FAILED_TERMINAL", "BLOCKED_TARGET_AMBIGUOUS"}:
+            return direct
         doctor_evidence: dict[str, Any] | None = None
         if record.get("session_id"):
             command = [
