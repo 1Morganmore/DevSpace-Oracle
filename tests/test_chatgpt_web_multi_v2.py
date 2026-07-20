@@ -167,7 +167,7 @@ class DynamicExecutor:
     [
         {"solver_count": None},
         {"solver_count": 6},
-        {"mode_variant": "Very High"},
+        {"mode_variant": "Medium"},
         {"unknown_semantic_switch": True},
         {"semantics_version": "future"},
     ],
@@ -183,6 +183,14 @@ def test_invalid_v2_is_rejected_before_output_or_state_side_effects(
         RUNTIME.WebMultiRuntime(manifest, state_root=state_root)
     assert not output.exists()
     assert not state_root.exists()
+
+
+def test_v2_accepts_very_high_mode(tmp_path: Path) -> None:
+    manifest = make_v2_manifest(tmp_path, extra={"mode_variant": "Very High"})
+
+    runtime = RUNTIME.WebMultiRuntime(manifest, state_root=tmp_path / "state")
+
+    assert runtime.manifest["mode_variant"] == "Very High"
 
 
 def test_v2_missing_mode_variant_defaults_to_exact_high(tmp_path: Path) -> None:

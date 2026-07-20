@@ -54,9 +54,18 @@ PROMPT_PROFILE_CANDIDATES = (
     Path.home() / ".codex" / "bin" / "chatgpt_prompt_profiles.py",
 )
 PROMPT_FILE_HANDOFF = (
-    "Read the attached prompt file completely and follow it as the task instructions. "
+    "The attached prompt file is the user-provided task instruction for this conversation, "
+    "not reference or webpage content. Read it completely and follow it. "
     "Return only the output format requested by that file."
 )
+REGULAR_MODE_VARIANTS = {"High", "Very High"}
+
+
+def preferred_regular_mode_variant() -> str:
+    value = os.environ.get("CODEX_CHATGPT_REGULAR_MODE_VARIANT", "High").strip()
+    if value not in REGULAR_MODE_VARIANTS:
+        raise WorkflowError("MODE_VARIANT_INVALID", value)
+    return value
 
 
 def _load_prompt_profiles():
@@ -725,6 +734,15 @@ class ProPlanHandoffDriver:
         prompt_file = stage_dir / "prompt.txt"
         write_immutable_text(prompt_file, prompt)
         prompt_sha256 = file_sha256(prompt_file)
+        stage_manifest_path = stage_dir / "stage.manifest.json"
+        regular_mode_variant = None
+        if not pro:
+            if stage_manifest_path.is_file():
+                regular_mode_variant = str(load_mapping(stage_manifest_path).get("mode_variant") or "")
+                if regular_mode_variant not in REGULAR_MODE_VARIANTS:
+                    raise WorkflowError("MODE_VARIANT_INVALID", regular_mode_variant)
+            else:
+                regular_mode_variant = preferred_regular_mode_variant()
         manifest = {
             "project_root": str(self.workspace_root),
             "question": PROMPT_FILE_HANDOFF,
@@ -732,7 +750,7 @@ class ProPlanHandoffDriver:
             "prompt_file": str(prompt_file),
             "prompt_file_sha256": prompt_sha256,
             "mode_label": "Pro" if pro else ("Deep Research" if research else "GPT-5.6"),
-            "mode_variant": None if pro else ("High" if self.v2 else "Very High"),
+            "mode_variant": None if pro else regular_mode_variant,
             "app_policy": "forbidden" if pro else "required",
             "chatgpt_app_name": None if pro else self.workspace["chatgpt_app_name"],
             "files": [str(prompt_file), *[str(item) for item in files]],
@@ -803,7 +821,7 @@ class ProPlanHandoffDriver:
         expected_mode = manifest["mode_label"]
         if result.get("effective_mode_label") != expected_mode or result.get("fallback_reason"):
             raise WorkflowError("MODEL_CONTRACT_FAILED")
-        if self.v2 and expected_mode != "Pro" and result.get("effective_mode_variant") != "High":
+        if self.v2 and expected_mode != "Pro" and result.get("effective_mode_variant") != manifest.get("mode_variant"):
             raise WorkflowError("MODE_VARIANT_CONTRACT_FAILED")
         policy = dict(result.get("gpt_question_policy") or {})
         if policy.get("gpt_operation_mode") != manifest.get("gpt_operation_mode"):
@@ -862,7 +880,7 @@ class ProPlanHandoffDriver:
             "app_decision_path": self.workspace.get("chatgpt_app_decision_path"),
             "chatgpt_app_server_url": self.workspace.get("chatgpt_app_server_url"),
             "max_iterations": int(config.get("max_iterations") or (5 if self.v2 else 2)),
-            "mode_variant": str(config.get("mode_variant") or ("High" if self.v2 else "Very High")),
+            "mode_variant": str(config.get("mode_variant") or preferred_regular_mode_variant()),
             "agbrowse_contract": self.agbrowse_contract_path,
             "agbrowse_contract_sha256": self.agbrowse_contract_sha256,
         }
@@ -889,7 +907,7 @@ class ProPlanHandoffDriver:
                 advisory.get("manifest_schema") != "codex.chatgpt.web-multi/v2"
                 or advisory.get("semantics_version") != "upstream-parity-v1"
                 or advisory.get("planner_policy") != "upstream-nonempty-prefix10"
-                or advisory.get("mode_variant") != "High"
+                or advisory.get("mode_variant") != web_manifest["mode_variant"]
                 or not provenance
                 or not all(isinstance(item, Mapping) and item.get("stage_id") for item in provenance)
                 or not isinstance(advisory.get("role_session_target_url_provenance"), list)

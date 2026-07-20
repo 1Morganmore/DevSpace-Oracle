@@ -660,6 +660,33 @@ def test_completed_cleanup_skips_valid_terminal_parent_coordinator_without_targe
     assert result["state"] == "closed-and-absent"
 
 
+def test_completed_cleanup_skips_valid_active_parent_and_non_owning_child_summary(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    url = "https://chatgpt.com/c/owned-with-active-parent"
+    owned = write_run(
+        state_root,
+        run_id="run-owned",
+        project_key="project-a",
+        phase="COMPLETE",
+        target_id="T-OWNED",
+        conversation_url=url,
+        session_id="S-OWNED",
+        submission_receipt={"ok": True},
+    )
+    set_complete_result(owned)
+    write_terminal_parent(
+        state_root,
+        phase="PARENT_ACTIVE",
+        phase_events=[{"from": None, "to": "PARENT_ACTIVE", "at": "2026-07-18T00:00:00+00:00"}],
+        child_scan=[{"run_id": "child-1", "phase": "COMPLETE", "cleanup_pending": False, "owned_open_tabs": 1}],
+    )
+    runner = BrowserRunner([{"targetId": "T-OWNED", "url": url, "type": "page"}])
+
+    result = TABS.TabLifecycle(state_root=state_root, runner=runner).close_completed(str(owned))
+
+    assert result["state"] == "closed-and-absent"
+
+
 @pytest.mark.parametrize(
     ("overrides", "target_id", "url"),
     [
@@ -668,15 +695,9 @@ def test_completed_cleanup_skips_valid_terminal_parent_coordinator_without_targe
             "T-OWNED",
             "https://chatgpt.com/c/owned-parent-identity",
         ),
-        ({"phase": "PARENT_ACTIVE"}, "T-OWNED", "https://chatgpt.com/c/owned-parent-active"),
         ({"children": "not-a-list"}, "T-OWNED", "https://chatgpt.com/c/owned-parent-malformed"),
-        (
-            {"child_scan": [{"run_id": "child-1", "phase": "COMPLETE", "cleanup_pending": False, "owned_open_tabs": 1}]},
-            "T-OWNED",
-            "https://chatgpt.com/c/owned-parent-child-tabs",
-        ),
     ],
-    ids=["direct-identity", "active", "malformed", "child-tabs-open"],
+    ids=["direct-identity", "malformed"],
 )
 def test_completed_cleanup_fails_closed_for_nonterminal_or_owning_parent(
     tmp_path: Path, overrides: dict, target_id: str, url: str

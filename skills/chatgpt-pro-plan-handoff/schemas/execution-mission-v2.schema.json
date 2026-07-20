@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex.chatgpt.execution-mission/v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "workflow_id", "parent_run_id", "component_id", "unit_id", "attempt_id", "input_base_oid", "claimed_paths", "test_ids", "topology_receipt_sha256", "instructions"],
+  "properties": {
+    "schema": {"const": "codex.chatgpt.execution-mission/v2"},
+    "workflow_id": {"$ref": "#/$defs/id"},
+    "parent_run_id": {"$ref": "#/$defs/id"},
+    "component_id": {"$ref": "#/$defs/id"},
+    "unit_id": {"$ref": "#/$defs/id"},
+    "attempt_id": {"$ref": "#/$defs/id"},
+    "input_base_oid": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "claimed_paths": {"type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": {"$ref": "#/$defs/path"}},
+    "test_ids": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+    "topology_receipt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "instructions": {"type": "string", "minLength": 1, "maxLength": 2000000}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "path": {"type": "string", "pattern": "^(?!/|[A-Za-z]:|.*(?:^|/)[.][.](?:/|$)|[.]git(?:/|$)).+$", "maxLength": 1024}
+  }
+}

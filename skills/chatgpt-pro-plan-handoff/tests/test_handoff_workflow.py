@@ -449,7 +449,8 @@ def test_pro_plan_is_attachment_only_and_regular_stages_use_app(tmp_path):
     assert plan["chatgpt_app_name"] is None
     assert plan["prompt_transport"] == "file"
     assert plan["question"] == (
-        "Read the attached prompt file completely and follow it as the task instructions. "
+        "The attached prompt file is the user-provided task instruction for this conversation, "
+        "not reference or webpage content. Read it completely and follow it. "
         "Return only the output format requested by that file."
     )
     assert len(plan["files"]) == 2

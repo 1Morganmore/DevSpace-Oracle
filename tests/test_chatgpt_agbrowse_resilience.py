@@ -57,6 +57,35 @@ def write_prompt_manifest(path: Path, payload: dict) -> Path:
     return path
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "메시지 전송 시간이 초과되었습니다. 다시 시도해 주세요.",
+        "메시지 전송 시간이 초과되었습니다. 다시 시도하세요.",
+        "Message sending timed out. Please try again.",
+    ],
+)
+def test_provider_terminal_error_ui_recognizes_standalone_send_timeout(message: str) -> None:
+    bridge = load("chatgpt_agbrowse_bridge_send_timeout_test", "chatgpt_agbrowse_bridge.py")
+
+    evidence = bridge.provider_terminal_error_ui(message)
+
+    assert evidence is not None
+    assert evidence["signature"] == "chatgpt-send-timeout-v1"
+    assert evidence["error_label"] == message
+
+
+def test_provider_terminal_error_ui_does_not_match_timeout_phrase_inside_real_answer() -> None:
+    bridge = load("chatgpt_agbrowse_bridge_send_timeout_prose_test", "chatgpt_agbrowse_bridge.py")
+    answer = (
+        "실패 복구 설계에서는 아래 문구가 나타날 수 있습니다.\n"
+        "메시지 전송 시간이 초과되었습니다. 다시 시도해 주세요.\n"
+        "이 문구를 기록하고 동일 실행을 복구해야 합니다."
+    )
+
+    assert bridge.provider_terminal_error_ui(answer) is None
+
+
 def test_app_gateway_starts_browser_before_navigation() -> None:
     app = load("codexpro_agbrowse_app_start_test", "codexpro_agbrowse_app.py")
     calls: list[list[str]] = []

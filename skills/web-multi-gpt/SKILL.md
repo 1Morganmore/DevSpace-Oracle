@@ -16,7 +16,6 @@ The compatibility topology remains stable for persisted v1/v2 recovery, but new 
 Every node is a fresh regular ChatGPT conversation. Do not replace it with one conversation that role-plays several agents.
 
 - `app_policy` is always `required` for every node.
-- ChatGPT Developer Mode is a workflow prerequisite. If the current account/workspace cannot expose the exact custom app creation surface, report the setup path `Settings > Apps > Advanced settings > Developer mode` (or the admin/owner workspace-app path) and stop before creating any child conversation.
 - Each node attaches its own `prompt.txt` exactly once and no source file or source ZIP.
 - The selected CodexPro app reads immutable source and prior-stage paths.
 - Pro is forbidden inside this workflow. Pro remains attachment-only under its own skill.
@@ -56,16 +55,17 @@ The default compatibility manifest schema remains `codex.chatgpt.web-multi/v1`. 
 - `max_iterations` in `1..5` (default `2`)
 - `provider_failure_retry_limit` in `0..2` (default `1`)
 
-V1 retains `mode_variant: Very High` by default; `High` remains available for its frozen comparison arm. V2 upstream-parity manifests require the exact value `mode_variant: High`; `Very High` is rejected before any output, state, app, or browser side effect.
+V1 retains `mode_variant: Very High` by default; `High` remains available for its frozen comparison arm. V2 upstream-parity manifests accept the exact values `High` and `Very High`, with `High` retained as the default when omitted. Any other value is rejected before any output, state, app, or browser side effect.
 
 For an opt-in dynamic upstream-parity run, use schema `codex.chatgpt.web-multi/v2` with the same common required fields plus:
 
 - `semantics_version: upstream-parity-v1`
 - `planner_policy: upstream-nonempty-prefix10` for literal nonempty-prefix-10 acceptance, or `strict-6-10` for the operating policy that requires 6 through 10 approaches
-- exact `mode_variant: High`
+- exact `mode_variant: High` or `mode_variant: Very High` (default `High` when omitted)
+- optional `agbrowse_contract_sha256`, exactly 64 lowercase hexadecimal characters matching the SHA-256 of the resolved `agbrowse_contract` file; when omitted, the existing contract-resolution compatibility path remains supported
 - no `solver_count` key at all, including `null`
 
-V2 uses an exact top-level allowlist and is compiled before output directories, RunStore, parent locks, child artifacts, app checks, or browser targets can be created. The accepted Planner result owns one immutable descriptor containing the observed count, retained ordered approaches, actual count, source payload hash, and descriptor hash. Do not infer topology from child counts, open tabs, capacity pressure, or a manifest field.
+V2 uses an exact top-level allowlist, including the optional `agbrowse_contract_sha256` binding, and is compiled before output directories, RunStore, parent locks, child artifacts, app checks, or browser targets can be created. A supplied contract hash is shape-checked and matched against the resolved contract file before those side effects. The accepted Planner result owns one immutable descriptor containing the observed count, retained ordered approaches, actual count, source payload hash, and descriptor hash. Do not infer topology from child counts, open tabs, capacity pressure, or a manifest field.
 
 V1 remains byte-compatible: omitted `solver_count` means 3 and explicit values remain 2, 3, or 4. Do not silently upgrade a v1 manifest to v2.
 
@@ -105,6 +105,8 @@ V1 remains byte-compatible: omitted `solver_count` means 3 and explicit values r
 - Ambiguity becomes cleanup-pending. Never use broad tab cleanup.
 - Active, uncertain, manual, sibling, and foreign tabs are protected.
 - Parent completion or failed-closed release requires no unresolved sends, no cleanup-pending child, and `owned_open_tabs=0`.
+- An explicit stop of a submitted child is a parent-owned drain, never a child lock release. It publishes one immutable parent/child authorization, moves the parent and exact lock to `USER_STOP_REQUESTED`, and blocks child creation, resume, recovery, retry, and every new send.
+- Retry a pending stop only with `chatgpt_agbrowse_bridge.py confirm-user-stop --run <exact-child-run-dir>`; it accepts no new identity or reason. Polling, blocked, timeout, active helper, URL/target ambiguity, or live owner stays pending. Terminal proof closes only the exact target+canonical URL, then the strict all-child scan may fail-close and unlink the unchanged exact lock.
 
 ## Dispatch Latency
 

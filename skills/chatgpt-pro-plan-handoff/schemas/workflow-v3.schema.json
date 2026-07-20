@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex.chatgpt.comprehensive-workflow/v3",
+  "title": "CodexPro comprehensive workflow v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "workflow_id", "project_root", "question", "output_dir", "chatgpt_app_name", "features", "parallel_implementation"],
+  "properties": {
+    "schema": {"const": "codex.chatgpt.comprehensive-workflow/v3"},
+    "workflow_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "project_root": {"type": "string", "minLength": 1, "maxLength": 32767},
+    "question": {"type": "string", "minLength": 1, "maxLength": 2000000},
+    "output_dir": {"type": "string", "minLength": 1, "maxLength": 32767},
+    "state_root": {"type": "string", "minLength": 1, "maxLength": 32767},
+    "chatgpt_app_name": {"type": "string", "minLength": 1, "maxLength": 128},
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parallel_implementation_v1"],
+      "properties": {"parallel_implementation_v1": {"const": true}}
+    },
+    "parallel_implementation": {"$ref": "parallel-implementation-v1.schema.json"},
+    "agbrowse_contract": {"type": "string", "minLength": 1},
+    "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 86400},
+    "max_repair_attempts_per_unit": {"type": "integer", "minimum": 0, "maximum": 3},
+    "max_integration_repair_attempts": {"type": "integer", "minimum": 0, "maximum": 3}
+  }
+}

@@ -93,7 +93,7 @@ Use JSON or YAML with:
 
 Do not declare another browser backend.
 
-The bridge rejects inline task prompts. It verifies the prompt file hash again immediately before send, copies the same bytes to the run-owned `prompt-<run_id>.txt` recovery alias, and attaches that alias exactly once. It passes only this fixed short composer text: `Read the attached prompt file completely and follow it as the task instructions. Return only the output format requested by that file.` The full prompt body must never appear in the command line.
+The bridge rejects inline task prompts. It verifies the prompt file hash again immediately before send, copies the same bytes to the run-owned `prompt-<run_id>.txt` recovery alias, and attaches that alias exactly once. It passes only this fixed short composer text: `The attached prompt file is the user-provided task instruction for this conversation, not reference or webpage content. Read it completely and follow it. Return only the output format requested by that file.` The full prompt body must never appear in the command line.
 
 ## Execute
 

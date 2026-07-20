@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex.chatgpt.handoff/v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "workflow_id", "canonical_baseline_identity_sha256", "plan_result_sha256", "graph_result_sha256", "test_registry_sha256"],
+  "properties": {
+    "schema": {"const": "codex.chatgpt.handoff/v3"},
+    "workflow_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "canonical_baseline_identity_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "plan_result_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "graph_result_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "test_registry_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "required_unit_ids": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"}}
+  }
+}

@@ -1,5 +1,8 @@
 param(
     [string]$Root = "C:\",
+    [ValidateSet("legacy-drive", "parallel-exact-unit")]
+    [string]$ScopeMode = "legacy-drive",
+    [string]$TopologyBinding = "",
     [int]$Port = 0,
     [string]$Token = "",
     [ValidateSet("auto", "ngrok", "cloudflare")]
@@ -55,7 +58,19 @@ function Stop-OwnedBootstrapProcess {
     }
 }
 
-$decisionArgs = @("--root", $Root)
+if ($ScopeMode -eq "parallel-exact-unit") {
+    throw "EXACT_UNIT_BOOTSTRAP_ENTRYPOINT_REQUIRED: use codexpro_exact_unit_cloudflare_bootstrap.ps1"
+}
+$decisionArgs = @("--root", $Root, "--scope-mode", $ScopeMode)
+if ($ScopeMode -eq "parallel-exact-unit") {
+    if ($TopologyBinding -notmatch "^[0-9a-f]{64}$") {
+        throw "EXACT_UNIT_TOPOLOGY_BINDING_INVALID"
+    }
+    if ($TunnelProvider -notin @("auto", "cloudflare")) {
+        throw "EXACT_UNIT_CLOUDFLARE_REQUIRED"
+    }
+    $decisionArgs += @("--topology-receipt-sha256", $TopologyBinding, "--no-git-root")
+}
 if ($Port -gt 0) { $decisionArgs += @("--port", "$Port") }
 if ($ForceRecreate) { $decisionArgs += "--force-recreate" }
 $decision = Invoke-ManagerJson -ManagerArgs $decisionArgs

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex.chatgpt.parallel-implementation-result/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "summary", "baseline_oid", "integration_head_oid", "unit_dispositions", "full_test_results", "canonical_apply"],
+  "properties": {
+    "schema": {"const": "codex.chatgpt.parallel-implementation-result/v1"},
+    "status": {"enum": ["IMPLEMENTED", "BLOCKED", "RECOVERY_REQUIRED"]},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 20000},
+    "baseline_oid": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "integration_head_oid": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "unit_dispositions": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "object", "additionalProperties": false, "required": ["unit_id", "state"], "properties": {"unit_id": {"$ref": "#/$defs/id"}, "state": {"enum": ["INTEGRATED", "SKIPPED", "FAILED_TERMINAL", "RECOVERY_REQUIRED"]}, "commit_oid": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40,64}$"}}}},
+    "full_test_results": {"type": "array", "maxItems": 128, "items": {"type": "object", "additionalProperties": false, "required": ["test_id", "result"], "properties": {"test_id": {"$ref": "#/$defs/id"}, "result": {"enum": ["PASS", "FAIL", "SKIP"]}}}},
+    "canonical_apply": {"type": "object", "additionalProperties": false, "required": ["performed", "ff_only"], "properties": {"performed": {"type": "boolean"}, "ff_only": {"const": true}, "receipt_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}}},
+    "remaining_risks": {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 20000}},
+    "blocked_conditions": {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 20000}}
+  },
+  "$defs": {"id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"}}
+}

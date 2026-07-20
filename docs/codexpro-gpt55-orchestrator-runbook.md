@@ -1,6 +1,6 @@
 # CodexPro GPT-5.6 Drive-Slot Orchestrator Runbook
 
-This is the global operating runbook for non-Pro GPT-5.6 runs. Each Windows drive has at most one drive-root CodexPro Developer App; projects on that drive share it while each prompt narrows `working_scope`, `allowed_paths`, `forbidden_paths`, and write authority. Distribution installs use dynamic Cloudflare URLs by default. A registered stable CDrive ngrok hostname may be reused locally. The filename retains `gpt55` only to preserve existing references.
+This is the global operating runbook for non-Pro GPT-5.6 runs. Serial v1/v2 and Web Multi advisory work use at most one drive-root CodexPro Developer App per Windows drive; projects on that drive share it while each prompt narrows `working_scope`, `allowed_paths`, `forbidden_paths`, and write authority. Explicit parallel implementation v3 is the sole exception: every child uses a separately attested exact-unit app and Cloudflare tunnel with no drive/home fallback. Distribution installs use dynamic Cloudflare URLs by default. A registered stable CDrive ngrok hostname may be reused locally only for legacy-drive work. The filename retains `gpt55` only to preserve existing references.
 
 ## Normal Path
 
@@ -25,7 +25,7 @@ This is the global operating runbook for non-Pro GPT-5.6 runs. Each Windows driv
    - Open `https://chatgpt.com/#settings/Plugins` only for URL mismatch, app missing, stale permission evidence, corrupted app state, or GPT tool-access failure.
 
 4. Submit GPT-5.6.
-   - Use GPT-5.6 with the requested reasoning level. For new regular-GPT, comprehensive, and Web Multi-GPT v2 work, an unspecified level means exact `High`; never attempt `Very High` and silently downgrade. Historical v1 evidence may retain its recorded variant for recovery only.
+   - Use GPT-5.6 with the requested reasoning level. New regular-GPT work supports explicit `High` and `Very High`; an unspecified regular level remains exact `High`. Deep Research remains High-only. Never attempt one level and silently downgrade. Historical v1 evidence may retain its recorded variant for recovery only.
    - Invoke the confirmed matching-drive app at the start of the composer, then press Tab and verify that ChatGPT resolved it into an app chip before prompt submission. The version may increase only after an authorized URL replacement or force recreation for that drive.
    - This app mention belongs only inside the ChatGPT web composer. Do not use Codex Desktop connector/app cards such as `CodexPro-... open workspace` or `CodexPro-... server config` to run or verify this lane. `codex_apps resources/read failed` means the wrong Codex internal app surface was touched; it is not a valid ChatGPT web CodexPro transport test.
    - Do not present CodexPro connector card labels as executable steps in Codex Desktop. The only normal executable path is the agbrowse bridge and its exact project app transaction; connector-card labels are diagnostic wrong-surface text only.
@@ -36,6 +36,17 @@ This is the global operating runbook for non-Pro GPT-5.6 runs. Each Windows driv
 5. Wait for the live lane.
    - `RESPONSE_IN_PROGRESS`, visible stop/generating state, and `partial-running` DOM recovery are not completion.
    - After restart or interruption, reattach the recorded conversation URL only to recover/reconcile that already-dispatched lane before retrying. Do not use that URL to submit a new follow-up question into the old app conversation.
+
+## Parallel Implementation v3 Path
+
+1. Validate `codex.chatgpt.comprehensive-workflow/v3`, `features.parallel_implementation_v1=true`, and `CODEX_CHATGPT_PARALLEL_IMPLEMENTATION_V1=1` before any state or app side effect.
+2. Run `run_parallel_implementation.py prepare` with the approved implementation graph. The parent captures canonical identity, creates an independent `--no-local --no-hardlinks --no-checkout` staging clone, unions all dependency/conflict edges, and emits one mission for each currently dispatchable component.
+3. Start each child through `codexpro_exact_unit_cloudflare_bootstrap.ps1`. Accept only the exact unit root, singleton allowed roots, bash-off/write-workspace/full-tool server contract, actual listener receipt, separate Cloudflare tunnel receipt, and unchanged topology hash.
+4. Persist `child-send-claim/v2` before provider invocation. A post-send uncertainty is recovered through the exact session/history only; it is never resubmitted. Other healthy components may continue, but a required unresolved unit blocks apply.
+5. Feed the recovered `implementation-unit-result-v1` to `record-unit`. The host verifies staging metadata, actual diff ownership, reparse/gitlink prohibitions, registered tests, and deterministic parentage before advancing the component head.
+6. Run `finalize` only when `status` reports `apply_ready=true`. Finalize integrates sorted component heads, runs full registered tests, revalidates canonical identity before and after temporary-ref import, then performs a single ff-only apply.
+
+Any failure before ff-only apply must leave canonical source unchanged and write recovery evidence under the parent runtime. See `ARCHITECTURE_V3.md` for the complete contract.
 
 ## Stop-Before-Submit Conditions
 

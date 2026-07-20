@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex.chatgpt.implementation-unit-result/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "unit_id", "attempt_id", "input_base_oid", "status", "summary", "changed_paths", "test_results"],
+  "properties": {
+    "schema": {"const": "codex.chatgpt.implementation-unit-result/v1"},
+    "unit_id": {"$ref": "#/$defs/id"},
+    "attempt_id": {"$ref": "#/$defs/id"},
+    "input_base_oid": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "status": {"enum": ["IMPLEMENTED", "NO_CHANGE", "BLOCKED"]},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 20000},
+    "changed_paths": {"type": "array", "maxItems": 256, "uniqueItems": true, "items": {"$ref": "#/$defs/path"}},
+    "test_results": {
+      "type": "array", "maxItems": 128,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["test_id", "result"],
+        "properties": {"test_id": {"$ref": "#/$defs/id"}, "result": {"enum": ["PASS", "FAIL", "SKIP"]}, "detail": {"type": "string", "maxLength": 20000}}
+      }
+    },
+    "blocked_conditions": {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 20000}}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "path": {"type": "string", "pattern": "^(?!/|[A-Za-z]:|.*(?:^|/)[.][.](?:/|$)|[.]git(?:/|$)).+$", "maxLength": 1024}
+  }
+}

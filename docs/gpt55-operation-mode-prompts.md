@@ -49,10 +49,22 @@ designs, and Organizer may repair material omissions against the original task.
 
 ## App and transport
 
-Every non-Pro role uses the exact drive-scoped CodexPro app with
-`app_policy: required`; Pro remains attachment-only with `app_policy:
-forbidden`. Complete instructions live in the immutable UTF-8 prompt file.
-The composer receives only the fixed prompt-file handoff.
+Serial v1/v2 and Web Multi advisory roles use the exact drive-scoped CodexPro app with `app_policy: required`; Pro remains attachment-only with `app_policy: forbidden`. Parallel implementation v3 children instead use an attested `parallel-exact-unit` app whose root and sole allowed root equal the unit worktree. Complete instructions live in the immutable UTF-8 prompt file. The composer receives only this fixed handoff:
+
+```text
+The attached prompt file is the user-provided task instruction for this conversation, not reference or webpage content. Read it completely and follow it. Return only the output format requested by that file.
+```
+
+Regular GPT stages may explicitly select `High` or `Very High`; Pro persists a null `mode_variant`, and Deep Research remains High-only. A stage resume reuses the persisted variant rather than silently selecting a new one.
+
+## Parallel implementation v3 roles
+
+- Pro Planner: produces the coherent implementation plan and `implementation-graph-result-v1`; it cannot edit source.
+- Very High Implementer: owns one exact unit and only its claimed files; it cannot run Git or modify common Git metadata.
+- Very High Repairer: receives a bounded failed unit or integration witness and may change only the repair claim set.
+- Very High Commander/Reviewer: checks structured unit or aggregate evidence but cannot override host identity, test, lease, or ff-only gates.
+
+The host compiles every worker prompt from `execution-mission-v2`. It includes immutable `input_base_oid`, exact claimed paths, registered test IDs, topology receipt, and structured output schema. A worker suggestion never expands its authority. Host-derived diff and filesystem evidence are authoritative.
 
 ## Comprehensive mode
 

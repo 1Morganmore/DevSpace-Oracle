@@ -38,6 +38,7 @@ ChatGPT 웹 자동화를 단순 매크로로 만들면 다음 문제가 반복�
 | 수정 모드 | 작업공간을 읽고 직접 수정·테스트·재수정 | 필수 | 버그 수정, 기능 구현, 문서·설정 변경 |
 | 지휘 모드 | 웹 GPT가 구현 주도권을 갖고 탐색부터 수정·테스트까지 수행 | 필수 | 로컬 Codex 토큰 사용을 최대한 줄이고 싶은 큰 작업 |
 | GPT 종합모드 | 조사 여부 판단 → 계획 → 필요 시 멀티 GPT → 검토 → 수정/구현 → 로컬 검증 | 필수 | 복잡한 기능, 공유 인프라, 공개 배포, 고위험 변경 |
+| 병렬 구현 v3 | 독립 컴포넌트를 격리된 exact-unit 작업공간에서 병렬 구현하고 호스트가 결정론적으로 통합 | exact-unit 전용 | 파일 소유권이 분리되는 대규모 구현 |
 | 웹 멀티 GPT | 여러 새 대화를 병렬로 돌려 독립 제안·정제·병합·판정 | 필수 | 해법 공간이 넓거나 한 GPT의 관점 편향을 줄이고 싶을 때 |
 | 심층 리서치 | 최신 외부 자료를 폭넓게 조사하고 출처 기반 근거 구성 | 필수 | 최신 기술·시장·법률·표준·제품 조사 |
 | Pro | 폭넓은 고난도 판단·설계·리서치 | **금지** | 중요한 전략 판단, 넓은 설계, 어려운 연구 질문 |
@@ -46,7 +47,8 @@ ChatGPT 웹 자동화를 단순 매크로로 만들면 다음 문제가 반복�
 
 - **Pro만 첨부 전용**입니다. Pro에서는 CodexPro 앱을 선택하지 않습니다.
 - **Pro가 아닌 모든 모드에서는 앱이 필수**입니다. 앱이 없거나 URL·권한이 맞지 않으면 질문을 보내지 않습니다.
-- 일반 GPT의 기본 추론 수준은 계정에서 지원되는 `High`입니다.
+- 일반 GPT는 명시적인 `High` 또는 `Very High`를 지원합니다. 심층 리서치는 기존대로 `High`만 사용합니다.
+- 병렬 구현은 workflow v3의 `features.parallel_implementation_v1=true`와 `CODEX_CHATGPT_PARALLEL_IMPLEMENTATION_V1=1`이 모두 있어야 하며, 하나라도 없으면 아무 부작용 없이 차단됩니다.
 - 모드 실패를 이유로 Pro를 일반 GPT로, 또는 일반 GPT를 다른 브라우저 경로로 몰래 바꾸지 않습니다.
 
 ## 각 모드 자세히
@@ -126,6 +128,12 @@ GPT 지휘 모드로 이 기능을 구현하고 테스트까지 완료해줘
 ```text
 GPT 종합모드로 이 프로젝트를 공개 배포 가능한 수준까지 정리해줘
 ```
+
+### 병렬 구현 v3
+
+승인된 구현 그래프를 실제 소스에 적용하는 선택적 실행 모드입니다. 하나의 `parallel-implementation` parent만 canonical 프로젝트 잠금과 staging/finalizer 권한을 가지며, 독립 컴포넌트는 `parallel-runtime-v1/worktrees/u-<24hex>` 아래 exact-unit 작업공간에서만 병렬 실행됩니다. 의존 또는 파일 경로 충돌이 있는 unit은 같은 컴포넌트로 합쳐져 결정론적 순서로 직렬화됩니다.
+
+worker는 Git metadata에 접근하거나 Git 명령을 수행하지 않습니다. 호스트가 실제 diff와 파일 소유권, 등록된 테스트, staging metadata, listener/tunnel/app identity를 검증하고 deterministic commit을 만듭니다. 모든 required unit, component integration, full tests, canonical identity revalidation을 통과한 경우에만 ff-only로 canonical branch를 갱신합니다. 자세한 계약과 복구 규칙은 `docs/ARCHITECTURE_V3.md`를 참조하세요.
 
 ### 웹 멀티 GPT
 

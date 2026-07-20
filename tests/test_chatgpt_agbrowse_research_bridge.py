@@ -125,8 +125,24 @@ def test_restart_retry_consumes_saved_research_evidence_not_app_evidence(tmp_pat
     assert store.confirmed == ("research-target", research_evidence)
 
 
-@pytest.mark.parametrize("variant", ["Very High", "Medium", "Instant", "xhigh"])
-def test_new_regular_non_high_mode_is_rejected_without_fallback(tmp_path: Path, variant: str) -> None:
+@pytest.mark.parametrize("variant", ["Very High", "xhigh", "매우 높음"])
+def test_new_regular_very_high_aliases_select_xhigh_without_fallback(tmp_path: Path, variant: str) -> None:
+    value = manifest(tmp_path, mode_label="GPT-5.6", mode_variant=variant)
+    value.pop("research_selection_transport")
+    value.pop("research_selection_contract")
+
+    command = BRIDGE.build_send_command(
+        {"requested": {"app_policy": "required"}},
+        value,
+        "agbrowse",
+        preselected_app=True,
+    )
+
+    assert command[command.index("--effort") + 1] == "xhigh"
+
+
+@pytest.mark.parametrize("variant", ["Medium", "Instant"])
+def test_new_regular_unsupported_mode_is_rejected_without_fallback(tmp_path: Path, variant: str) -> None:
     value = manifest(tmp_path, mode_label="GPT-5.6", mode_variant=variant)
     value.pop("research_selection_transport")
     value.pop("research_selection_contract")

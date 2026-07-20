@@ -37,6 +37,7 @@ V2_ALLOWED_KEYS = frozenset(
         "max_iterations",
         "mode_variant",
         "agbrowse_contract",
+        "agbrowse_contract_sha256",
         "provider_failure_retry_limit",
         "app_decision_path",
         "chatgpt_app_server_url",
@@ -60,10 +61,14 @@ PROMPT_HANDOFF = (
 )
 CANONICAL_CHAT_RE = re.compile(r"^https://chatgpt\.com/c/[A-Za-z0-9_-]+(?:[?#].*)?$")
 SAFE_COMPONENT_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+LOWER_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 HEADER_BEGIN = "<<<WEB_MULTI_HEADER_V1>>>"
 HEADER_END = "<<<END_WEB_MULTI_HEADER_V1>>>"
 PAYLOAD_BEGIN = "<<<WEB_MULTI_PAYLOAD_V1>>>"
 PAYLOAD_END = "<<<END_WEB_MULTI_PAYLOAD_V1>>>"
+ROLE_MARKER_RE = re.compile(r"<<<(?:END_)?[A-Z][A-Z0-9_]*>>>")
+MAX_V2_PLANNER_QUOTE_REPAIRS = 2
+MAX_V2_PLANNER_PAYLOAD_BYTES = 65_536
 
 
 def _load_module(name: str, path: Path):
@@ -178,6 +183,290 @@ def _repair_invalid_json_escapes(text: str) -> tuple[str, list[int]]:
         repaired_offsets.append(index)
         index += 1
     return "".join(output), repaired_offsets
+
+
+class _DuplicateJsonKey(ValueError):
+    pass
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _DuplicateJsonKey(key)
+        value[key] = item
+    return value
+
+
+def _strict_json_loads(text: str) -> Any:
+    return json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
+
+
+def _json_string_context(text: str, quote_offset: int) -> tuple[str, int] | None:
+    """Return (key|value, opening_quote_offset) for one unescaped quote."""
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    string_start = -1
+    string_kind = ""
+    previous_significant = ""
+    for index, character in enumerate(text):
+        if index > quote_offset:
+            break
+        if in_string:
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\":
+                escaped = True
+                continue
+            if character == '"':
+                if index == quote_offset:
+                    return string_kind, string_start
+                in_string = False
+                previous_significant = '"'
+            continue
+        if character.isspace():
+            continue
+        if character == '"':
+            in_string = True
+            string_start = index
+            if previous_significant == ":" or (
+                stack and stack[-1] == "array" and previous_significant in {"[", ","}
+            ):
+                string_kind = "value"
+            else:
+                string_kind = "key"
+            continue
+        if character == "{":
+            stack.append("object")
+        elif character == "[":
+            stack.append("array")
+        elif character == "}":
+            if not stack or stack[-1] != "object":
+                return None
+            stack.pop()
+        elif character == "]":
+            if not stack or stack[-1] != "array":
+                return None
+            stack.pop()
+        previous_significant = character
+    return None
+
+
+def _repair_v2_planner_embedded_quotes(
+    text: str,
+    original_error: json.JSONDecodeError,
+) -> tuple[Any, str, list[int]]:
+    current = text
+    index_map: list[int | None] = list(range(len(text)))
+    error = original_error
+    repaired_offsets: list[int] = []
+    opening_offsets: list[int] = []
+    for _ in range(MAX_V2_PLANNER_QUOTE_REPAIRS):
+        if error.msg != "Expecting ',' delimiter" or error.pos <= 0 or error.pos > len(current):
+            break
+        candidate = error.pos - 1
+        if candidate >= len(current) or current[candidate] != '"':
+            break
+        if error.pos >= len(current) or current[error.pos].isspace() or current[error.pos] in ",}]":
+            break
+        context = _json_string_context(current, candidate)
+        if context is None or context[0] != "value":
+            break
+        original_candidate = index_map[candidate]
+        original_opening = index_map[context[1]]
+        if original_candidate is None or original_opening is None or original_candidate <= original_opening:
+            break
+        current = current[:candidate] + "\\" + current[candidate:]
+        index_map.insert(candidate, None)
+        repaired_offsets.append(original_candidate)
+        opening_offsets.append(original_opening)
+        try:
+            value = _strict_json_loads(current)
+        except _DuplicateJsonKey:
+            break
+        except json.JSONDecodeError as next_error:
+            if next_error.pos <= candidate:
+                break
+            error = next_error
+            continue
+        if (
+            len(repaired_offsets) == MAX_V2_PLANNER_QUOTE_REPAIRS
+            and len(set(opening_offsets)) == 1
+            and repaired_offsets[0] < repaired_offsets[1]
+            and text[repaired_offsets[0] + 1:repaired_offsets[1]].strip()
+        ):
+            return value, current, repaired_offsets
+        break
+    raise WebMultiError(
+        "STAGE_ENVELOPE_INVALID_JSON",
+        str(original_error),
+        {"repair_attempt": "v2-planner-embedded-unescaped-double-quote-rejected"},
+    ) from original_error
+
+
+def _planner_approach_text(value: Any, index: int) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise WebMultiError("PLANNER_PAYLOAD_SHAPE_INVALID", f"approaches[{index}] is empty")
+        return text
+    if not isinstance(value, Mapping) or set(value) != {"name", "description", "methodology"}:
+        raise WebMultiError(
+            "PLANNER_PAYLOAD_SHAPE_INVALID",
+            f"approaches[{index}] must be a nonempty string or an exact legacy approach object",
+        )
+    fields: dict[str, str] = {}
+    for field in ("name", "description", "methodology"):
+        raw = value.get(field)
+        if not isinstance(raw, str) or not raw.strip():
+            raise WebMultiError("PLANNER_PAYLOAD_SHAPE_INVALID", f"approaches[{index}].{field} is empty")
+        fields[field] = raw.strip()
+    return (
+        f"NAME: {fields['name']}\n"
+        f"DESCRIPTION:\n{fields['description']}\n"
+        f"METHODOLOGY:\n{fields['methodology']}"
+    )
+
+
+def _normalize_v2_planner_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"problem_analysis", "approaches"}:
+        raise WebMultiError(
+            "PLANNER_PAYLOAD_SHAPE_INVALID",
+            "v2 Planner payload keys must be exactly problem_analysis and approaches",
+        )
+    problem_analysis = value.get("problem_analysis")
+    approaches = value.get("approaches")
+    if not isinstance(problem_analysis, str) or not problem_analysis.strip():
+        raise WebMultiError("PLANNER_PAYLOAD_SHAPE_INVALID", "problem_analysis must be a nonempty string")
+    if not isinstance(approaches, list) or not approaches:
+        raise WebMultiError("PLANNER_PAYLOAD_SHAPE_INVALID", "approaches must be a nonempty list")
+    return {
+        "problem_analysis": problem_analysis.strip(),
+        "approaches": [_planner_approach_text(item, index) for index, item in enumerate(approaches)],
+    }
+
+
+def _parse_v2_planner_json_payload(
+    payload_text: str,
+    spec: "StageSpec",
+    repair_evidence_path: Path | None,
+) -> dict[str, Any]:
+    stripped = (payload_text or "").strip()
+    if len(stripped.encode("utf-8")) > MAX_V2_PLANNER_PAYLOAD_BYTES:
+        raise WebMultiError("PLANNER_PAYLOAD_TOO_LARGE", spec.stage_id)
+    if ROLE_MARKER_RE.search(stripped):
+        raise WebMultiError("STAGE_PAYLOAD_MARKER_NESTED", spec.stage_id)
+    try:
+        value = _strict_json_loads(stripped)
+    except _DuplicateJsonKey as exc:
+        raise WebMultiError("STAGE_ENVELOPE_DUPLICATE_KEY", str(exc)) from exc
+    except json.JSONDecodeError as original_error:
+        if "Invalid \\escape" in str(original_error):
+            repaired, offsets = _repair_invalid_json_escapes(stripped)
+            if not offsets:
+                raise WebMultiError("STAGE_ENVELOPE_INVALID_JSON", str(original_error)) from original_error
+            try:
+                value = _strict_json_loads(repaired)
+            except (_DuplicateJsonKey, json.JSONDecodeError) as repaired_error:
+                raise WebMultiError("STAGE_ENVELOPE_INVALID_JSON", str(repaired_error)) from repaired_error
+            if repair_evidence_path is not None:
+                write_immutable_json(
+                    repair_evidence_path,
+                    {
+                        "schema": "codex.chatgpt.json-transport-repair/v1",
+                        "repair_kind": "invalid-backslash-escape-only",
+                        "original_error": str(original_error),
+                        "original_sha256": sha256_bytes(stripped.encode("utf-8")),
+                        "repaired_sha256": sha256_bytes(repaired.encode("utf-8")),
+                        "repair_count": len(offsets),
+                        "original_offsets": offsets,
+                        "role": spec.role,
+                        "stage_id": spec.stage_id,
+                    },
+                )
+        else:
+            value, repaired, offsets = _repair_v2_planner_embedded_quotes(stripped, original_error)
+            normalized = _normalize_v2_planner_payload(value)
+            if repair_evidence_path is not None:
+                write_immutable_json(
+                    repair_evidence_path,
+                    {
+                        "schema": "codex.chatgpt.json-transport-repair/v2",
+                        "repair_kind": "v2-planner-embedded-unescaped-double-quote-only",
+                        "original_payload_sha256": sha256_bytes(stripped.encode("utf-8")),
+                        "repaired_payload_sha256": sha256_bytes(repaired.encode("utf-8")),
+                        "repair_count": len(offsets),
+                        "original_offsets": offsets,
+                        "role": spec.role,
+                        "stage_id": spec.stage_id,
+                    },
+                )
+            return normalized
+    return _normalize_v2_planner_payload(value)
+
+
+def _parse_v2_planner_marked_payload(payload_text: str) -> dict[str, Any]:
+    text = (payload_text or "").strip()
+    if len(text.encode("utf-8")) > MAX_V2_PLANNER_PAYLOAD_BYTES:
+        raise WebMultiError("PLANNER_PAYLOAD_TOO_LARGE", "Planner")
+    cursor = 0
+
+    def take(name: str) -> str:
+        nonlocal cursor
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        begin = f"<<<{name}>>>"
+        end = f"<<<END_{name}>>>"
+        if not text.startswith(begin, cursor):
+            raise WebMultiError("STAGE_PAYLOAD_MARKER_ORDER_INVALID", name)
+        value_start = cursor + len(begin)
+        finish = text.find(end, value_start)
+        if finish < 0:
+            raise WebMultiError("STAGE_PAYLOAD_MARKER_MISSING", name)
+        value = text[value_start:finish].strip()
+        if not value:
+            raise WebMultiError("STAGE_PAYLOAD_MARKER_EMPTY", name)
+        if ROLE_MARKER_RE.search(value):
+            raise WebMultiError("STAGE_PAYLOAD_MARKER_NESTED", name)
+        cursor = finish + len(end)
+        return value
+
+    problem_analysis = take("PROBLEM_ANALYSIS")
+    approaches: list[str] = []
+    for index in range(1, 11):
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        if cursor == len(text):
+            break
+        approaches.append(take(f"APPROACH_{index}"))
+    if not approaches:
+        raise WebMultiError("PLANNER_PAYLOAD_SHAPE_INVALID", "v2 Planner needs at least one approach")
+    if text[cursor:].strip():
+        raise WebMultiError("STAGE_PAYLOAD_MARKER_EXTRA", "unexpected text or approach marker after APPROACH_10")
+    return _normalize_v2_planner_payload(
+        {"problem_analysis": problem_analysis, "approaches": approaches}
+    )
+
+
+def _planner_approach_mapping(text: str, index: int) -> dict[str, str]:
+    structured = re.fullmatch(
+        r"NAME:\s*(.+?)\nDESCRIPTION:\s*\n(.*?)\nMETHODOLOGY:\s*\n(.+)",
+        text.strip(),
+        re.DOTALL,
+    )
+    if structured:
+        return {
+            "name": structured.group(1).strip(),
+            "description": structured.group(2).strip(),
+            "methodology": structured.group(3).strip(),
+        }
+    return {
+        "name": f"Approach {index + 1}",
+        "description": text.strip(),
+        "methodology": "See description.",
+    }
 
 
 def parse_json_envelope(text: str, *, repair_evidence_path: Path | None = None) -> dict[str, Any]:
@@ -296,10 +585,13 @@ def _tagged_role_payload(
     payload_text: str,
     solver_count: int | None,
     manifest_schema: str,
+    repair_evidence_path: Path | None = None,
 ) -> dict[str, Any]:
     if spec.role == "Planner":
         if manifest_schema == V2_SCHEMA:
-            return parse_json_envelope(payload_text)
+            if payload_text.lstrip().startswith("<<<PROBLEM_ANALYSIS>>>"):
+                return _parse_v2_planner_marked_payload(payload_text)
+            return _parse_v2_planner_json_payload(payload_text, spec, repair_evidence_path)
         if solver_count is None:
             raise WebMultiError("LEGACY_SOLVER_COUNT_MISSING", spec.stage_id)
         names = ["PROBLEM_ANALYSIS", *[f"APPROACH_{index}" for index in range(solver_count)]]
@@ -378,7 +670,9 @@ def parse_stage_answer(
         )
     envelope = {
         **header,
-        "payload": _tagged_role_payload(spec, payload_text, solver_count, manifest_schema),
+        "payload": _tagged_role_payload(
+            spec, payload_text, solver_count, manifest_schema, repair_evidence_path
+        ),
     }
     if transport_evidence_path is not None:
         write_immutable_json(
@@ -446,13 +740,13 @@ def validate_manifest(value: Mapping[str, Any], manifest_path: Path) -> dict[str
             "PROVIDER_FAILURE_RETRY_LIMIT_UNSUPPORTED",
             "provider_failure_retry_limit must be 0..2",
         )
-    # V2 is the public High-only path.  V1 keeps its frozen historical
-    # Very High default for recovery/comparison compatibility.
+    # V2 keeps High as the compatibility default while permitting explicit
+    # Very High. V1 keeps its frozen historical Very High default.
     mode_variant = str(value.get("mode_variant") or ("High" if schema == V2_SCHEMA else "Very High"))
-    if schema == V2_SCHEMA and mode_variant != "High":
+    if schema == V2_SCHEMA and mode_variant not in {"High", "Very High"}:
         raise WebMultiError(
             "MANIFEST_V2_MODE_VARIANT_INVALID",
-            "upstream-parity v2 requires exact mode_variant High",
+            "upstream-parity v2 supports exact mode_variant High or Very High",
         )
     if schema == V1_SCHEMA and mode_variant not in {"Very High", "High"}:
         raise WebMultiError("MODE_VARIANT_UNSUPPORTED", "web Multi-GPT supports Very High or High")
@@ -462,6 +756,24 @@ def validate_manifest(value: Mapping[str, Any], manifest_path: Path) -> dict[str
     contract = Path(str(value.get("agbrowse_contract") or Path.home() / ".codex" / "contracts" / "agbrowse-0.1.18.json")).resolve()
     if not contract.is_file():
         raise WebMultiError("AGBROWSE_CONTRACT_MISSING", str(contract))
+    if schema == V2_SCHEMA and "agbrowse_contract_sha256" in value:
+        supplied_contract_sha256 = value.get("agbrowse_contract_sha256")
+        if not isinstance(supplied_contract_sha256, str) or LOWER_SHA256_RE.fullmatch(supplied_contract_sha256) is None:
+            raise WebMultiError(
+                "AGBROWSE_CONTRACT_SHA256_INVALID",
+                "agbrowse_contract_sha256 must be exactly 64 lowercase hexadecimal characters",
+            )
+        actual_contract_sha256 = sha256_file(contract)
+        if supplied_contract_sha256 != actual_contract_sha256:
+            raise WebMultiError(
+                "AGBROWSE_CONTRACT_SHA256_MISMATCH",
+                "agbrowse_contract_sha256 does not match the resolved agbrowse_contract file",
+                {
+                    "path": str(contract),
+                    "expected": supplied_contract_sha256,
+                    "actual": actual_contract_sha256,
+                },
+            )
     result = dict(value)
     result.update(
         {
@@ -529,7 +841,15 @@ class WebMultiRuntime:
         )
 
     def _build_planner_descriptor(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        adapted = UPSTREAM.apply_planner_policy(payload, str(self.manifest["planner_policy"]))
+        canonical = _normalize_v2_planner_payload(dict(payload))
+        policy_payload = {
+            "problem_analysis": canonical["problem_analysis"],
+            "approaches": [
+                _planner_approach_mapping(item, index)
+                for index, item in enumerate(canonical["approaches"])
+            ],
+        }
+        adapted = UPSTREAM.apply_planner_policy(policy_payload, str(self.manifest["planner_policy"]))
         base = {
             "schema": "codex.chatgpt.web-multi-planner-descriptor/v1",
             "policy": self.manifest["planner_policy"],
@@ -628,9 +948,15 @@ class WebMultiRuntime:
         return value
 
     def _role_instruction(self, spec: StageSpec) -> str:
+        planner_count_instruction = (
+            "Emit six through ten consecutive APPROACH_N sections numbered from 1 with no gaps. "
+            if self._is_v2 and self.manifest["planner_policy"] == "strict-6-10"
+            else "Emit one through ten consecutive APPROACH_N sections numbered from 1 with no gaps. "
+        )
         instructions = {
             "Planner": (
                 "Create branch briefs, not full solutions, under the declared Planner policy. "
+                f"{planner_count_instruction}"
                 "Include one direct baseline and one wildcard reframe among materially distinct approaches."
                 if self._is_v2
                 else "Create exactly solver_count materially distinct branch briefs, including a direct baseline and a wildcard reframe."
@@ -689,11 +1015,10 @@ class WebMultiRuntime:
         if spec.role == "Planner":
             if self._is_v2:
                 return (
-                    '{"problem_analysis":"<analysis>",'
-                    '"approaches":[{"name":"<name>","description":"<description>",'
-                    '"methodology":"<methodology>"}]}\n'
-                    f"Policy: {self.manifest['planner_policy']}. Return one strict JSON object here; "
-                    "do not use role-section markers inside it."
+                    "<<<PROBLEM_ANALYSIS>>>\n<raw problem analysis>\n<<<END_PROBLEM_ANALYSIS>>>\n"
+                    "<<<APPROACH_1>>>\n"
+                    "NAME: <name>\nDESCRIPTION:\n<description>\nMETHODOLOGY:\n<methodology>\n"
+                    "<<<END_APPROACH_1>>>"
                 )
             approach_sections = "\n".join(
                 f"<<<APPROACH_{index}>>>\n<approach {index} raw text>\n<<<END_APPROACH_{index}>>>"
@@ -1069,6 +1394,26 @@ class WebMultiRuntime:
         )
         return dict(envelope), started, ended
 
+    @staticmethod
+    def _child_cleanup_durable(child: Mapping[str, Any]) -> bool:
+        return (
+            str(child.get("owned_tab_state") or "") in {"closed-and-absent", "already-absent"}
+            and child.get("cleanup_pending") is False
+            and type(child.get("owned_open_tabs")) is int
+            and child["owned_open_tabs"] == 0
+        )
+
+    def _record_completed_cleanup_if_needed(
+        self,
+        bridge: Any,
+        run_dir: str,
+        current: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if self._child_cleanup_durable(current):
+            return dict(current)
+        cleanup = bridge.cleanup_completed(run_dir, explicit_user_request=True)
+        return self.store.record_child_cleanup(run_dir, cleanup)
+
     def _actual_execute(
         self,
         child: dict[str, Any],
@@ -1193,8 +1538,7 @@ class WebMultiRuntime:
         ended = time.monotonic()
         if current["phase"] == "PROVIDER_FAILED_TERMINAL":
             try:
-                cleanup = bridge.cleanup_completed(run_dir, explicit_user_request=True)
-                current = self.store.record_child_cleanup(run_dir, cleanup)
+                current = self._record_completed_cleanup_if_needed(bridge, run_dir, current)
             except Exception as exc:
                 self.store.record_child_cleanup(run_dir, {"ok": False, "state": "cleanup-pending", "detail": str(exc)})
                 raise WebMultiError(
@@ -1220,8 +1564,7 @@ class WebMultiRuntime:
             raise WebMultiError("CHILD_ANSWER_IDENTITY_INVALID", spec.stage_id)
         answer_text = answer_path.read_text(encoding="utf-8")
         try:
-            cleanup = bridge.cleanup_completed(run_dir, explicit_user_request=True)
-            self.store.record_child_cleanup(run_dir, cleanup)
+            current = self._record_completed_cleanup_if_needed(bridge, run_dir, current)
         except Exception as exc:
             self.store.record_child_cleanup(run_dir, {"ok": False, "state": "cleanup-pending", "detail": str(exc)})
             raise WebMultiError("CHILD_COMPLETED_TAB_CLEANUP_FAILED", spec.stage_id, {"detail": str(exc)}) from exc
@@ -2004,15 +2347,10 @@ class WebMultiRuntime:
                     unresolved.append({"run_id": child["run_id"], "phase": phase})
                 continue
             if phase == "COMPLETE":
-                if (
-                    str(child.get("owned_tab_state") or "") not in {"closed-and-absent", "already-absent"}
-                    or bool(child.get("cleanup_pending"))
-                    or int(child.get("owned_open_tabs") or 0) != 0
-                ):
+                if not self._child_cleanup_durable(child):
                     bridge = self.bridge_factory()
                     run_dir = str(paths.runs_dir / str(child["run_id"]))
-                    cleanup = bridge.cleanup_completed(run_dir, explicit_user_request=True)
-                    self.store.record_child_cleanup(run_dir, cleanup)
+                    self._record_completed_cleanup_if_needed(bridge, run_dir, child)
                 continue
             if phase == "SEND_REJECTED":
                 bridge = self.bridge_factory()
@@ -2033,8 +2371,7 @@ class WebMultiRuntime:
                 if recovered["phase"] in {"SUBMITTED", "URL_BOUND", "RESPONSE_IN_PROGRESS", "RECOVERING"}:
                     recovered = bridge.poll(run_dir)
                 if recovered["phase"] == "COMPLETE":
-                    cleanup = bridge.cleanup_completed(run_dir, explicit_user_request=True)
-                    self.store.record_child_cleanup(run_dir, cleanup)
+                    self._record_completed_cleanup_if_needed(bridge, run_dir, recovered)
                 else:
                     unresolved.append({"run_id": child["run_id"], "phase": recovered["phase"]})
         if unresolved:
@@ -2089,6 +2426,33 @@ class WebMultiRuntime:
         write_immutable_json(self.evidence_map_path, evidence_map)
         if resume_parent:
             _, resume_record = self.store.load(resume_parent)
+            resume_paths = self.store.paths(
+                STATE.canonical_project_root(resume_record["project_root"]),
+                str(resume_record["run_id"]),
+            )
+            try:
+                resume_lock = STATE.read_json(resume_paths.lock_file)
+            except Exception:
+                resume_lock = {}
+            if (
+                resume_record.get("phase") == "USER_STOP_REQUESTED"
+                or bool(resume_record.get("user_stop_requests"))
+                or resume_lock.get("phase") == "USER_STOP_REQUESTED"
+                or bool(resume_lock.get("user_stop_requests"))
+                or bool(resume_record.get("parent_stop_scope"))
+                or bool(resume_lock.get("parent_stop_scope"))
+                or bool(resume_record.get("user_stop_tombstone"))
+                or bool(resume_lock.get("user_stop_tombstone"))
+            ):
+                raise WebMultiError(
+                    "PARENT_USER_STOP_CONFIRMATION_REQUIRED",
+                    "explicit user stop is pending in parent or project lock; resume, recovery, and replacement sends are forbidden",
+                    {
+                        "parent_run_dir": str(resume_parent),
+                        "parent_phase": resume_record.get("phase"),
+                        "lock_phase": resume_lock.get("phase"),
+                    },
+                )
             if resume_record.get("phase") == "PARENT_FAILED_CLOSED":
                 self.parent = self.store.reopen_failed_parent_workflow(
                     resume_parent,

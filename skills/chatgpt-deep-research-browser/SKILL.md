@@ -11,7 +11,6 @@ Use an unmodified agbrowse installation selected by an exact validated contract 
 
 - `mode_label: Deep Research`.
 - `app_policy: required`.
-- Before first app-backed use, require ChatGPT Developer Mode. If `Settings > Apps > Advanced settings > Developer mode` is off or the account/workspace does not expose `Create app/앱 만들기`, explain that an eligible account or admin/owner grant is required and stop before submission.
 - Deep Research first selects the exact CodexPro app, then selects `@심층 리서치` on the same run-owned composer target. Either missing proof blocks before submission.
 - Attach requested local files through agbrowse `--file`.
 - Use `--research deep`, fresh `--parallel` session, and the highest supported reasoning contract.

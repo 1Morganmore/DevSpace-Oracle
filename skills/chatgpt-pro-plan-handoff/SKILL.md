@@ -1,6 +1,6 @@
 ---
 name: chatgpt-pro-plan-handoff
-description: "Use for staged ChatGPT workflows: attachment-only Pro plan then fresh regular GPT review and orchestrator, or GPT 종합모드 with fresh regular GPT plan, review, and orchestrator. All stages use one exact contract-validated agbrowse version."
+description: "Use for staged ChatGPT workflows: attachment-only Pro plan then fresh regular GPT review and orchestrator, GPT 종합모드, or explicitly gated v3 parallel implementation with exact-unit workspaces and ff-only finalization."
 ---
 
 # Staged plan, review, and orchestrator
@@ -18,8 +18,6 @@ All stages use one immutable workflow-selected, contract-validated, unmodified a
 5. Fresh regular GPT orchestrator consumes the immutable plan, review, and handoff manifest.
 
 Pro never uses an app. Every non-Pro stage—including plan, review, orchestrator, Web Multi-GPT, and Deep Research—must use the exact project app. Missing app identity blocks the workflow before submission.
-
-Before the first non-Pro stage, require ChatGPT Developer Mode for the current account/workspace. When the custom app surface is unavailable, tell the user to enable `Settings > Apps > Advanced settings > Developer mode` or obtain the required admin/owner workspace permission, then stop before any stage submission. This prerequisite does not apply to the attachment-only Pro stage.
 
 ### GPT 종합모드
 
@@ -43,6 +41,20 @@ New stages use `codex.chatgpt.prompt-architecture/v3` receipts. Purpose, cogniti
 When review requests revision, write a compact immutable revision delta and give the next fresh Planner only that delta, not the full review prose. Web Multi-GPT treats the plan as an incumbent candidate, expands the original solution space, and may challenge its frame without becoming a plan-approval exercise. `PASS` is only a transition token.
 
 An existing live agbrowse session is never a prerequisite. When the session list is empty, contract validation and the project lease run first, the exact executable proves `start --headed --port <exact-port>`, and only then does `web-ai send --url https://chatgpt.com/ --parallel` create the run-owned session/target with Web-AI auto-start disabled. Never start a Pro or GPT stage headlessly. A proven agbrowse-owned headless runtime may restart headed only when no other active/uncertain run or nonblank tab exists; otherwise stop once before submission with a deterministic block.
+
+## Parallel implementation v3
+
+Use this path only for a new `codex.chatgpt.comprehensive-workflow/v3` manifest with both `features.parallel_implementation_v1: true` and `CODEX_CHATGPT_PARALLEL_IMPLEMENTATION_V1=1`. Validate both gates before creating state. Never migrate or downgrade a v1/v2 workflow into v3.
+
+1. A Pro planner produces the approved plan and strict `implementation-graph-result-v1`.
+2. `run_parallel_implementation.py prepare` acquires the sole `parallel-implementation` parent lease, captures canonical baseline identity, creates an independent staging clone with `--no-local --no-hardlinks --no-checkout`, binds every dependency/conflict edge into deterministic components, and emits exact unit missions.
+3. Each Very High implementer receives one `execution-mission-v2`, one exact unit root, immutable `input_base_oid`, explicit claimed paths, registered test IDs, and no Git authority. Start it only through `codexpro_exact_unit_cloudflare_bootstrap.ps1` after topology, singleton roots, listener, tunnel, server, and app identity attestations pass.
+4. Persist `child-send-claim/v2` before provider invocation. A mutation-possible or confirmed attempt is never resubmitted; recover only the exact session/history. A durable zero-mutation proof may retry the same claim only.
+5. `record-unit` derives the actual diff and rejects out-of-scope, reparse, gitlink, and common Git metadata mutation. The host runs registered tests and creates the deterministic commit.
+6. Only independent components run in parallel. One component has at most one active unit, and its next unit starts from the current component integration head.
+7. `finalize` is allowed only after every required unit is integrated. It deterministically integrates component heads, runs full registered tests, revalidates canonical identity, imports a temporary reserved ref, revalidates again, and performs ff-only apply.
+
+The driver itself does not create a browser submission. It prepares exact child manifests for the existing bridge, which remains responsible for the immutable send boundary, exact provider recovery, and tab ownership checks.
 
 ## Safety
 
@@ -70,6 +82,15 @@ Prepare immutable local artifacts without submitting:
 
 ```powershell
 python "$env:USERPROFILE\.codex\skills\chatgpt-pro-plan-handoff\scripts\run_pro_plan_handoff.py" --manifest <workflow.json> --prepare-only
+```
+
+Prepare and advance an explicitly gated v3 implementation:
+
+```powershell
+$env:CODEX_CHATGPT_PARALLEL_IMPLEMENTATION_V1 = "1"
+python "$env:USERPROFILE\.codex\skills\chatgpt-pro-plan-handoff\scripts\run_parallel_implementation.py" prepare --manifest <workflow-v3.json> --graph <implementation-graph-result-v1.json>
+python "$env:USERPROFILE\.codex\skills\chatgpt-pro-plan-handoff\scripts\run_parallel_implementation.py" record-unit --parent-run-dir <parent-run> --result <implementation-unit-result-v1.json>
+python "$env:USERPROFILE\.codex\skills\chatgpt-pro-plan-handoff\scripts\run_parallel_implementation.py" finalize --parent-run-dir <parent-run>
 ```
 
 Use `codex.chatgpt.pro-plan-handoff/v1` only for `workflow_mode: pro-plan-to-gpt-orchestrator` and for recovery of an already persisted matching legacy comprehensive state with a valid stage checkpoint. A merely prepared v1 state has no recovery authority. Every new `workflow_mode: gpt-comprehensive` manifest must use `codex.chatgpt.comprehensive-workflow/v2` and include validated `gates.research` and `gates.advisory` decision inputs. A new v1 comprehensive manifest fails before network side effects with `COMPREHENSIVE_V2_REQUIRED`.

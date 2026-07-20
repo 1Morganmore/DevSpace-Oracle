@@ -339,6 +339,8 @@ class Decision:
     old_app_name: str | None
     old_public_url: str | None
     chrome_next_action: str
+    scope_mode: str = "legacy-drive"
+    topology_receipt_sha256: str | None = None
     transaction_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -353,6 +355,8 @@ class Decision:
             "old_app_name": self.old_app_name,
             "old_public_url": self.old_public_url,
             "chrome_next_action": self.chrome_next_action,
+            "scope_mode": self.scope_mode,
+            "topology_receipt_sha256": self.topology_receipt_sha256,
             "transaction_id": self.transaction_id,
         }
 
@@ -368,6 +372,8 @@ def _candidate_entry(decision: Decision | dict[str, Any]) -> dict[str, Any]:
         "created_at": now_iso(),
         "updated_at": now_iso(),
         "status": "candidate",
+        "scope_mode": value.get("scope_mode") or "legacy-drive",
+        "topology_receipt_sha256": value.get("topology_receipt_sha256"),
         "chrome_status": "unconfirmed",
     }
 
@@ -644,14 +650,27 @@ def decide(
     force_recreate: bool = False,
     verified_open_port: bool = False,
     rebind_pending_after_app_absence: bool = False,
+    scope_mode: str = "legacy-drive",
+    topology_receipt_sha256: str | None = None,
 ) -> Decision:
+    if scope_mode not in {"legacy-drive", "parallel-exact-unit"}:
+        raise RuntimeError("APP_SCOPE_MODE_INVALID")
+    if scope_mode == "parallel-exact-unit" and re.fullmatch(r"[0-9a-f]{64}", str(topology_receipt_sha256 or "")) is None:
+        raise RuntimeError("APP_TOPOLOGY_RECEIPT_REQUIRED")
+    if scope_mode == "legacy-drive" and topology_receipt_sha256 is not None:
+        raise RuntimeError("APP_TOPOLOGY_RECEIPT_FORBIDDEN")
     registry = load_registry()
     canonical_root = stable_path(root)
     slug = unique_slug(registry, Path(canonical_root))
     projects = registry.setdefault("projects", {})
     existing = projects.get(canonical_root)
+    if isinstance(existing, dict):
+        existing_scope = str(existing.get("scope_mode") or "legacy-drive")
+        if existing_scope != scope_mode or str(existing.get("topology_receipt_sha256") or "") != str(topology_receipt_sha256 or ""):
+            raise RuntimeError("APP_SCOPE_IDENTITY_MISMATCH")
     normalized_url = normalize_public_url(public_url)
-    enforce_drive_tunnel_policy(Path(canonical_root), normalized_url)
+    if scope_mode == "legacy-drive":
+        enforce_drive_tunnel_policy(Path(canonical_root), normalized_url)
     collision = endpoint_collision(registry, canonical_root, normalized_url)
     if collision and update:
         raise RuntimeError(
@@ -734,6 +753,8 @@ def decide(
             old_app_name=(old_active or {}).get("app_name"),
             old_public_url=(old_active or {}).get("public_url"),
             chrome_next_action="resume-candidate-reconcile",
+            scope_mode=scope_mode,
+            topology_receipt_sha256=topology_receipt_sha256,
             transaction_id=transaction_id,
         )
 
@@ -786,6 +807,8 @@ def decide(
                 old_app_name=None,
                 old_public_url=None,
                 chrome_next_action="open-existing-app-detail-and-repair-permission",
+                scope_mode=scope_mode,
+                topology_receipt_sha256=topology_receipt_sha256,
             )
             if update:
                 existing.update(
@@ -829,6 +852,8 @@ def decide(
                 old_app_name=current_app or app_name(slug, current_version),
                 old_public_url=current_url,
                 chrome_next_action="create-candidate-then-retire-old-app",
+                scope_mode=scope_mode,
+                topology_receipt_sha256=topology_receipt_sha256,
             )
             if update:
                 decision.transaction_id = _stage_reconcile(registry, decision, old_active=existing)
@@ -851,6 +876,8 @@ def decide(
                     if repair_permission_only
                     else "select-existing-app-refresh-if-hidden"
                 ),
+                scope_mode=scope_mode,
+                topology_receipt_sha256=topology_receipt_sha256,
             )
             if update:
                 existing.update(
@@ -885,6 +912,8 @@ def decide(
             old_app_name=current_app or app_name(slug, current_version),
             old_public_url=current_url,
             chrome_next_action="create-candidate-then-retire-old-app",
+            scope_mode=scope_mode,
+            topology_receipt_sha256=topology_receipt_sha256,
         )
         if update:
             decision.transaction_id = _stage_reconcile(registry, decision, old_active=existing)
@@ -905,6 +934,8 @@ def decide(
         old_app_name=None,
         old_public_url=None,
         chrome_next_action="create-new-app",
+        scope_mode=scope_mode,
+        topology_receipt_sha256=topology_receipt_sha256,
     )
     if update:
         decision.transaction_id = _stage_reconcile(registry, decision, old_active=None)
@@ -915,6 +946,8 @@ def decide(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Resolve one CodexPro ChatGPT Developer App slot per drive root.")
     parser.add_argument("--root", default="C:\\", help="CodexPro drive or project app root; use --no-git-root to preserve the exact root.")
+    parser.add_argument("--scope-mode", choices=("legacy-drive", "parallel-exact-unit"), default="legacy-drive")
+    parser.add_argument("--topology-receipt-sha256")
     parser.add_argument("--public-url", help="Current Cloudflare/ngrok public MCP URL or base URL.")
     parser.add_argument("--port", type=int, help="Preferred local CodexPro port.")
     parser.add_argument("--verified-open-port", action="store_true", help="Allow --port even when already listening because MCP identity was already verified.")
@@ -941,7 +974,8 @@ def main() -> int:
             "codexpro_agbrowse_app.py after full URL and permission verification."
         )
 
-    root = drive_app_root(project_root(Path(args.root), use_git_root=not args.no_git_root))
+    resolved_root = project_root(Path(args.root), use_git_root=not args.no_git_root)
+    root = resolved_root if args.scope_mode == "parallel-exact-unit" else drive_app_root(resolved_root)
     with registry_lock():
         decision = decide(
             root=root,
@@ -949,8 +983,10 @@ def main() -> int:
             preferred_port=args.port,
             update=args.update,
             force_recreate=args.force_recreate,
-        verified_open_port=args.verified_open_port,
-        rebind_pending_after_app_absence=args.rebind_pending_after_app_absence,
+            verified_open_port=args.verified_open_port,
+            rebind_pending_after_app_absence=args.rebind_pending_after_app_absence,
+            scope_mode=args.scope_mode,
+            topology_receipt_sha256=args.topology_receipt_sha256,
         )
     print(json.dumps(decision.to_dict(), ensure_ascii=False, indent=2))
     return 0
