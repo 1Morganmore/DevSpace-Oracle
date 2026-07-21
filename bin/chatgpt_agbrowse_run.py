@@ -194,9 +194,14 @@ def _json_stdout(completed: subprocess.CompletedProcess[str]) -> Any:
 
 
 def observe_exact_run(run_dir: str, state_root: Path | None = None) -> dict[str, Any]:
-    """Read one persisted run without activating, navigating, stopping, or closing a tab."""
+    """Observe one persisted run, settling a proven exact terminal URL first."""
     bridge = BRIDGE.Bridge(state_root=state_root)
     state_file, record = bridge.store.load(run_dir)
+    if (
+        record.get("phase") in {"URL_BOUND", "RESPONSE_IN_PROGRESS", "RECOVERING", "COMPLETE"}
+        and BRIDGE.STATE.CANONICAL_CHAT_RE.fullmatch(str(record.get("conversation_url") or ""))
+    ):
+        record = bridge.settle_exact_terminal(run_dir)
     manifest_path = Path(str(record.get("manifest_path") or "")).expanduser()
     manifest = load_manifest(manifest_path) if manifest_path.is_file() else {}
     contract_path = Path(str(manifest.get("agbrowse_contract") or DEFAULT_CONTRACT)).expanduser()
@@ -294,7 +299,10 @@ def observe_exact_run(run_dir: str, state_root: Path | None = None) -> dict[str,
     if active_session_id and active_session_id != str(expected["session_id"] or ""):
         mismatches.append("active_command_session")
 
-    if missing:
+    if record.get("phase") == "COMPLETE":
+        state = "EXACT_COMPLETE"
+        next_action = "completed answer is durably captured; exact owned-tab cleanup is settled or recorded as cleanup_pending"
+    elif missing:
         state = "IDENTITY_INCOMPLETE"
         next_action = "recover the exact persisted run; do not inspect or submit through another tab"
     elif mismatches:

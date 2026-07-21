@@ -594,6 +594,72 @@ def _terminal_visible_assistant_answer(page_text: str) -> str | None:
     return answer or None
 
 
+def _terminal_snapshot_assistant_answer(page_text: str, snapshot_text: str) -> str | None:
+    """Extract the final assistant block using ChatGPT's message action groups.
+
+    Current ChatGPT pages do not always render an elapsed-work line.  The AX
+    snapshot still gives us a strict structural boundary: the assistant block
+    starts after the last user-message action group and ends before the
+    response-action group.  Use only the first visible answer token from that
+    bounded region as an anchor into ``agbrowse text`` so prompt/sidebar text
+    can never be captured as the answer.
+    """
+    lines = str(snapshot_text or "").splitlines()
+    user_markers = ('group "내 메시지 작업"', 'group "Your message actions"')
+    response_markers = ('group "응답 작업"', 'group "Response actions"')
+    user_indexes = [
+        index for index, line in enumerate(lines)
+        if any(marker in line for marker in user_markers)
+    ]
+    if not user_indexes:
+        return None
+    start = user_indexes[-1] + 1
+    end = next(
+        (
+            index for index in range(start, len(lines))
+            if any(marker in lines[index] for marker in response_markers)
+        ),
+        -1,
+    )
+    if end <= start:
+        return None
+
+    anchor: str | None = None
+    leaf = re.compile(r'^\s*-\s+(?:text|paragraph|code):\s*("(?:[^"\\]|\\.)*")\s*$')
+    named = re.compile(r'^\s*-\s+heading\s+("(?:[^"\\]|\\.)*")(?:\s+\[.*\])?\s*$')
+    for line in lines[start:end]:
+        match = leaf.match(line) or named.match(line)
+        if match is None:
+            continue
+        try:
+            candidate = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, str) and candidate.strip():
+            anchor = candidate.strip()
+            break
+    if not anchor:
+        return None
+
+    page = str(page_text or "")
+    position = page.rfind(anchor)
+    if position < 0:
+        return None
+    answer = page[position:]
+    end_markers = (
+        "\n출처\n",
+        "\nSources\n",
+        "\nChatGPT는 실수를 할 수 있습니다.",
+        "\nChatGPT can make mistakes",
+        "\n응답 작업\n",
+    )
+    ends = [answer.find(marker) for marker in end_markers if answer.find(marker) >= 0]
+    if ends:
+        answer = answer[:min(ends)]
+    answer = answer.strip()
+    return answer or None
+
+
 def _web_multi_assistant_answer(page_text: str) -> str | None:
     """Extract one complete Web Multi payload from visible ChatGPT text."""
     start_marker = "<<<WEB_MULTI_HEADER_V1>>>"
@@ -774,6 +840,17 @@ def exact_target_observation(tabs: Iterable[Mapping[str, Any]], target_id: str) 
             "match_count": 1,
             "target_id": target_id,
             "url": STATE.canonical_conversation_url(url),
+            "tab": tab,
+        }
+    if re.fullmatch(
+        r"https://chatgpt\.com/c/WEB:[0-9A-Fa-f-]{16,}(?:[?#].*)?",
+        url,
+    ):
+        return {
+            "state": "temporary",
+            "match_count": 1,
+            "target_id": target_id,
+            "url": url,
             "tab": tab,
         }
     if url.rstrip("/") in {"https://chatgpt.com", "https://chat.openai.com"}:
@@ -1548,6 +1625,32 @@ class Bridge:
                     cleanup = lifecycle.close_completed(run_dir, explicit_user_request=explicit_user_request)
         self.store.record_terminal_cleanup(run_dir, cleanup)
         return cleanup
+
+    def settle_exact_terminal(self, run_dir: str) -> dict[str, Any]:
+        """Adjudicate one known exact URL and immediately settle completed cleanup."""
+        with exclusive_composer_lock(GLOBAL_BROWSER_MUTATION_LOCK):
+            _, record = self.store.load(run_dir)
+            if record.get("phase") == "COMPLETE":
+                if bool(record.get("cleanup_pending")):
+                    self.cleanup_completed(run_dir, explicit_user_request=False)
+                return self.store.load(run_dir)[1]
+            direct = self._try_exact_url_terminal_now(run_dir)
+            if direct.get("phase") != "COMPLETE":
+                return direct
+            try:
+                self.cleanup_completed(run_dir, explicit_user_request=False)
+            except Exception as exc:
+                self.store.record_terminal_cleanup(
+                    run_dir,
+                    {
+                        "ok": False,
+                        "state": "cleanup-pending",
+                        "error_code": str(getattr(exc, "code", type(exc).__name__)),
+                        "target_id": direct.get("current_target_id"),
+                        "conversation_url": direct.get("conversation_url"),
+                    },
+                )
+            return self.store.load(run_dir)[1]
 
     def abandon_uncertain(
         self,
@@ -4756,6 +4859,7 @@ class Bridge:
             _web_multi_assistant_answer(page_text)
             or _plain_assistant_answer(page_text)
             or _terminal_visible_assistant_answer(page_text)
+            or _terminal_snapshot_assistant_answer(page_text, snapshot_text)
             or _web_multi_assistant_answer(snapshot_visible_text)
             or _plain_assistant_answer(snapshot_visible_text)
             or _terminal_visible_assistant_answer(snapshot_visible_text)

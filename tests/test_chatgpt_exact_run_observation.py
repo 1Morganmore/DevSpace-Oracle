@@ -29,6 +29,9 @@ class Bridge:
     def __init__(self, store: Store):
         self.store = store
 
+    def settle_exact_terminal(self, run_dir: str):
+        return self.store.load(run_dir)[1]
+
 
 def _record(tmp_path: Path) -> tuple[Path, dict]:
     manifest = tmp_path / "manifest.json"
@@ -94,6 +97,49 @@ def test_matching_active_command_protects_exact_helper(monkeypatch, tmp_path: Pa
     assert result["observed"]["active_command_session_id"] == "SESSION-1"
     assert result["process_termination_authorized"] is False
     assert result["tab_mutation_authorized"] is False
+
+
+def test_durable_complete_outweighs_stale_sent_session(monkeypatch, tmp_path: Path) -> None:
+    _, record = _record(tmp_path)
+    record["phase"] = "COMPLETE"
+    record["result"] = {"sha256": "a" * 64, "bytes": 12}
+    record["cleanup_pending"] = False
+    _install(monkeypatch, tmp_path, record, active_session="")
+
+    result = RUN.observe_exact_run(str(tmp_path))
+
+    assert result["state"] == "EXACT_COMPLETE"
+    assert result["observed"]["provider_status"] == "running"
+    assert "durably captured" in result["next_action"]
+
+
+def test_snapshot_message_boundaries_extract_terminal_answer_without_elapsed_line() -> None:
+    page_text = "\n".join(
+        (
+            "sidebar title",
+            "prompt-RUN-1.txt",
+            "더 보기",
+            "AUDIT_VERDICT: PASS",
+            "Verified final result.",
+            "출처",
+            "ChatGPT는 실수를 할 수 있습니다. 중요한 정보는 재차 확인하세요.",
+        )
+    )
+    snapshot_text = "\n".join(
+        (
+            '    - group "내 메시지 작업" [ref=@e1]:',
+            '      - button "메시지 복사" [ref=@e2]',
+            "    - heading [level=4]",
+            "    - paragraph:",
+            '      - text: "AUDIT_VERDICT: PASS"',
+            '    - paragraph: "Verified final result."',
+            '    - group "응답 작업" [ref=@e3]:',
+        )
+    )
+
+    answer = RUN.BRIDGE._terminal_snapshot_assistant_answer(page_text, snapshot_text)
+
+    assert answer == "AUDIT_VERDICT: PASS\nVerified final result."
 
 
 def test_active_command_mismatch_never_adopts_or_stops_foreign_session(monkeypatch, tmp_path: Path) -> None:

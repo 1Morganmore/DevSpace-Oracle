@@ -146,6 +146,48 @@ def test_exact_target_observation_never_adopts_another_tab() -> None:
     assert bridge.exact_target_observation(tabs, "MISSING")["state"] == "absent"
 
 
+def test_exact_target_observation_treats_web_uuid_as_temporary_not_drift() -> None:
+    bridge = load_bridge("exact_job_temporary_web_url_test")
+    temporary_url = "https://chatgpt.com/c/WEB:b68b194a-f828-4a73-b5a5-64e87af81e87"
+
+    observed = bridge.exact_target_observation(
+        [{"targetId": "OWNED", "url": temporary_url}],
+        "OWNED",
+    )
+
+    assert observed["state"] == "temporary"
+    assert observed["target_id"] == "OWNED"
+    assert observed["url"] == temporary_url
+
+
+def test_post_send_observation_waits_for_web_uuid_to_promote_to_canonical(tmp_path: Path) -> None:
+    bridge = load_bridge("exact_job_temporary_web_promotion_test")
+    runtime = bridge.Bridge(
+        state_root=tmp_path / "state",
+        runner=lambda command, env, timeout: subprocess.CompletedProcess(command, 0, "{}", ""),
+        headed_runtime_preflight=False,
+    )
+    observations = iter(
+        (
+            ([{"targetId": "OWNED", "url": "https://chatgpt.com/c/WEB:b68b194a-f828-4a73-b5a5-64e87af81e87"}], {"attempt": 1}),
+            ([{"targetId": "OWNED", "url": "https://chatgpt.com/c/canonical-job"}], {"attempt": 2}),
+        )
+    )
+    runtime._recovery_tabs = lambda **kwargs: next(observations)
+
+    observed, evidence = runtime._observe_post_send_target(
+        run_dir=tmp_path,
+        executable="agbrowse",
+        manifest={},
+        target_id="OWNED",
+        attempts=2,
+    )
+
+    assert observed["state"] == "canonical"
+    assert observed["url"] == "https://chatgpt.com/c/canonical-job"
+    assert len(evidence) == 2
+
+
 def test_bound_poll_uses_exact_url_read_only_checks_without_session_poll(tmp_path: Path) -> None:
     module = load_bridge("exact_job_poll_command_test")
     commands: list[list[str]] = []
