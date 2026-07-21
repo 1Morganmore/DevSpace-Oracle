@@ -646,6 +646,84 @@ def classify_pre_submit_failure(envelope: dict[str, Any]) -> str:
     return "SUBMISSION_UNCERTAIN_IDENTITY_MISSING"
 
 
+def session_send_not_committed(session: Mapping[str, Any]) -> bool:
+    """Return true only for agbrowse's false ``status=sent`` envelope.
+
+    agbrowse 0.1.18 can persist ``sent`` even when its send-button resolver
+    reports ``TARGET_UNRESOLVED/not-enabled``.  A bare ChatGPT root page with
+    no assistant turn is therefore pre-submit evidence, not a running job.
+    """
+    summary = session.get("envelopeSummary") if isinstance(session.get("envelopeSummary"), dict) else {}
+    trace = session.get("trace") if isinstance(session.get("trace"), list) else []
+    send_click = next(
+        (
+            item
+            for item in trace
+            if isinstance(item, dict)
+            and str(item.get("intentId") or "") == "send.click"
+            and str(item.get("status") or "") == "unresolved"
+            and str(item.get("errorCode") or "") == "TARGET_UNRESOLVED"
+        ),
+        None,
+    )
+    attempts = send_click.get("attempts") if isinstance(send_click, dict) and isinstance(send_click.get("attempts"), list) else []
+    not_enabled = any(
+        isinstance(item, dict)
+        and isinstance(item.get("validation"), dict)
+        and str(item["validation"].get("reason") or "") == "not-enabled"
+        for item in attempts
+    )
+    observed_url = str(
+        session.get("conversationUrl")
+        or session.get("conversation_url")
+        or session.get("originalUrl")
+        or ""
+    )
+    return bool(
+        str(session.get("status") or "") == "sent"
+        and observed_url.rstrip("/") in {"https://chatgpt.com", "https://chat.openai.com"}
+        and session.get("answer") in (None, "")
+        and int(summary.get("assistantCount") or 0) == 0
+        and not_enabled
+    )
+
+
+def exact_target_observation(tabs: Iterable[Mapping[str, Any]], target_id: str) -> dict[str, Any]:
+    """Classify one recorded target without consulting the active browser tab."""
+    matches = [dict(tab) for tab in tabs if _tab_id(tab) == str(target_id or "")]
+    if len(matches) != 1:
+        return {"state": "absent" if not matches else "ambiguous", "match_count": len(matches)}
+    tab = matches[0]
+    url = _tab_url(tab)
+    if STATE.CANONICAL_CHAT_RE.fullmatch(url):
+        return {
+            "state": "canonical",
+            "match_count": 1,
+            "target_id": target_id,
+            "url": STATE.canonical_conversation_url(url),
+            "tab": tab,
+        }
+    if url.rstrip("/") in {"https://chatgpt.com", "https://chat.openai.com"}:
+        return {"state": "root", "match_count": 1, "target_id": target_id, "url": url, "tab": tab}
+    return {"state": "drifted", "match_count": 1, "target_id": target_id, "url": url, "tab": tab}
+
+
+def build_exact_poll_command(executable: str, session_id: str, timeout: int) -> list[str]:
+    """Poll the recorded session target without navigating to stale stored URLs."""
+    return [
+        executable,
+        "web-ai",
+        "poll",
+        "--vendor",
+        "chatgpt",
+        "--session",
+        session_id,
+        "--timeout",
+        str(timeout),
+        "--json",
+    ]
+
+
 def app_decision_scope_matches(run_root: Path, decision_root: Path, scope_mode: str = "legacy-drive") -> bool:
     """Match legacy drive scope or fail-closed v3 exact-unit scope."""
     if scope_mode == "parallel-exact-unit":
@@ -1316,6 +1394,198 @@ class Bridge:
     ) -> dict[str, Any]:
         return self.confirm_user_stop(run_dir, explicit_user_request=explicit_user_request, reason=reason)
 
+    def _finish_target_drift_parent(self, state_file: Path, finalized: dict[str, Any]) -> dict[str, Any]:
+        parent_dir = state_file.parent.parent / str(finalized.get("parent_run_id") or "")
+        self._settle_user_stop_send_rejected_siblings(
+            parent_dir=parent_dir, excluded_run_id=str(finalized.get("run_id") or "")
+        )
+        final_tabs = self._parent_stop_final_tab_scan(parent_dir)
+        drained = self.store.finalize_user_stopped_parent(parent_dir, tab_absence_evidence=final_tabs)
+        if str(drained.get("phase") or "") == "PARENT_DRAINING":
+            retry_tabs = self._parent_stop_final_tab_scan(parent_dir)
+            drained = self.store.finalize_user_stopped_parent(
+                parent_dir, tab_absence_evidence=retry_tabs
+            )
+        if str(drained.get("phase") or "") != "PARENT_FAILED_CLOSED":
+            raise BridgeError("USER_STOP_PARENT_DRAIN_PENDING", "target-drift child settled but parent drain remains pending")
+        return finalized
+
+    def _try_user_stop_target_drift(
+        self, run_dir: str, state_file: Path, record: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Use only two read-only proof rounds; never adopt or close the survivor."""
+        stop = record.get("user_stop") if isinstance(record.get("user_stop"), dict) else {}
+        existing = stop.get("target_drift_abandonment") if isinstance(stop.get("target_drift_abandonment"), dict) else {}
+        if existing:
+            finalized = self.store.finalize_user_stop_target_drift(run_dir, abandonment=existing)
+            return self._finish_target_drift_parent(state_file, finalized)
+        published_path = state_file.parent / "user-stop" / "target-drift-abandonment.json"
+        if published_path.exists():
+            published = {
+                "path": str(published_path),
+                "sha256": STATE.sha256_file(published_path),
+                "bytes": published_path.stat().st_size,
+            }
+            finalized = self.store.finalize_user_stop_target_drift(run_dir, abandonment=published)
+            return self._finish_target_drift_parent(state_file, finalized)
+        owner_observation = self.store._owner_observation(record)
+        observed_owner = owner_observation.get("observed") if isinstance(owner_observation.get("observed"), dict) else {}
+        if observed_owner.get("alive") is not False:
+            return None
+        candidate = self.store.user_stop_target_drift_candidate(run_dir)
+        recorded = candidate["recorded"]
+        session_id = str(recorded.get("session_id") or "")
+        stored_target = str(recorded.get("target_id") or "")
+        stored_url = str(recorded.get("conversation_url") or "")
+        if not all((session_id, stored_target, stored_url)):
+            return None
+        try:
+            manifest = _load_manifest(record)
+        except Exception:
+            manifest = {}
+        executable = record_executable(record)
+        env = bridge_env(manifest)
+        timeout = int(manifest.get("user_stop_probe_timeout_seconds") or 30)
+        attempt = str(time.time_ns())
+        commands: list[dict[str, Any]] = []
+
+        def probe(name: str, command: list[str]) -> tuple[subprocess.CompletedProcess[str], Any]:
+            completed = self.runner(command, env, timeout)
+            evidence = self._evidence(state_file.parent, f"target-drift-{attempt}-{name}", completed)
+            payload: Any = None
+            for output in (completed.stdout or "", completed.stderr or ""):
+                try:
+                    payload = json.loads(output)
+                    break
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            commands.append({"name": name, "command": command, "evidence": evidence, "payload": sanitize_evidence(payload)})
+            return completed, payload
+
+        def canonical(value: Any) -> str:
+            try:
+                return STATE.canonical_conversation_url(str(value or ""))
+            except Exception:
+                return ""
+
+        def proof_round(index: int) -> dict[str, Any]:
+            tabs_completed, tabs_payload = probe(f"tabs-{index}", [executable, "tabs", "--json"])
+            session_completed, session_payload = probe(
+                f"session-{index}", [executable, "web-ai", "sessions", "show", session_id, "--json"]
+            )
+            tabs = tabs_payload.get("tabs") if isinstance(tabs_payload, dict) else tabs_payload
+            wrapper = session_payload if isinstance(session_payload, dict) else {}
+            session = wrapper.get("session") if isinstance(wrapper.get("session"), dict) else wrapper
+            survivor = str(session.get("targetId") or session.get("target_id") or "")
+            session_url = str(session.get("conversationUrl") or session.get("conversation_url") or "")
+            matching_target = [row for row in tabs or [] if isinstance(row, dict) and str(row.get("targetId") or "") == survivor]
+            matching_url = [row for row in tabs or [] if isinstance(row, dict) and canonical(row.get("url")) == canonical(stored_url)]
+            stored_live = [row for row in tabs or [] if isinstance(row, dict) and str(row.get("targetId") or "") == stored_target]
+            helper_values = [value for value in (wrapper.get("activeCommand"), session.get("activeCommand")) if value not in (None, {})]
+            core_valid = bool(
+                tabs_completed.returncode == 0 and session_completed.returncode == 0
+                and isinstance(tabs, list) and all(isinstance(row, dict) for row in tabs)
+                and str(session.get("sessionId") or session.get("session_id") or "") == session_id
+                and str(session.get("status") or "").casefold() == "complete"
+                and bool(session.get("completedAt") or session.get("completed_at"))
+                and bool(str(session.get("answer") or "").strip())
+                and survivor and survivor != stored_target
+                and canonical(session_url) == canonical(stored_url)
+                and not stored_live
+                and not helper_values
+            )
+            live_survivor_valid = bool(
+                core_valid and len(matching_target) == 1 and len(matching_url) == 1
+                and str(matching_target[0].get("type") or "") == "page"
+                and canonical(matching_target[0].get("url")) == canonical(stored_url)
+            )
+            no_live_target_valid = bool(core_valid and not matching_target and not matching_url)
+            return {
+                "valid": bool(live_survivor_valid or no_live_target_valid),
+                "live_survivor_valid": live_survivor_valid,
+                "no_live_target_valid": no_live_target_valid,
+                "survivor_target_id": survivor,
+                "session_url": session_url,
+                "last_streaming_state": session.get("lastStreamingState"),
+                "status": session.get("status"),
+                "completed_at": session.get("completedAt") or session.get("completed_at"),
+                "stored_target_absent": not stored_live,
+                "helper_values": sanitize_evidence(helper_values),
+                "tabs": sanitize_evidence(tabs),
+                "command_refs": [commands[-2]["evidence"], commands[-1]["evidence"]],
+            }
+
+        first = proof_round(1)
+        drift_observed = bool(first["stored_target_absent"] and first["survivor_target_id"] and first["survivor_target_id"] != stored_target)
+        if not drift_observed:
+            return None
+        second = proof_round(2)
+        survivor_id = str(first.get("survivor_target_id") or "")
+        live_survivor_mode = bool(first["live_survivor_valid"] and second["live_survivor_valid"])
+        no_live_target_mode = bool(first["no_live_target_valid"] and second["no_live_target_valid"])
+        if (
+            not first["valid"] or not second["valid"]
+            or not (live_survivor_mode or no_live_target_mode)
+            or second.get("survivor_target_id") != survivor_id
+            or canonical(second.get("session_url")) != canonical(stored_url)
+            or stored_target not in candidate["historical_owned_target_ids"]
+            or survivor_id in candidate["historical_owned_target_ids"]
+            or self.store.user_stop_target_drift_candidate(run_dir) != candidate
+        ):
+            raise BridgeError("USER_STOP_TARGET_DRIFT_UNPROVEN", "target drift is not stable and unowned; no mutation authorized", {"commands": commands})
+        descriptor_payload = {
+            "schema": "codex.chatgpt.user-stop-target-drift-abandonment/v1",
+            "decision": (
+                "abandon-without-close"
+                if live_survivor_mode
+                else "abandon-without-close-no-live-target"
+            ),
+            "child_identity": candidate["child_identity"],
+            "parent_identity": candidate["parent_identity"],
+            "lock_identity": candidate["lock_identity"],
+            "authorization": candidate["authorization"],
+            "authorization_sha256": candidate["authorization_sha256"],
+            "stop_epoch_nonce": candidate["stop_epoch_nonce"],
+            "parent_stop_scope": candidate["parent_stop_scope"],
+            "preimages": candidate["preimages"],
+            "recorded": recorded,
+            "proof_rounds": [first, second],
+            "commands": commands,
+            "dead_owner_proof": owner_observation,
+            "historical_owned_target_ids": candidate["historical_owned_target_ids"],
+            "required_absent_target_ids": sorted(
+                {
+                    *candidate["historical_owned_target_ids"],
+                    *([survivor_id] if no_live_target_mode else []),
+                }
+            ),
+            "historical_target_absence_union": sorted(
+                {
+                    *candidate["historical_owned_target_ids"],
+                    *([survivor_id] if no_live_target_mode else []),
+                }
+            ),
+            "historical_target_absent": True,
+            **(
+                {"protected_survivor": {"target_id": survivor_id, "conversation_url": stored_url, "ownership_adopted": False, "close_authorized": False, "tab_closed": False, "classification": "unowned-or-foreign-protected"}}
+                if live_survivor_mode
+                else {"reported_stale_target": {"target_id": survivor_id, "conversation_url": stored_url, "ownership_adopted": False, "close_authorized": False, "tab_closed": False, "proven_absent": True, "classification": "unowned-reported-stale-target-absent"}}
+            ),
+            "submission_outcome": "unknown",
+            "provider_terminal_asserted": False,
+            "provider_mutation_may_have_occurred": True,
+            "send_authorized": False,
+            "retry_authorized": False,
+            "recovery_authorized": False,
+            "result_capture_authorized": False,
+            "result_promotion_authorized": False,
+        }
+        descriptor = STATE.write_immutable_json_exclusive(
+            state_file.parent / "user-stop" / "target-drift-abandonment.json", descriptor_payload
+        )
+        finalized = self.store.finalize_user_stop_target_drift(run_dir, abandonment=descriptor)
+        return self._finish_target_drift_parent(state_file, finalized)
+
     def confirm_user_stop(
         self,
         run_dir: str,
@@ -1359,7 +1629,7 @@ class Bridge:
             )
 
         # A stop request must not enter the heavier abandonment protocol when
-        # the exact conversation has already finished.  One direct exact-URL
+        # the exact conversation has already finished. One direct exact-URL
         # adjudication captures the answer, releases the lock, and performs
         # the normal owned-tab cleanup.
         if record.get("conversation_url") and record.get("phase") in {
@@ -1412,23 +1682,24 @@ class Bridge:
                 or (record.get("user_stop") or {}).get("stop_epoch_nonce")
                 or ""
             )
-            manager_authorization = {
-                "schema": "codex.chatgpt.parent-wide-manager-authorization/v1",
-                "authorization_id": STATE.sha256_bytes(
-                    f"{parent_for_scope.get('run_id')}:{stop_epoch}".encode("utf-8")
-                ),
-                "issued_at": str(parent_for_scope.get("phase_at") or record.get("phase_at") or record.get("created_at") or ""),
-                "explicit_user_request": True,
-                "scope_kind": "exact-parent-and-listed-children",
-                "parent_run_id": parent_for_scope.get("run_id"),
-                "target_child_run_id": record.get("run_id"),
-                "reason": str(reason or "confirm explicit user stop").strip(),
-            }
-            self.store.establish_parent_wide_user_stop_scope(
-                parent_dir_for_scope,
-                manager_authorization=manager_authorization,
-                target_child_run_id=str(record.get("run_id") or ""),
-            )
+            if not isinstance(parent_for_scope.get("parent_stop_scope"), dict):
+                manager_authorization = {
+                    "schema": "codex.chatgpt.parent-wide-manager-authorization/v1",
+                    "authorization_id": STATE.sha256_bytes(
+                        f"{parent_for_scope.get('run_id')}:{stop_epoch}".encode("utf-8")
+                    ),
+                    "issued_at": str(parent_for_scope.get("phase_at") or record.get("phase_at") or record.get("created_at") or ""),
+                    "explicit_user_request": True,
+                    "scope_kind": "exact-parent-and-listed-children",
+                    "parent_run_id": parent_for_scope.get("run_id"),
+                    "target_child_run_id": record.get("run_id"),
+                    "reason": str(reason or "confirm explicit user stop").strip(),
+                }
+                self.store.establish_parent_wide_user_stop_scope(
+                    parent_dir_for_scope,
+                    manager_authorization=manager_authorization,
+                    target_child_run_id=str(record.get("run_id") or ""),
+                )
             _, record = self.store.load(run_dir)
         if (
             str(record.get("record_kind") or "") == "child"
@@ -1436,6 +1707,10 @@ class Bridge:
             and self.store._send_claim_proof(state_file, record) is None
         ):
             record = self.store.adopt_legacy_send_claim_for_user_stop(run_dir)
+        if str(record.get("record_kind") or "") == "child":
+            drift_finalized = self._try_user_stop_target_drift(run_dir, state_file, record)
+            if drift_finalized is not None:
+                return drift_finalized
 
         try:
             manifest = _load_manifest(record)
@@ -1817,25 +2092,59 @@ class Bridge:
         paths = self.store.paths(
             STATE.canonical_project_root(parent["project_root"]), str(parent["run_id"])
         )
+        lock = STATE.read_json(paths.lock_file)
         children = self.store._strict_parent_children(paths, parent)
-        known_targets: set[str] = set()
+        known_targets = set(self.store.parent_historical_owned_target_ids(paths, parent))
+        boundary_urls: set[str] = set()
+        def canonical_boundary_url(value: Any) -> str:
+            try:
+                return STATE.canonical_conversation_url(str(value or ""))
+            except Exception:
+                return str(value or "")
+        protected_survivors: list[dict[str, Any]] = []
         for child_file, child in children:
-            known_targets.add(str(child.get("current_target_id") or ""))
+            if child.get("conversation_url"):
+                boundary_urls.add(canonical_boundary_url(child.get("conversation_url")))
             for event in child.get("target_rebind_events") or []:
                 if isinstance(event, dict):
-                    known_targets.update(
-                        {
-                            str(event.get("old_target_id") or ""),
-                            str(event.get("new_target_id") or ""),
-                        }
-                    )
-            lifecycle_path = child_file.parent / "tab-lifecycle.json"
-            if lifecycle_path.is_file() and not lifecycle_path.is_symlink():
-                lifecycle = STATE.read_json(lifecycle_path)
-                for event in lifecycle.get("events") or []:
-                    if isinstance(event, dict):
-                        known_targets.add(str(event.get("target_id") or ""))
-        known_targets.discard("")
+                    for key in ("conversation_url", "old_conversation_url", "new_conversation_url", "url"):
+                        if event.get(key):
+                            boundary_urls.add(canonical_boundary_url(event.get(key)))
+            for evidence_name in ("tab-lifecycle.json", "composer-app-evidence.json"):
+                evidence_path = child_file.parent / evidence_name
+                if evidence_path.is_file() and not evidence_path.is_symlink():
+                    evidence = STATE.read_json(evidence_path)
+                    values = evidence.get("events") if isinstance(evidence.get("events"), list) else [evidence]
+                    for value in values:
+                        if isinstance(value, dict) and value.get("url"):
+                            boundary_urls.add(canonical_boundary_url(value.get("url")))
+            stop = child.get("user_stop") if isinstance(child.get("user_stop"), dict) else {}
+            drift_ref = stop.get("target_drift_abandonment") if isinstance(stop.get("target_drift_abandonment"), dict) else {}
+            if drift_ref:
+                drift_path = Path(str(drift_ref.get("path") or ""))
+                if (
+                    not drift_path.is_file() or drift_path.is_symlink()
+                    or STATE.sha256_file(drift_path) != str(drift_ref.get("sha256") or "")
+                ):
+                    raise BridgeError("PARENT_STOP_PROTECTED_SURVIVOR_INVALID", "protected survivor descriptor is invalid")
+                drift = STATE.read_json(drift_path)
+                recorded = drift.get("recorded") if isinstance(drift.get("recorded"), dict) else {}
+                if recorded.get("conversation_url"):
+                    boundary_urls.add(canonical_boundary_url(recorded.get("conversation_url")))
+                required = drift.get("required_absent_target_ids")
+                if not isinstance(required, list) or not all(isinstance(item, str) and item for item in required):
+                    raise BridgeError("PARENT_STOP_REQUIRED_ABSENCE_INVALID", "target-drift absence set is invalid")
+                historical = set(known_targets)
+                survivor = drift.get("protected_survivor")
+                if isinstance(survivor, dict):
+                    if str(survivor.get("target_id") or "") in historical:
+                        raise BridgeError("PARENT_STOP_PROTECTED_SURVIVOR_OWNED", "survivor appears in old-parent ownership")
+                    protected_survivors.append(survivor)
+                    boundary_urls.add(canonical_boundary_url(survivor.get("conversation_url")))
+                stale = drift.get("reported_stale_target")
+                if isinstance(stale, dict):
+                    boundary_urls.add(canonical_boundary_url(stale.get("conversation_url")))
+                known_targets.update(required)
         exemplar = children[0][1]
         try:
             manifest = _load_manifest(exemplar)
@@ -1856,7 +2165,10 @@ class Bridge:
         tabs = payload.get("tabs") if isinstance(payload, dict) else payload
         if not isinstance(tabs, list) or not all(isinstance(item, dict) for item in tabs):
             raise BridgeError("PARENT_STOP_FINAL_TAB_SCAN_INVALID", "final tabs payload is incomplete")
-        live_ids = {_tab_id(tab) for tab in tabs}
+        tab_ids = [_tab_id(tab) for tab in tabs]
+        if any(not target_id for target_id in tab_ids) or len(set(tab_ids)) != len(tab_ids):
+            raise BridgeError("PARENT_STOP_FINAL_TAB_SCAN_INVALID", "final tabs contain missing or duplicate target identities")
+        live_ids = set(tab_ids)
         absent = sorted(known_targets - live_ids)
         if len(absent) != len(known_targets):
             raise BridgeError(
@@ -1870,8 +2182,10 @@ class Bridge:
             "schema": "codex.chatgpt.parent-stop-final-tab-scan/v1",
             "parent_run_id": parent.get("run_id"),
             "parent_stop_scope": parent.get("parent_stop_scope"),
+            "stop_epoch_nonce": str((parent.get("parent_stop_scope") or {}).get("stop_epoch_nonce") or ""),
             "known_target_ids": sorted(known_targets),
             "all_known_targets_absent": True,
+            "protected_survivors": protected_survivors,
             "normalized_tabs": tabs,
             "tabs_sha256": STATE.sha256_bytes(
                 json.dumps(tabs, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1888,24 +2202,107 @@ class Bridge:
         }
         scan_path = parent_file.parent / "user-stop" / "final-tab-scan.json"
         if scan_path.exists():
-            existing = STATE.read_json(scan_path)
+            retry_paths = sorted(scan_path.parent.glob("final-tab-scan-retry-*.json"))
+            chain_paths = [scan_path, *retry_paths]
+            previous_descriptor: dict[str, Any] | None = None
+            existing: dict[str, Any] = {}
+            for index, chain_path in enumerate(chain_paths):
+                existing = STATE.read_json(chain_path)
+                descriptor = {"path": str(chain_path), "sha256": STATE.sha256_file(chain_path), "bytes": chain_path.stat().st_size}
+                if index == 0:
+                    if existing.get("schema") != "codex.chatgpt.parent-stop-final-tab-scan/v1":
+                        raise BridgeError("PARENT_STOP_FINAL_TAB_SCAN_CONFLICT", "base final tab scan is invalid")
+                elif (
+                    existing.get("schema") != "codex.chatgpt.parent-stop-final-tab-scan/v2"
+                    or existing.get("previous_scan") != previous_descriptor
+                ):
+                    raise BridgeError("PARENT_STOP_FINAL_TAB_SCAN_CONFLICT", "final tab scan retry chain is invalid")
+                if (
+                    existing.get("parent_stop_scope") != parent.get("parent_stop_scope")
+                    or str(existing.get("stop_epoch_nonce") or (existing.get("parent_stop_scope") or {}).get("stop_epoch_nonce") or "")
+                    != str((parent.get("parent_stop_scope") or {}).get("stop_epoch_nonce") or "")
+                    or list(existing.get("command") or [])[1:] != ["tabs", "--json"]
+                    or (
+                        existing.get("schema") == "codex.chatgpt.parent-stop-final-tab-scan/v2"
+                        and (existing.get("external_inventory_drift") or {}).get("mutation_commands") != []
+                    )
+                ):
+                    raise BridgeError("PARENT_STOP_FINAL_TAB_SCAN_CONFLICT", "final tab scan authority or command history is invalid")
+                previous_descriptor = descriptor
             if (
-                existing.get("schema") != scan_payload["schema"]
-                or existing.get("parent_run_id") != scan_payload["parent_run_id"]
+                existing.get("parent_run_id") != scan_payload["parent_run_id"]
                 or existing.get("parent_stop_scope") != scan_payload["parent_stop_scope"]
                 or existing.get("known_target_ids") != scan_payload["known_target_ids"]
-                or existing.get("normalized_tabs") != scan_payload["normalized_tabs"]
+                or existing.get("protected_survivors", []) != scan_payload["protected_survivors"]
                 or existing.get("all_known_targets_absent") is not True
             ):
                 raise BridgeError(
                     "PARENT_STOP_FINAL_TAB_SCAN_CONFLICT",
-                    "final tab inventory changed across retry",
+                    "final tab ownership boundary changed across retry",
                 )
-            return {
-                "path": str(scan_path),
-                "sha256": STATE.sha256_file(scan_path),
-                "bytes": scan_path.stat().st_size,
+            def row_key(row: dict[str, Any]) -> str:
+                return json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            old_rows = {row_key(row): row for row in existing.get("normalized_tabs") or [] if isinstance(row, dict)}
+            new_rows = {row_key(row): row for row in tabs}
+            if set(old_rows) == set(new_rows):
+                return previous_descriptor or {}
+            parent_phase = str(parent.get("phase") or "")
+            pre_drain_allowed = False
+            if parent_phase == "USER_STOP_REQUESTED":
+                scope = parent.get("parent_stop_scope") if isinstance(parent.get("parent_stop_scope"), dict) else {}
+                stop_epoch = str(scope.get("stop_epoch_nonce") or "")
+                target_abandoned = any(
+                    str(child.get("phase") or "") == "ABANDONED_UNCERTAIN"
+                    and isinstance((child.get("user_stop") or {}).get("target_drift_abandonment"), dict)
+                    for _, child in children
+                )
+                parent_scan_files = [
+                    *scan_path.parent.glob("parent-scan.json"),
+                    *scan_path.parent.glob("parent-scan-retry-*.json"),
+                ]
+                read_only_scan = self.store.finalize_user_stopped_parent(parent_dir, dry_run=True)
+                pre_drain_allowed = bool(
+                    str(lock.get("phase") or "") == "USER_STOP_REQUESTED"
+                    and parent.get("parent_stop_scope") == lock.get("parent_stop_scope")
+                    and stop_epoch
+                    and str(lock.get("stop_epoch_nonce") or "") == stop_epoch
+                    and parent.get("user_stop_scan") in (None, {})
+                    and lock.get("user_stop_scan") in (None, {})
+                    and not parent_scan_files
+                    and target_abandoned
+                    and read_only_scan.get("strict_terminal_scan_ready") is True
+                )
+            if parent_phase != "PARENT_DRAINING" and not pre_drain_allowed:
+                raise BridgeError("PARENT_STOP_FINAL_TAB_SCAN_CONFLICT", "foreign tab drift is retryable only while parent is draining")
+            changed = [old_rows[key] for key in sorted(set(old_rows) - set(new_rows))] + [new_rows[key] for key in sorted(set(new_rows) - set(old_rows))]
+            protected_ids = {str(item.get("target_id") or "") for item in protected_survivors}
+            forbidden_ids = known_targets | protected_ids
+            if any(
+                _tab_id(row) in forbidden_ids
+                or canonical_boundary_url(row.get("url")) in boundary_urls
+                for row in changed
+            ):
+                raise BridgeError("PARENT_STOP_FINAL_TAB_SCAN_CONFLICT", "tab drift overlaps owned, required-absent, or protected identity")
+            retry_payload = {
+                **scan_payload,
+                "schema": "codex.chatgpt.parent-stop-final-tab-scan/v2",
+                "previous_scan": previous_descriptor,
+                "external_inventory_drift": {
+                    "classification": (
+                        "foreign-unowned-tab-inventory-drift-pre-drain"
+                        if pre_drain_allowed
+                        else "foreign-unowned-tab-inventory-drift"
+                    ),
+                    "added": [new_rows[key] for key in sorted(set(new_rows) - set(old_rows))],
+                    "removed": [old_rows[key] for key in sorted(set(old_rows) - set(new_rows))],
+                    "mutation_commands": [],
+                    "ownership_adopted": False,
+                    "close_authorized": False,
+                    "prior_scan_attached_or_consumed": False if pre_drain_allowed else None,
+                },
             }
+            retry_path = scan_path.parent / f"final-tab-scan-retry-{len(retry_paths) + 1:03d}.json"
+            return STATE.write_immutable_json_exclusive(retry_path, retry_payload)
         return STATE.write_immutable_json_exclusive(scan_path, scan_payload)
 
     def _settle_user_stop_send_rejected_siblings(
@@ -1926,6 +2323,15 @@ class Bridge:
                 str(child.get("run_id") or "") == excluded_run_id
                 or str(child.get("phase") or "") != "SEND_REJECTED"
             ):
+                continue
+            if self.store._send_rejected_zero_provider_settled(child_file, child):
+                outcomes.append(
+                    {
+                        "run_id": child.get("run_id"),
+                        "settled": True,
+                        "classification": "zero-provider-already-settled",
+                    }
+                )
                 continue
             child_dir = str(child_file.parent)
             try:
@@ -3005,7 +3411,7 @@ class Bridge:
         manifest: dict[str, Any],
         session_id: str,
         run_dir: Path,
-    ) -> tuple[str | None, str | None, dict[str, Any]]:
+    ) -> tuple[str | None, str | None, dict[str, Any], dict[str, Any]]:
         command = [executable, "web-ai", "sessions", "show", session_id, "--json"]
         completed = self.runner(command, bridge_env(manifest), int(manifest.get("session_show_timeout_seconds") or 60))
         evidence = self._evidence(run_dir, "session-show", completed)
@@ -3014,7 +3420,34 @@ class Bridge:
         target_id = str(session.get("targetId") or session.get("target_id") or "") or None
         url = session.get("conversationUrl") or session.get("conversation_url") or session.get("url")
         canonical_url = str(url) if url and STATE.CANONICAL_CHAT_RE.fullmatch(str(url)) else None
-        return target_id, canonical_url, evidence
+        return target_id, canonical_url, evidence, dict(session)
+
+    def _observe_post_send_target(
+        self,
+        *,
+        run_dir: Path,
+        executable: str,
+        manifest: dict[str, Any],
+        target_id: str,
+        attempts: int = 4,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Observe only the send-returned target until it binds or settles."""
+        evidence: list[dict[str, Any]] = []
+        observation: dict[str, Any] = {"state": "absent", "match_count": 0}
+        for index in range(max(1, attempts)):
+            tabs, tabs_evidence = self._recovery_tabs(
+                run_dir=run_dir,
+                name=f"post-send-tabs-{index:02d}",
+                executable=executable,
+                env=bridge_env(manifest),
+            )
+            evidence.append(tabs_evidence)
+            observation = exact_target_observation(tabs, target_id)
+            if observation.get("state") in {"canonical", "ambiguous", "drifted"}:
+                return observation, evidence
+            if index + 1 < attempts:
+                time.sleep(0.25)
+        return observation, evidence
 
     def _recover_session_identity_from_store(
         self,
@@ -3097,7 +3530,15 @@ class Bridge:
 
     def retire_uncommitted_session(self, run_dir: str) -> dict[str, Any]:
         state_file, record = self.store.load(run_dir)
-        if record.get("phase") not in {"SUBMISSION_UNCERTAIN_IDENTITY_MISSING", "BLOCKED_RECOVERY_EXHAUSTED"}:
+        if record.get("phase") == "SEND_REJECTED":
+            return self.store.transition(run_dir, "CANCELLED_PRE_SUBMISSION")
+        if record.get("phase") not in {
+            "SUBMITTED",
+            "RECOVERY_REQUIRED",
+            "SUBMISSION_UNCERTAIN_IDENTITY_MISSING",
+            "BLOCKED_RECOVERY_EXHAUSTED",
+            "USER_STOP_REQUESTED",
+        }:
             raise BridgeError(
                 "UNCOMMITTED_SESSION_PHASE_INVALID",
                 "only an uncertain or exhausted run can retire an uncommitted session",
@@ -3160,7 +3601,6 @@ class Bridge:
             and isinstance(send_click, dict)
             and str(send_click.get("errorCode") or "") == "TARGET_UNRESOLVED"
             and not_enabled
-            and deadline_expired
             and target_absent
         ):
             raise BridgeError(
@@ -3192,7 +3632,8 @@ class Bridge:
                 "send_click_status": "unresolved",
                 "send_click_reason": "not-enabled",
                 "session_deadline": deadline_text,
-                "session_deadline_expired": True,
+                "session_deadline_expired": deadline_expired,
+                "session_deadline_wait_required": False,
                 "target_absent": True,
                 "show_evidence": show_evidence,
                 "tabs_evidence": tabs_evidence,
@@ -3208,7 +3649,8 @@ class Bridge:
             "target_id": target_id,
             "session_status": "sent",
             "observed_url": observed_url,
-            "session_deadline_expired": True,
+            "session_deadline_expired": deadline_expired,
+            "session_deadline_wait_required": False,
             "target_absent": True,
             "evidence_path": str(proof_path),
             "evidence_sha256": STATE.sha256_file(proof_path),
@@ -3220,18 +3662,19 @@ class Bridge:
             recovery_event={"kind": "uncommitted-session-proof-captured", "proof": proof_event},
         )
         self.store.transition(run_dir, "SEND_REJECTED", recovery_event=proof_event)
-        self.store.record_child_cleanup(
-            run_dir,
-            {
-                "ok": True,
-                "state": "already-absent",
-                "target_id": target_id,
-                "evidence": {
-                    "path": str(proof_path),
-                    "sha256": STATE.sha256_file(proof_path),
+        if str(record.get("record_kind") or "standalone") == "child":
+            self.store.record_child_cleanup(
+                run_dir,
+                {
+                    "ok": True,
+                    "state": "already-absent",
+                    "target_id": target_id,
+                    "evidence": {
+                        "path": str(proof_path),
+                        "sha256": STATE.sha256_file(proof_path),
+                    },
                 },
-            },
-        )
+            )
         return self.store.transition(run_dir, "CANCELLED_PRE_SUBMISSION")
 
     def _adjudicate_pre_submit_session_artifact(
@@ -4094,6 +4537,8 @@ class Bridge:
                         "status_payload": status_payload,
                         "page_text": page_text,
                     })
+                    if marker_contract.get("kind") == "run-owned-attachment":
+                        break
 
             restored, restore_evidence = self._run_recovery_command(
                 run_dir=state_file.parent,
@@ -4268,7 +4713,11 @@ class Bridge:
                     },
                 )
 
-            if len(exact_matches) == 1 and incomplete_candidates:
+            if (
+                len(exact_matches) == 1
+                and incomplete_candidates
+                and marker_contract.get("kind") != "run-owned-attachment"
+            ):
                 cleanup = self._cleanup_recovery_utility_targets(
                     run_dir=state_file.parent,
                     executable=executable,
@@ -4626,6 +5075,8 @@ class Bridge:
             timeout_seconds=composer_lock_timeout_seconds(initial_manifest),
         )
         prepared_target_id: str | None = None
+        pre_send_target_ids: set[str] = set()
+        pre_send_tabs_evidence: dict[str, Any] | None = None
         composer_evidence_path: Path | None = None
         tab_lifecycle = None
         composer_url = "https://chatgpt.com/"
@@ -4986,6 +5437,14 @@ class Bridge:
                     manifest=manifest,
                     lifecycle=tab_lifecycle,
                 )
+            if not use_prepared_target:
+                pre_send_tabs, pre_send_tabs_evidence = self._recovery_tabs(
+                    run_dir=state_file.parent,
+                    name="pre-send-tabs",
+                    executable=executable,
+                    env=send_env,
+                )
+                pre_send_target_ids = {_tab_id(tab) for tab in pre_send_tabs if _tab_id(tab)}
             if str(record.get("record_kind") or "standalone") == "child":
                 record = self.store.claim_child_send(run_dir)
             else:
@@ -5057,9 +5516,10 @@ class Bridge:
                 recovery_event={"kind": "required-app-not-selected", "warnings": warnings, "evidence": evidence},
             )
         session_identity_evidence = None
-        if envelope["ok"] and session_id and (not target_id or use_prepared_target):
+        shown_session: dict[str, Any] = {}
+        if envelope["ok"] and session_id:
             try:
-                shown_target, shown_url, session_identity_evidence = self._show_session_identity(
+                shown_target, shown_url, session_identity_evidence, shown_session = self._show_session_identity(
                     executable=executable,
                     manifest=manifest,
                     session_id=session_id,
@@ -5089,11 +5549,87 @@ class Bridge:
                 recovery_event={"kind": "session-target-id-missing", "evidence": session_identity_evidence},
             )
         if envelope["ok"] and session_id:
+            if not use_prepared_target and str(target_id) in pre_send_target_ids:
+                return self.store.transition(
+                    run_dir,
+                    "RECOVERY_REQUIRED",
+                    session_id=session_id,
+                    recovery_event={
+                        "kind": "send-returned-preexisting-target",
+                        "target_id": target_id,
+                        "pre_send_tabs_evidence": pre_send_tabs_evidence,
+                        "session_identity_evidence": session_identity_evidence,
+                    },
+                )
+            post_send_observation, post_send_tabs_evidence = self._observe_post_send_target(
+                run_dir=state_file.parent,
+                executable=executable,
+                manifest=manifest,
+                target_id=str(target_id),
+            )
+            if post_send_observation.get("state") == "canonical":
+                url = str(post_send_observation["url"])
+            elif post_send_observation.get("state") in {"absent", "ambiguous", "drifted"}:
+                return self.store.transition(
+                    run_dir,
+                    "RECOVERY_REQUIRED",
+                    session_id=session_id,
+                    recovery_event={
+                        "kind": "post-send-target-unusable",
+                        "target_id": target_id,
+                        "observation": sanitize_evidence(post_send_observation),
+                        "tabs_evidence": post_send_tabs_evidence,
+                    },
+                )
+            elif session_send_not_committed(shown_session):
+                rejected = self.store.transition(
+                    run_dir,
+                    "SEND_REJECTED",
+                    session_id=session_id,
+                    target_id=target_id,
+                    recovery_event={
+                        "kind": "verified-send-click-not-committed",
+                        "observation": sanitize_evidence(post_send_observation),
+                        "session_identity_evidence": session_identity_evidence,
+                        "tabs_evidence": post_send_tabs_evidence,
+                    },
+                )
+                if not use_prepared_target:
+                    tab_lifecycle.record_owned(
+                        run_dir,
+                        target_id=str(target_id),
+                        url=str(post_send_observation.get("url") or composer_url),
+                        stage="rejected-send-root",
+                    )
+                cleanup = self._safe_tab_cleanup(
+                    tab_lifecycle,
+                    run_dir,
+                    target_id=str(target_id),
+                    url=str(post_send_observation.get("url") or composer_url),
+                    reason="verified-send-click-not-committed",
+                )
+                if cleanup.get("ok"):
+                    return self.store.transition(
+                        run_dir,
+                        "CANCELLED_PRE_SUBMISSION",
+                        recovery_event={"kind": "verified-send-root-cleaned", "cleanup": cleanup},
+                    )
+                return rejected
+            if not use_prepared_target:
+                tab_lifecycle.record_owned(
+                    run_dir,
+                    target_id=str(target_id),
+                    url=str(url or composer_url),
+                    stage="send-created-target",
+                )
             receipt = {
                 "command": command[:4] + ["<redacted-args>"],
                 "evidence": evidence,
                 "composer_app_evidence": str(composer_evidence_path) if composer_evidence_path else None,
                 "session_identity_evidence": session_identity_evidence,
+                "pre_send_tabs_evidence": pre_send_tabs_evidence,
+                "post_send_observation": sanitize_evidence(post_send_observation),
+                "post_send_tabs_evidence": post_send_tabs_evidence,
                 "payload_sha256": sha256_bytes(json.dumps(payload, sort_keys=True).encode("utf-8")),
             }
             submitted = self.store.transition(
@@ -5159,8 +5695,7 @@ class Bridge:
         if record["phase"] not in {"SUBMITTED", "URL_BOUND", "RESPONSE_IN_PROGRESS", "RECOVERING"}:
             raise BridgeError("POLL_PHASE_INVALID", f"poll not allowed in phase {record['phase']}")
         # A completed exact URL is stronger evidence than a stale/crashed
-        # session command.  Settle it immediately instead of waiting for the
-        # configured (often hours-long) poll timeout.
+        # session command. Settle it before any hours-long poll timeout.
         if record.get("conversation_url") and record.get("phase") == "RECOVERING":
             direct = self._try_exact_url_terminal_now(run_dir)
             if direct.get("phase") in {"COMPLETE", "PROVIDER_FAILED_TERMINAL", "BLOCKED_TARGET_AMBIGUOUS"}:
@@ -5169,19 +5704,47 @@ class Bridge:
         manifest = _load_manifest(record)
         executable = record_executable(record)
         timeout = int(timeout_seconds or manifest.get("timeout_seconds") or 1800)
-        command = [
-            executable,
-            "web-ai",
-            "poll",
-            "--vendor",
-            "chatgpt",
-            "--session",
-            str(record["session_id"]),
-            "--navigate",
-            "--timeout",
-            str(timeout),
-            "--json",
-        ]
+        saved_url = str(record.get("conversation_url") or "")
+        target_id = str(record.get("current_target_id") or "")
+        if not STATE.CANONICAL_CHAT_RE.fullmatch(saved_url) or not target_id:
+            return self.store.transition(
+                run_dir,
+                "RECOVERY_REQUIRED",
+                recovery_event={
+                    "kind": "poll-requires-exact-bound-conversation",
+                    "session_id": record.get("session_id"),
+                    "target_id": target_id or None,
+                    "conversation_url": saved_url or None,
+                },
+            )
+        try:
+            tabs, tabs_evidence = self._recovery_tabs(
+                run_dir=state_file.parent,
+                name="poll-exact-target-preflight",
+                executable=executable,
+                env=bridge_env(manifest),
+            )
+            observation = exact_target_observation(tabs, target_id)
+        except BridgeError as exc:
+            return self.store.transition(
+                run_dir,
+                "RECOVERY_REQUIRED",
+                recovery_event={"kind": "poll-target-preflight-failed", "detail": exc.envelope()},
+            )
+        if (
+            observation.get("state") != "canonical"
+            or str(observation.get("url") or "") != STATE.canonical_conversation_url(saved_url)
+        ):
+            return self.store.transition(
+                run_dir,
+                "RECOVERY_REQUIRED",
+                recovery_event={
+                    "kind": "poll-exact-target-drift",
+                    "observation": sanitize_evidence(observation),
+                    "tabs_evidence": tabs_evidence,
+                },
+            )
+        command = build_exact_poll_command(executable, str(record["session_id"]), timeout)
         try:
             completed = self.runner(command, bridge_env(manifest), timeout + 30)
         except Exception as exc:
@@ -5279,14 +5842,19 @@ class Bridge:
             known_preexisting_target_ids = {_tab_id(tab) for tab in pre_doctor_tabs if _tab_id(tab)}
         except BridgeError:
             known_preexisting_target_ids = set()
-        # The persisted canonical URL is the shortest recovery authority.  If
-        # it has one live match and is already terminal, capture it and finish
-        # before doctor/history or any stale command timeout is consulted.
+        # The exact canonical URL is the shortest recovery authority. Do not
+        # wait for doctor/history or stale command expiry when it is terminal.
         direct = self._try_exact_url_terminal_now(
             run_dir,
             tabs=pre_doctor_tabs if "pre_doctor_tabs" in locals() else None,
         )
         if direct.get("phase") in {"COMPLETE", "PROVIDER_FAILED_TERMINAL", "BLOCKED_TARGET_AMBIGUOUS"}:
+            return direct
+        # Once an exact conversation URL exists, stale agbrowse session URLs
+        # are never allowed to navigate that target.  A later invocation will
+        # observe the same exact URL again; doctor/history are only identity
+        # discovery paths for runs that still lack a canonical conversation.
+        if STATE.CANONICAL_CHAT_RE.fullmatch(str(direct.get("conversation_url") or "")):
             return direct
         doctor_evidence: dict[str, Any] | None = None
         if record.get("session_id"):

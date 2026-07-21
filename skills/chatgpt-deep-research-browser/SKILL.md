@@ -57,7 +57,7 @@ python <CODEX_HOME>\skills\chatgpt-deep-research-browser\scripts\run_chatgpt_dee
 - Distinct projects may run through separate agbrowse `--parallel` sessions.
 - On interruption, poll or recover only the recorded agbrowse session.
 - Reject any canonical conversation URL already owned by another run.
-- Recover with `agbrowse web-ai sessions doctor <session> --navigate --json`.
+- Recover the persisted canonical URL first and observe its unique exact live target without navigation. Never run `poll --navigate` or a navigating doctor against a run with a known canonical URL. Run `agbrowse web-ai sessions doctor <session> --json` (without `--navigate`) and bounded read-only history adjudication only when the canonical URL is missing.
 - Accept only the exact current-run `https://chatgpt.com/c/<id>` URL.
 - Never submit a replacement while the first submission is uncertain.
 - Keep the submitted research tab open while it is active, streaming, uncertain, or user-stopped-but-unconfirmed. After durable `COMPLETE` and nonempty immutable research capture, automatically close its exact run-owned target only when the canonical URL has one unique live match, no foreign owner exists, and absence is re-verified. Manual/unowned, foreign, and ambiguous tabs remain protected.

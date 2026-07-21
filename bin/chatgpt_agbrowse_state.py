@@ -214,7 +214,7 @@ ALLOWED_TRANSITIONS = {
     "PREFLIGHTED": {"LEASED", "PREFLIGHT_BLOCKED", "BLOCKED_APP_TRANSACTION"},
     "LEASED": {"SEND_STARTED", "PREFLIGHT_BLOCKED", "BLOCKED_APP_TRANSACTION"},
     "SEND_STARTED": {"SUBMITTED", "SEND_REJECTED", "SUBMISSION_UNCERTAIN_IDENTITY_MISSING", "RECOVERY_REQUIRED", "RECOVERING"},
-    "SUBMITTED": {"URL_BOUND", "RECOVERY_REQUIRED", "PROVIDER_FAILED_TERMINAL", "SUBMISSION_UNCERTAIN_IDENTITY_MISSING", "BLOCKED_TARGET_AMBIGUOUS"},
+    "SUBMITTED": {"URL_BOUND", "RECOVERY_REQUIRED", "RECOVERING", "PROVIDER_FAILED_TERMINAL", "SUBMISSION_UNCERTAIN_IDENTITY_MISSING", "BLOCKED_TARGET_AMBIGUOUS"},
     "URL_BOUND": {"RESPONSE_IN_PROGRESS", "RESULT_CAPTURED", "RECOVERY_REQUIRED", "PROVIDER_FAILED_TERMINAL"},
     "RESPONSE_IN_PROGRESS": {"RESULT_CAPTURED", "RECOVERY_REQUIRED", "RECOVERING", "PROVIDER_FAILED_TERMINAL"},
     "RECOVERY_REQUIRED": {
@@ -242,6 +242,7 @@ ALLOWED_TRANSITIONS = {
     "BLOCKED_APP_TRANSACTION": {"PREFLIGHTED", "CANCELLED_PRE_SUBMISSION"},
     "SUBMISSION_UNCERTAIN_IDENTITY_MISSING": {"SEND_REJECTED", "RECOVERING"},
     "BLOCKED_RECOVERY_EXHAUSTED": {"RECOVERING", "SEND_REJECTED"},
+    "USER_STOP_REQUESTED": {"RECOVERING"},
 }
 
 TERMINAL_PHASES = {
@@ -1403,7 +1404,7 @@ class RunStore:
         if (
             parent.get("schema") != SCHEMA
             or str(parent.get("record_kind") or "") != "parent"
-            or str(parent.get("phase") or "") != "USER_STOP_REQUESTED"
+            or str(parent.get("phase") or "") not in {"USER_STOP_REQUESTED", "PARENT_DRAINING"}
             or child_identity["parent_run_id"] != parent_identity["run_id"]
             or child_identity["parent_workflow_id"] != parent_identity["workflow_id"]
             or child_identity["parent_lease_nonce"] != parent_identity["lease_nonce"]
@@ -1886,6 +1887,121 @@ class RunStore:
             raise StateError("USER_STOP_CHILD_SET_INVALID", "parent child record is missing", {"missing": sorted(set(expected) - set(found))})
         return [found[run_id] for run_id in sorted(found)]
 
+    @staticmethod
+    def historical_owned_target_ids(child_state_file: Path, child: dict[str, Any]) -> list[str]:
+        """Return the complete ownership union without adopting any observed target."""
+        targets = {str(child.get("current_target_id") or "")}
+        for event in child.get("target_rebind_events") or []:
+            if isinstance(event, dict):
+                targets.update({str(event.get("old_target_id") or ""), str(event.get("new_target_id") or "")})
+        lifecycle_path = child_state_file.parent / "tab-lifecycle.json"
+        if lifecycle_path.exists():
+            immutable_file_snapshot(lifecycle_path, embed_bytes=False)
+            lifecycle = read_json(lifecycle_path)
+            if lifecycle.get("schema") != "codex.chatgpt.agbrowse-tab-lifecycle/v1":
+                raise StateError("HISTORICAL_TARGET_EVIDENCE_INVALID", "tab lifecycle schema is invalid")
+            for event in lifecycle.get("events") or []:
+                if isinstance(event, dict):
+                    targets.add(str(event.get("target_id") or ""))
+        composer_paths = {child_state_file.parent / "composer-app-evidence.json"}
+        requested = child.get("requested") if isinstance(child.get("requested"), dict) else {}
+        for key in ("composer_app_evidence", "composer_evidence"):
+            value = child.get(key) or requested.get(key)
+            if value:
+                composer_paths.add(Path(str(value)))
+        for path in composer_paths:
+            if path.exists():
+                immutable_file_snapshot(path, embed_bytes=False)
+                composer = read_json(path)
+                targets.add(str(composer.get("target_id") or composer.get("targetId") or ""))
+        targets.discard("")
+        return sorted(targets)
+
+    def parent_historical_owned_target_ids(self, paths: RunPaths, parent: dict[str, Any]) -> list[str]:
+        targets: set[str] = set()
+        for child_file, child in self._strict_parent_children(paths, parent):
+            targets.update(self.historical_owned_target_ids(child_file, child))
+        return sorted(targets)
+
+    @staticmethod
+    def historical_owned_urls(child_state_file: Path, child: dict[str, Any]) -> list[str]:
+        """Return URLs recorded by child ownership evidence without inferring ownership."""
+        urls = {str(child.get("conversation_url") or "")}
+        for event in child.get("target_rebind_events") or []:
+            if isinstance(event, dict):
+                for key in ("conversation_url", "old_conversation_url", "new_conversation_url", "url"):
+                    urls.add(str(event.get(key) or ""))
+        for evidence_name in ("tab-lifecycle.json", "composer-app-evidence.json"):
+            path = child_state_file.parent / evidence_name
+            if path.exists():
+                immutable_file_snapshot(path, embed_bytes=False)
+                evidence = read_json(path)
+                values = evidence.get("events") if isinstance(evidence.get("events"), list) else [evidence]
+                for value in values:
+                    if isinstance(value, dict):
+                        urls.add(str(value.get("url") or ""))
+        urls.discard("")
+        return sorted(urls)
+
+    def parent_historical_owned_urls(self, paths: RunPaths, parent: dict[str, Any]) -> list[str]:
+        urls: set[str] = set()
+        for child_file, child in self._strict_parent_children(paths, parent):
+            urls.update(self.historical_owned_urls(child_file, child))
+        return sorted(urls)
+
+    def user_stop_target_drift_candidate(self, run_dir: str | os.PathLike[str]) -> dict[str, Any]:
+        """Validate static authority for the narrow read-only target-drift branch."""
+        state_file, initial = self.load(run_dir)
+        if str(initial.get("record_kind") or "") != "child":
+            raise StateError("TARGET_DRIFT_CHILD_REQUIRED", "target drift requires a child")
+        paths, parent_file, _, lock_file, _ = self._child_stop_context(state_file, initial)
+        with exclusive_state_lock(paths.parent_transition_lock):
+            child, parent, lock = read_json(state_file), read_json(parent_file), read_json(lock_file)
+            if any(str(item.get("phase") or "") != "USER_STOP_REQUESTED" for item in (child, parent, lock)):
+                raise StateError("TARGET_DRIFT_STOP_PHASE_INVALID", "child, parent, and lock must remain stopped")
+            scope_ref = parent.get("parent_stop_scope") if isinstance(parent.get("parent_stop_scope"), dict) else {}
+            scope_path = Path(str(scope_ref.get("path") or ""))
+            stop = child.get("user_stop") if isinstance(child.get("user_stop"), dict) else {}
+            auth = stop.get("authorization") if isinstance(stop.get("authorization"), dict) else {}
+            auth_path = Path(str(auth.get("path") or ""))
+            request = (lock.get("user_stop_requests") or {}).get(str(child.get("run_id") or ""))
+            if (
+                scope_ref != lock.get("parent_stop_scope")
+                or not scope_path.is_file() or scope_path.is_symlink()
+                or sha256_file(scope_path) != str(scope_ref.get("sha256") or "")
+                or scope_path.stat().st_size != int(scope_ref.get("bytes") or -1)
+                or not auth_path.is_file() or auth_path.is_symlink()
+                or sha256_file(auth_path) != str(stop.get("authorization_sha256") or "")
+                or not isinstance(request, dict)
+            ):
+                raise StateError("TARGET_DRIFT_AUTHORITY_INVALID", "scope or authorization is not exact")
+            scope = read_json(scope_path)
+            entries = [entry for entry in scope.get("ordered_children") or [] if isinstance(entry, dict) and str(entry.get("run_id") or "") == str(child.get("run_id") or "")]
+            epoch = str(stop.get("stop_epoch_nonce") or "")
+            if (
+                scope.get("schema") != "codex.chatgpt.parent-wide-user-stop/v1"
+                or scope.get("explicit_user_request") is not True
+                or len(entries) != 1
+                or any(entries[0].get(key) != child.get(key) for key in ("run_id", "stage_id", "role", "lane", "iteration"))
+                or not epoch
+                or str(request.get("stop_epoch_nonce") or "") != epoch
+                or str(lock.get("stop_epoch_nonce") or "") != epoch
+                or str(scope.get("stop_epoch_nonce") or "") != epoch
+            ):
+                raise StateError("TARGET_DRIFT_AUTHORITY_INVALID", "stop epoch or child tuple is not exact")
+            return {
+                "child_identity": {key: child.get(key) for key in ("run_id", "parent_run_id", "stage_id", "role", "lane", "iteration", "project_root", "project_key", "parent_workflow_id", "parent_lease_nonce", "manifest_sha256", "prompt_sha256")},
+                "parent_identity": {key: parent.get(key) for key in ("run_id", "project_root", "project_key", "workflow_id", "lease_nonce", "manifest_sha256", "owner")},
+                "lock_identity": {key: lock.get(key) for key in ("schema", "record_kind", "run_id", "parent_run_id", "project_root", "project_key", "workflow_id", "lease_nonce", "manifest_sha256", "owner", "phase", "stop_epoch_nonce")},
+                "authorization": auth,
+                "authorization_sha256": stop.get("authorization_sha256"),
+                "stop_epoch_nonce": epoch,
+                "parent_stop_scope": scope_ref,
+                "recorded": {"session_id": child.get("session_id"), "target_id": child.get("current_target_id"), "conversation_url": child.get("conversation_url")},
+                "historical_owned_target_ids": self.parent_historical_owned_target_ids(paths, parent),
+                "preimages": {"child": immutable_file_snapshot(state_file, embed_bytes=False), "parent": immutable_file_snapshot(parent_file, embed_bytes=False), "lock": immutable_file_snapshot(lock_file, embed_bytes=False), "scope": immutable_file_snapshot(scope_path, embed_bytes=False), "authorization": immutable_file_snapshot(auth_path, embed_bytes=False)},
+            }
+
     def _child_stop_context(self, state_file: Path, child: dict[str, Any]) -> tuple[RunPaths, Path, dict[str, Any], Path, dict[str, Any]]:
         root = canonical_project_root(str(child.get("project_root") or ""))
         paths = self.paths(root, str(child.get("parent_run_id") or ""))
@@ -2234,6 +2350,109 @@ class RunStore:
             child.update({"phase": "ABANDONED_UNCERTAIN", "phase_at": utc_now(), "updated_at": utc_now(), "terminal_block_code": None})
             write_json_atomic(state_file, child)
             # Deliberately do not remove the parent lock; parent drain owns it.
+            return child
+
+    def finalize_user_stop_target_drift(
+        self, run_dir: str | os.PathLike[str], *, abandonment: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Abandon one stopped child without adopting or closing its survivor."""
+        state_file, initial = self.load(run_dir)
+        if str(initial.get("phase") or "") == "ABANDONED_UNCERTAIN":
+            existing = (initial.get("user_stop") or {}).get("target_drift_abandonment")
+            if existing == abandonment:
+                return initial
+            raise StateError("TARGET_DRIFT_DESCRIPTOR_CONFLICT", "a different abandonment is already recorded")
+        candidate = self.user_stop_target_drift_candidate(run_dir)
+        paths, parent_file, _, lock_file, _ = self._child_stop_context(state_file, initial)
+        with exclusive_state_lock(paths.parent_transition_lock):
+            child, parent, lock = read_json(state_file), read_json(parent_file), read_json(lock_file)
+            descriptor_path = Path(str(abandonment.get("path") or ""))
+            try:
+                descriptor_path.resolve(strict=True).relative_to((state_file.parent / "user-stop").resolve(strict=True))
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise StateError("TARGET_DRIFT_DESCRIPTOR_INVALID", "descriptor is outside child user-stop evidence") from exc
+            if (
+                not descriptor_path.is_file() or descriptor_path.is_symlink()
+                or sha256_file(descriptor_path) != str(abandonment.get("sha256") or "")
+                or descriptor_path.stat().st_size != int(abandonment.get("bytes") or -1)
+            ):
+                raise StateError("TARGET_DRIFT_DESCRIPTOR_INVALID", "descriptor bytes are not exact")
+            evidence = read_json(descriptor_path)
+            current_preimages = {
+                "child": immutable_file_snapshot(state_file, embed_bytes=False),
+                "parent": immutable_file_snapshot(parent_file, embed_bytes=False),
+                "lock": immutable_file_snapshot(lock_file, embed_bytes=False),
+            }
+            decision = str(evidence.get("decision") or "")
+            survivor = evidence.get("protected_survivor") if isinstance(evidence.get("protected_survivor"), dict) else {}
+            stale = evidence.get("reported_stale_target") if isinstance(evidence.get("reported_stale_target"), dict) else {}
+            historical = candidate["historical_owned_target_ids"]
+            required_absent = evidence.get("required_absent_target_ids")
+            absence_union = evidence.get("historical_target_absence_union")
+            live_survivor_valid = bool(
+                decision == "abandon-without-close"
+                and required_absent == historical
+                and absence_union == required_absent
+                and survivor.get("ownership_adopted") is False
+                and survivor.get("close_authorized") is False
+                and survivor.get("tab_closed") is False
+                and survivor.get("classification") == "unowned-or-foreign-protected"
+                and str(survivor.get("target_id") or "") not in historical
+            )
+            stale_target_id = str(stale.get("target_id") or "")
+            no_live_target_valid = bool(
+                decision == "abandon-without-close-no-live-target"
+                and stale_target_id
+                and stale_target_id not in historical
+                and required_absent == sorted({*historical, stale_target_id})
+                and absence_union == required_absent
+                and stale.get("ownership_adopted") is False
+                and stale.get("close_authorized") is False
+                and stale.get("tab_closed") is False
+                and stale.get("proven_absent") is True
+                and stale.get("classification") == "unowned-reported-stale-target-absent"
+                and not survivor
+            )
+            if (
+                evidence.get("schema") != "codex.chatgpt.user-stop-target-drift-abandonment/v1"
+                or not (live_survivor_valid or no_live_target_valid)
+                or evidence.get("submission_outcome") != "unknown"
+                or evidence.get("provider_terminal_asserted") is not False
+                or evidence.get("provider_mutation_may_have_occurred") is not True
+                or evidence.get("recorded") != candidate["recorded"]
+                or evidence.get("historical_owned_target_ids") != historical
+                or evidence.get("parent_stop_scope") != candidate["parent_stop_scope"]
+                or evidence.get("stop_epoch_nonce") != candidate["stop_epoch_nonce"]
+                or evidence.get("authorization_sha256") != candidate["authorization_sha256"]
+                or any(evidence.get("preimages", {}).get(key) != current_preimages[key] for key in current_preimages)
+            ):
+                raise StateError("TARGET_DRIFT_DESCRIPTOR_INVALID", "descriptor does not bind the unchanged stop state")
+            recorded_target = str(child.get("current_target_id") or "")
+            recorded_url = child.get("conversation_url")
+            rebind_events = list(child.get("target_rebind_events") or [])
+            receipt = child.get("submission_receipt")
+            child.setdefault("user_stop", {})["target_drift_abandonment"] = abandonment
+            child["user_stop"]["status"] = "confirmed-target-drift-abandoned-uncertain"
+            child["result"] = None
+            child["cleanup_pending"] = False
+            child["owned_open_tabs"] = 0
+            child["owned_tab_state"] = (
+                "historical-target-absent-survivor-protected"
+                if live_survivor_valid
+                else "historical-and-reported-targets-absent"
+            )
+            child["terminal_block_code"] = None
+            now = utc_now()
+            child.setdefault("phase_events", []).append({"from": "USER_STOP_REQUESTED", "to": "ABANDONED_UNCERTAIN", "at": now, "reason": "target-drift-no-close"})
+            child.update({"phase": "ABANDONED_UNCERTAIN", "phase_at": now, "updated_at": now})
+            if (
+                str(child.get("current_target_id") or "") != recorded_target
+                or child.get("conversation_url") != recorded_url
+                or list(child.get("target_rebind_events") or []) != rebind_events
+                or child.get("submission_receipt") != receipt
+            ):
+                raise StateError("TARGET_DRIFT_OWNERSHIP_MUTATION_FORBIDDEN", "target ownership changed during abandonment")
+            write_json_atomic(state_file, child)
             return child
 
     def adopt_legacy_user_stop(self, parent_run_dir: str | os.PathLike[str]) -> dict[str, Any]:
@@ -4631,11 +4850,181 @@ class RunStore:
                 raise
             return record
 
+    @staticmethod
+    def _terminal_lock_file_snapshot(
+        lock_file: Path,
+    ) -> tuple[dict[str, Any], bytes]:
+        """Read one regular lock through one handle and retain its stable OS identity."""
+        raw_path = lock_file.expanduser()
+        try:
+            if raw_path.is_symlink() or (
+                hasattr(os.path, "isjunction") and os.path.isjunction(raw_path)
+            ):
+                raise OSError("terminal lock is a reparse point")
+            with raw_path.open("rb") as handle:
+                before = os.fstat(handle.fileno())
+                if not stat.S_ISREG(before.st_mode):
+                    raise OSError("terminal lock is not regular")
+                if os.name == "nt":
+                    import ctypes
+                    import msvcrt
+
+                    class _ByHandleFileInformation(ctypes.Structure):
+                        _fields_ = [
+                            ("dwFileAttributes", ctypes.c_ulong),
+                            ("ftCreationTimeLow", ctypes.c_ulong),
+                            ("ftCreationTimeHigh", ctypes.c_ulong),
+                            ("ftLastAccessTimeLow", ctypes.c_ulong),
+                            ("ftLastAccessTimeHigh", ctypes.c_ulong),
+                            ("ftLastWriteTimeLow", ctypes.c_ulong),
+                            ("ftLastWriteTimeHigh", ctypes.c_ulong),
+                            ("dwVolumeSerialNumber", ctypes.c_ulong),
+                            ("nFileSizeHigh", ctypes.c_ulong),
+                            ("nFileSizeLow", ctypes.c_ulong),
+                            ("nNumberOfLinks", ctypes.c_ulong),
+                            ("nFileIndexHigh", ctypes.c_ulong),
+                            ("nFileIndexLow", ctypes.c_ulong),
+                        ]
+
+                    info = _ByHandleFileInformation()
+                    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                    ok = kernel32.GetFileInformationByHandle(
+                        ctypes.c_void_p(msvcrt.get_osfhandle(handle.fileno())),
+                        ctypes.byref(info),
+                    )
+                    if not ok:
+                        raise OSError(ctypes.get_last_error(), "file identity unavailable")
+                    os_identity = {
+                        "kind": "windows-file-id",
+                        "volume_serial": int(info.dwVolumeSerialNumber),
+                        "file_index_high": int(info.nFileIndexHigh),
+                        "file_index_low": int(info.nFileIndexLow),
+                    }
+                else:
+                    os_identity = {
+                        "kind": "posix-device-inode",
+                        "device": int(before.st_dev),
+                        "inode": int(before.st_ino),
+                    }
+                data = handle.read()
+                after = os.fstat(handle.fileno())
+                if (
+                    before.st_dev != after.st_dev
+                    or before.st_ino != after.st_ino
+                    or before.st_size != after.st_size
+                    or len(data) != after.st_size
+                ):
+                    raise OSError("terminal lock changed while being read")
+            resolved = raw_path.resolve(strict=True)
+            snapshot = {
+                "path": str(raw_path),
+                "resolved_path": str(resolved),
+                "sha256": sha256_bytes(data),
+                "bytes": len(data),
+                "regular_file": True,
+                "symlink": False,
+                "reparse_point": False,
+                "os_identity": os_identity,
+            }
+            return snapshot, data
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise StateError(
+                "BLOCKED_OWNER_MISMATCH",
+                "terminal stopped lock is not one stable regular file",
+            ) from exc
+
+    @staticmethod
+    def _validate_terminal_user_stop_lock(
+        lock_file: Path, parent: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any], bytes]:
+        """Validate the exact terminal lock bytes and every stop authority binding."""
+        expected = (
+            parent.get("terminal_user_stop_lock")
+            if isinstance(parent.get("terminal_user_stop_lock"), dict)
+            else {}
+        )
+        try:
+            observed, raw_bytes = RunStore._terminal_lock_file_snapshot(lock_file)
+            parsed = json.loads(raw_bytes.decode("utf-8"))
+            if not isinstance(parsed, dict):
+                raise ValueError("terminal lock JSON must be an object")
+            lock = parsed
+            canonical_parent_root = str(canonical_project_root(parent["project_root"]))
+            canonical_lock_root = str(canonical_project_root(lock["project_root"]))
+            owner = lock.get("owner") if isinstance(lock.get("owner"), dict) else {}
+            parent_owner = parent.get("owner") if isinstance(parent.get("owner"), dict) else {}
+            scope = parent.get("parent_stop_scope")
+            scope_value = scope if isinstance(scope, dict) else {}
+            tombstone = parent.get("user_stop_tombstone") if isinstance(parent.get("user_stop_tombstone"), dict) else {}
+            stop_epoch = str(scope_value.get("stop_epoch_nonce") or tombstone.get("stop_epoch_nonce") or "")
+            exact_descriptor = {
+                "path": str(lock_file),
+                "resolved_path": str(lock_file.resolve(strict=True)),
+                "sha256": str(expected.get("sha256") or ""),
+                "bytes": int(expected.get("bytes") or -1),
+                "regular_file": True,
+                "symlink": False,
+                "reparse_point": False,
+            }
+            observed_descriptor = {key: observed[key] for key in exact_descriptor}
+            valid = bool(
+                expected == exact_descriptor
+                and observed_descriptor == exact_descriptor
+                and re.fullmatch(r"[0-9a-f]{64}", exact_descriptor["sha256"])
+                and lock.get("schema") == SCHEMA
+                and lock.get("record_kind") == "parent"
+                and str(lock.get("run_id") or "") == str(parent.get("run_id") or "")
+                and str(lock.get("parent_run_id") or "") == str(parent.get("run_id") or "")
+                and canonical_lock_root == canonical_parent_root
+                and str(lock.get("project_root") or "") == canonical_parent_root
+                and str(parent.get("project_root") or "") == canonical_parent_root
+                and str(lock.get("project_key") or "") == str(parent.get("project_key") or "")
+                and str(lock.get("workflow_id") or "") == str(parent.get("workflow_id") or "")
+                and str(lock.get("lease_nonce") or "") == str(parent.get("lease_nonce") or "")
+                and str(lock.get("manifest_sha256") or "") == str(parent.get("manifest_sha256") or "")
+                and bool(str(owner.get("nonce") or ""))
+                and str(owner.get("nonce") or "") == str(parent_owner.get("nonce") or "")
+                and owner.get("epoch") == parent_owner.get("epoch")
+                and owner == parent_owner
+                and bool(stop_epoch)
+                and str(lock.get("stop_epoch_nonce") or "") == stop_epoch
+                and str(tombstone.get("stop_epoch_nonce") or "") == stop_epoch
+                and tombstone.get("permanent") is True
+                and lock.get("parent_stop_scope") == scope
+                and lock.get("user_stop_scan") == parent.get("user_stop_scan")
+                and lock.get("user_stop_tombstone") == tombstone
+                and str(lock.get("phase") or "") == "PARENT_FAILED_CLOSED"
+                and str(parent.get("phase") or "") == "PARENT_FAILED_CLOSED"
+            )
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError, StateError):
+            valid = False
+            lock = {}
+            observed = {}
+            raw_bytes = b""
+        if not valid:
+            raise StateError("BLOCKED_OWNER_MISMATCH", "terminal stopped lock is not the exact immutable terminal lock")
+        return lock, observed, raw_bytes
+
+    @staticmethod
+    def _unlink_validated_terminal_user_stop_lock(lock_file: Path, parent: dict[str, Any]) -> None:
+        """Fail closed unless the same exact lock is still present immediately before unlink."""
+        _, first_snapshot, first_bytes = RunStore._validate_terminal_user_stop_lock(lock_file, parent)
+        _, final_snapshot, final_bytes = RunStore._validate_terminal_user_stop_lock(lock_file, parent)
+        if (
+            final_snapshot.get("os_identity") != first_snapshot.get("os_identity")
+            or final_snapshot.get("sha256") != first_snapshot.get("sha256")
+            or final_snapshot.get("bytes") != first_snapshot.get("bytes")
+            or final_bytes != first_bytes
+        ):
+            raise StateError("BLOCKED_OWNER_MISMATCH", "terminal stopped lock was replaced before unlink")
+        lock_file.unlink()
+
     def finalize_user_stopped_parent(
         self,
         parent_run_dir: str | os.PathLike[str],
         *,
         tab_absence_evidence: dict[str, Any] | None = None,
+        dry_run: bool = False,
     ) -> dict[str, Any]:
         """Strict, no-retry release path for an explicitly stopped workflow."""
         parent_file, initial = self.load(parent_run_dir)
@@ -4648,17 +5037,7 @@ class RunStore:
             parent_phase = str(parent.get("phase") or "")
             lock_phase = str(lock.get("phase") or "")
             if parent_phase == lock_phase == "PARENT_FAILED_CLOSED":
-                tombstone = parent.get("user_stop_tombstone") if isinstance(parent.get("user_stop_tombstone"), dict) else {}
-                if (
-                    tombstone.get("permanent") is not True
-                    or lock.get("user_stop_tombstone") != tombstone
-                    or lock.get("parent_stop_scope") != parent.get("parent_stop_scope")
-                    or lock.get("user_stop_scan") != parent.get("user_stop_scan")
-                    or str(lock.get("run_id") or "") != str(parent.get("run_id") or "")
-                    or str(lock.get("lease_nonce") or "") != str(parent.get("lease_nonce") or "")
-                ):
-                    raise StateError("BLOCKED_OWNER_MISMATCH", "terminal stopped lock is not exact")
-                paths.lock_file.unlink()
+                self._unlink_validated_terminal_user_stop_lock(paths.lock_file, parent)
                 return parent
             if parent_phase != lock_phase or parent_phase not in {"USER_STOP_REQUESTED", "PARENT_DRAINING"}:
                 raise StateError("PARENT_USER_STOP_CONFIRMATION_REQUIRED", "parent is not in explicit user-stop drain state")
@@ -4705,8 +5084,60 @@ class RunStore:
                 elif phase == "PROVIDER_FAILED_TERMINAL":
                     safe = claim_proof is not None and clean and self._provider_failed_terminal_settled(child, child_file)
                 elif phase == "ABANDONED_UNCERTAIN":
+                    stop = child.get("user_stop") if isinstance(child.get("user_stop"), dict) else {}
+                    drift_ref = stop.get("target_drift_abandonment") if isinstance(stop.get("target_drift_abandonment"), dict) else {}
                     uncertain = child.get("parent_stop_submission_uncertain") if isinstance(child.get("parent_stop_submission_uncertain"), dict) else {}
-                    if uncertain:
+                    if drift_ref:
+                        drift_path = Path(str(drift_ref.get("path") or ""))
+                        try:
+                            drift = read_json(drift_path)
+                            survivor = drift.get("protected_survivor") if isinstance(drift.get("protected_survivor"), dict) else {}
+                            stale = drift.get("reported_stale_target") if isinstance(drift.get("reported_stale_target"), dict) else {}
+                            decision = str(drift.get("decision") or "")
+                            historical = self.parent_historical_owned_target_ids(paths, parent)
+                            required_absent = drift.get("required_absent_target_ids")
+                            absence_union = drift.get("historical_target_absence_union")
+                            live_shape = bool(
+                                decision == "abandon-without-close"
+                                and required_absent == historical
+                                and absence_union == required_absent
+                                and survivor.get("ownership_adopted") is False
+                                and survivor.get("close_authorized") is False
+                                and str(survivor.get("target_id") or "") not in historical
+                            )
+                            stale_id = str(stale.get("target_id") or "")
+                            absent_shape = bool(
+                                decision == "abandon-without-close-no-live-target"
+                                and stale_id and stale_id not in historical
+                                and required_absent == sorted({*historical, stale_id})
+                                and absence_union == required_absent
+                                and stale.get("ownership_adopted") is False
+                                and stale.get("close_authorized") is False
+                                and stale.get("proven_absent") is True
+                                and not survivor
+                            )
+                            drift_ok = bool(
+                                drift_path.is_file() and not drift_path.is_symlink()
+                                and sha256_file(drift_path) == str(drift_ref.get("sha256") or "")
+                                and drift_path.stat().st_size == int(drift_ref.get("bytes") or -1)
+                                and drift.get("schema") == "codex.chatgpt.user-stop-target-drift-abandonment/v1"
+                                and drift.get("recorded", {}).get("target_id") == child.get("current_target_id")
+                                and drift.get("recorded", {}).get("conversation_url") == child.get("conversation_url")
+                                and drift.get("historical_owned_target_ids") == historical
+                                and (live_shape or absent_shape)
+                            )
+                        except (OSError, TypeError, ValueError, StateError):
+                            drift_ok = False
+                        safe = bool(
+                            drift_ok and not child.get("cleanup_pending")
+                            and int(child.get("owned_open_tabs") or 0) == 0
+                            and child.get("owned_tab_state") in {
+                                "historical-target-absent-survivor-protected",
+                                "historical-and-reported-targets-absent",
+                            }
+                            and child.get("result") is None
+                        )
+                    elif uncertain:
                         preclose = uncertain.get("preclose") if isinstance(uncertain.get("preclose"), dict) else {}
                         settlement = uncertain.get("settlement") if isinstance(uncertain.get("settlement"), dict) else {}
                         try:
@@ -4736,7 +5167,6 @@ class RunStore:
                             and not child.get("zero_provider_settlement")
                         )
                     else:
-                        stop = child.get("user_stop") if isinstance(child.get("user_stop"), dict) else {}
                         confirmation = stop.get("confirmation") if isinstance(stop.get("confirmation"), dict) else {}
                         evidence_path = Path(str(confirmation.get("path") or ""))
                         evidence_ok = False
@@ -4771,6 +5201,16 @@ class RunStore:
                 if not safe:
                     unsafe.append({**summary, "reason": "unsafe-child-or-cleanup"})
                 summaries.append({**summary, "safe": safe})
+            if dry_run:
+                return {
+                    "schema": "codex.chatgpt.parent-user-stop-child-scan-read-only/v1",
+                    "parent_run_id": parent.get("run_id"),
+                    "parent_phase": parent_phase,
+                    "lock_phase": lock_phase,
+                    "strict_terminal_scan_ready": not unsafe,
+                    "children": summaries,
+                    "unsafe": unsafe,
+                }
             if unsafe:
                 parent["child_scan"] = summaries
                 parent["updated_at"] = utc_now()
@@ -4783,16 +5223,107 @@ class RunStore:
                     tabs_scan = read_json(tabs_path)
                 except (OSError, StateError):
                     tabs_scan = {}
-                known_targets = sorted(
-                    {str(child.get("current_target_id") or "") for _, child in children if child.get("current_target_id")}
-                )
+                known_targets = self.parent_historical_owned_target_ids(paths, parent)
+                protected_survivors: list[dict[str, Any]] = []
+                for _, child in children:
+                    stop = child.get("user_stop") if isinstance(child.get("user_stop"), dict) else {}
+                    drift_ref = stop.get("target_drift_abandonment") if isinstance(stop.get("target_drift_abandonment"), dict) else {}
+                    if drift_ref:
+                        drift = read_json(Path(str(drift_ref.get("path") or "")))
+                        required = drift.get("required_absent_target_ids")
+                        if not isinstance(required, list) or not all(isinstance(item, str) and item for item in required):
+                            raise StateError("TARGET_DRIFT_DESCRIPTOR_INVALID", "required target-absence set is invalid")
+                        known_targets = sorted({*known_targets, *required})
+                        survivor = drift.get("protected_survivor")
+                        if isinstance(survivor, dict):
+                            protected_survivors.append(survivor)
+                retry_scan_valid = True
+                if tabs_scan.get("schema") == "codex.chatgpt.parent-stop-final-tab-scan/v2":
+                    previous_ref = tabs_scan.get("previous_scan") if isinstance(tabs_scan.get("previous_scan"), dict) else {}
+                    previous_path = Path(str(previous_ref.get("path") or ""))
+                    drift = tabs_scan.get("external_inventory_drift") if isinstance(tabs_scan.get("external_inventory_drift"), dict) else {}
+                    try:
+                        previous_scan = read_json(previous_path)
+                        current_rows = tabs_scan.get("normalized_tabs")
+                        previous_rows = previous_scan.get("normalized_tabs")
+                        if not isinstance(current_rows, list) or not isinstance(previous_rows, list):
+                            raise ValueError("tab rows missing")
+                        current_ids = [str(row.get("targetId") or "") for row in current_rows if isinstance(row, dict)]
+                        previous_ids = [str(row.get("targetId") or "") for row in previous_rows if isinstance(row, dict)]
+                        if (
+                            len(current_ids) != len(current_rows) or len(previous_ids) != len(previous_rows)
+                            or any(not value for value in [*current_ids, *previous_ids])
+                            or len(set(current_ids)) != len(current_ids)
+                            or len(set(previous_ids)) != len(previous_ids)
+                        ):
+                            raise ValueError("tab identities ambiguous")
+                        row_key = lambda row: json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                        old_map = {row_key(row): row for row in previous_rows}
+                        new_map = {row_key(row): row for row in current_rows}
+                        expected_added = [new_map[key] for key in sorted(set(new_map) - set(old_map))]
+                        expected_removed = [old_map[key] for key in sorted(set(old_map) - set(new_map))]
+                        boundary_ids = {*known_targets, *(str(item.get("target_id") or "") for item in protected_survivors)}
+                        boundary_urls = set(self.parent_historical_owned_urls(paths, parent))
+                        boundary_urls.update(str(item.get("conversation_url") or "") for item in protected_survivors)
+                        changed = [*expected_added, *expected_removed]
+                        retry_scan_valid = bool(
+                            previous_path.is_file() and not previous_path.is_symlink()
+                            and sha256_file(previous_path) == str(previous_ref.get("sha256") or "")
+                            and previous_path.stat().st_size == int(previous_ref.get("bytes") or -1)
+                            and previous_scan.get("schema") in {
+                                "codex.chatgpt.parent-stop-final-tab-scan/v1",
+                                "codex.chatgpt.parent-stop-final-tab-scan/v2",
+                            }
+                            and previous_scan.get("known_target_ids") == known_targets
+                            and previous_scan.get("protected_survivors", []) == protected_survivors
+                            and previous_scan.get("all_known_targets_absent") is True
+                            and str(previous_scan.get("stop_epoch_nonce") or (previous_scan.get("parent_stop_scope") or {}).get("stop_epoch_nonce") or "")
+                            == str((parent.get("parent_stop_scope") or {}).get("stop_epoch_nonce") or "")
+                            and not (set(current_ids) & set(known_targets))
+                            and not (set(previous_ids) & set(known_targets))
+                            and drift.get("added") == expected_added
+                            and drift.get("removed") == expected_removed
+                            and all(str(row.get("targetId") or "") not in boundary_ids for row in changed)
+                            and all(str(row.get("url") or "") not in boundary_urls for row in changed)
+                        )
+                    except (OSError, RuntimeError, TypeError, ValueError, StateError):
+                        retry_scan_valid = False
                 if (
                     not tabs_path.is_file() or tabs_path.is_symlink()
                     or sha256_file(tabs_path) != str(tabs_ref.get("sha256") or "")
-                    or tabs_scan.get("schema") != "codex.chatgpt.parent-stop-final-tab-scan/v1"
+                    or tabs_scan.get("schema") not in {
+                        "codex.chatgpt.parent-stop-final-tab-scan/v1",
+                        "codex.chatgpt.parent-stop-final-tab-scan/v2",
+                    }
                     or tabs_scan.get("known_target_ids") != known_targets
+                    or tabs_scan.get("protected_survivors", []) != protected_survivors
+                    or any(str(item.get("target_id") or "") in known_targets for item in protected_survivors)
                     or tabs_scan.get("all_known_targets_absent") is not True
                     or tabs_scan.get("parent_stop_scope") != parent.get("parent_stop_scope")
+                    or (
+                        tabs_scan.get("schema") == "codex.chatgpt.parent-stop-final-tab-scan/v2"
+                        and (
+                            not isinstance(tabs_scan.get("previous_scan"), dict)
+                            or (tabs_scan.get("external_inventory_drift") or {}).get("classification") not in {
+                                "foreign-unowned-tab-inventory-drift",
+                                "foreign-unowned-tab-inventory-drift-pre-drain",
+                            }
+                            or (tabs_scan.get("external_inventory_drift") or {}).get("mutation_commands") != []
+                            or (tabs_scan.get("external_inventory_drift") or {}).get("ownership_adopted") is not False
+                            or (tabs_scan.get("external_inventory_drift") or {}).get("close_authorized") is not False
+                            or (
+                                (tabs_scan.get("external_inventory_drift") or {}).get("classification")
+                                == "foreign-unowned-tab-inventory-drift-pre-drain"
+                                and (
+                                    parent_phase != "USER_STOP_REQUESTED"
+                                    or (tabs_scan.get("external_inventory_drift") or {}).get("prior_scan_attached_or_consumed") is not False
+                                    or parent.get("user_stop_scan") not in (None, {})
+                                    or lock.get("user_stop_scan") not in (None, {})
+                                )
+                            )
+                            or not retry_scan_valid
+                        )
+                    )
                 ):
                     parent["child_scan"] = summaries
                     parent["updated_at"] = utc_now()
@@ -4814,15 +5345,46 @@ class RunStore:
             }
             if scan_path.exists():
                 persisted_scan = read_json(scan_path)
-                if (
-                    persisted_scan.get("schema") != scan["schema"]
-                    or persisted_scan.get("parent_run_id") != scan["parent_run_id"]
-                    or persisted_scan.get("children") != summaries
-                    or persisted_scan.get("parent_stop_scope") != scan["parent_stop_scope"]
-                    or persisted_scan.get("tab_absence_evidence") != tab_absence_evidence
+                same_scan = bool(
+                    persisted_scan.get("schema") == scan["schema"]
+                    and persisted_scan.get("parent_run_id") == scan["parent_run_id"]
+                    and persisted_scan.get("children") == summaries
+                    and persisted_scan.get("parent_stop_scope") == scan["parent_stop_scope"]
+                    and persisted_scan.get("tab_absence_evidence") == tab_absence_evidence
+                )
+                if same_scan:
+                    descriptor = {"path": str(scan_path), "sha256": sha256_file(scan_path), "bytes": scan_path.stat().st_size}
+                elif (
+                    was_draining
+                    and persisted_scan.get("schema") == scan["schema"]
+                    and persisted_scan.get("parent_run_id") == scan["parent_run_id"]
+                    and persisted_scan.get("children") == summaries
+                    and persisted_scan.get("parent_stop_scope") == scan["parent_stop_scope"]
+                    and tabs_scan.get("schema") == "codex.chatgpt.parent-stop-final-tab-scan/v2"
                 ):
+                    prior_descriptor = {"path": str(scan_path), "sha256": sha256_file(scan_path), "bytes": scan_path.stat().st_size}
+                    retries = sorted(scan_path.parent.glob("parent-scan-retry-*.json"))
+                    if retries:
+                        latest_path = retries[-1]
+                        latest = read_json(latest_path)
+                        prior_descriptor = {"path": str(latest_path), "sha256": sha256_file(latest_path), "bytes": latest_path.stat().st_size}
+                        if (
+                            latest.get("schema") != "codex.chatgpt.parent-user-stop-scan/v2"
+                            or latest.get("tab_absence_evidence") != tabs_scan.get("previous_scan")
+                        ):
+                            raise StateError("BLOCKED_OWNER_MISMATCH", "parent retry scan chain differs")
+                    elif tabs_scan.get("previous_scan") != persisted_scan.get("tab_absence_evidence"):
+                        raise StateError("BLOCKED_OWNER_MISMATCH", "parent retry scan does not extend the base scan")
+                    retry_scan = {
+                        **scan,
+                        "schema": "codex.chatgpt.parent-user-stop-scan/v2",
+                        "previous_scan": prior_descriptor,
+                        "external_inventory_drift_only": True,
+                    }
+                    retry_path = scan_path.parent / f"parent-scan-retry-{len(retries) + 1:03d}.json"
+                    descriptor = write_immutable_json_exclusive(retry_path, retry_scan)
+                else:
                     raise StateError("BLOCKED_OWNER_MISMATCH", "published parent scan differs across retry")
-                descriptor = {"path": str(scan_path), "sha256": sha256_file(scan_path), "bytes": scan_path.stat().st_size}
             else:
                 descriptor = write_immutable_json_exclusive(scan_path, scan)
                 if (
@@ -4841,28 +5403,25 @@ class RunStore:
             if sha256_file(parent_file) != draining_parent_sha or sha256_file(paths.lock_file) != draining_lock_sha:
                 raise StateError("BLOCKED_OWNER_MISMATCH", "draining state changed before terminal write")
             terminal_at = utc_now()
+            parent_scope = parent.get("parent_stop_scope") if isinstance(parent.get("parent_stop_scope"), dict) else {}
+            parent_tombstone = parent.get("user_stop_tombstone") if isinstance(parent.get("user_stop_tombstone"), dict) else {}
+            terminal_stop_epoch = str(lock.get("stop_epoch_nonce") or parent_scope.get("stop_epoch_nonce") or parent_tombstone.get("stop_epoch_nonce") or uuid.uuid4().hex)
             parent.setdefault("phase_events", []).append({"from": "PARENT_DRAINING", "to": "PARENT_FAILED_CLOSED", "at": terminal_at})
-            parent.update({"phase": "PARENT_FAILED_CLOSED", "phase_at": terminal_at, "updated_at": terminal_at, "user_stop_scan": descriptor, "result": None, "failure": {"code": "USER_STOPPED_LEGACY_WORKFLOW", "scan": descriptor}, "user_stop_tombstone": {**(parent.get("user_stop_tombstone") or {}), "permanent": True, "terminal_scan": descriptor}})
-            lock.update({"phase": "PARENT_FAILED_CLOSED", "heartbeat_at": terminal_at, "user_stop_scan": descriptor, "user_stop_tombstone": parent["user_stop_tombstone"]})
+            parent.update({"phase": "PARENT_FAILED_CLOSED", "phase_at": terminal_at, "updated_at": terminal_at, "user_stop_scan": descriptor, "result": None, "failure": {"code": "USER_STOPPED_LEGACY_WORKFLOW", "scan": descriptor}, "user_stop_tombstone": {**parent_tombstone, "permanent": True, "stop_epoch_nonce": terminal_stop_epoch, "terminal_scan": descriptor}})
+            lock.update({"phase": "PARENT_FAILED_CLOSED", "heartbeat_at": terminal_at, "stop_epoch_nonce": terminal_stop_epoch, "user_stop_scan": descriptor, "user_stop_tombstone": parent["user_stop_tombstone"]})
+            terminal_lock_bytes = (json.dumps(lock, ensure_ascii=False, indent=2) + "\n").replace("\n", os.linesep).encode("utf-8")
+            parent["terminal_user_stop_lock"] = {
+                "path": str(paths.lock_file),
+                "resolved_path": str(paths.lock_file.resolve()),
+                "sha256": sha256_bytes(terminal_lock_bytes),
+                "bytes": len(terminal_lock_bytes),
+                "regular_file": True,
+                "symlink": False,
+                "reparse_point": False,
+            }
             write_json_atomic(parent_file, parent)
             write_json_atomic(paths.lock_file, lock)
-            expected_lock_sha256 = sha256_file(paths.lock_file)
-            latest = read_json(paths.lock_file)
-            if (
-                str(latest.get("parent_run_id") or latest.get("run_id") or "") != str(parent.get("run_id") or "")
-                or str(latest.get("lease_nonce") or "") != str(parent.get("lease_nonce") or "")
-                or str(latest.get("stop_epoch_nonce") or "") != str(lock.get("stop_epoch_nonce") or "")
-                or latest.get("parent_stop_scope") != parent.get("parent_stop_scope")
-                or str(latest.get("project_root") or "") != str(parent.get("project_root") or "")
-                or str(latest.get("project_key") or "") != str(parent.get("project_key") or "")
-                or str(latest.get("workflow_id") or "") != str(parent.get("workflow_id") or "")
-                or str(latest.get("manifest_sha256") or "") != str(parent.get("manifest_sha256") or "")
-                or latest.get("owner") != lock.get("owner")
-                or str(latest.get("phase") or "") != "PARENT_FAILED_CLOSED"
-                or sha256_file(paths.lock_file) != expected_lock_sha256
-            ):
-                raise StateError("BLOCKED_OWNER_MISMATCH", "lock changed during user-stop finalization")
-            paths.lock_file.unlink()
+            self._unlink_validated_terminal_user_stop_lock(paths.lock_file, parent)
             if os.name != "nt":
                 directory_fd = os.open(str(paths.lock_file.parent), os.O_RDONLY)
                 try:
@@ -5310,10 +5869,13 @@ class RunStore:
             }
             session_status = str(event.get("session_status") or "")
             observed_url = str(event.get("observed_url") or "")
-            expired_sent_session = bool(
+            uncommitted_sent_session = bool(
                 session_status == "sent"
-                and event.get("session_deadline_expired") is True
                 and event.get("target_absent") is True
+                and (
+                    event.get("session_deadline_wait_required") is False
+                    or event.get("session_deadline_expired") is True
+                )
             )
             evidence_error: str | None = None
             try:
@@ -5327,7 +5889,7 @@ class RunStore:
                 evidence_error = "evidence-path-invalid"
             if (
                 mismatches
-                or (session_status not in {"complete", "timeout"} and not expired_sent_session)
+                or (session_status not in {"complete", "timeout"} and not uncommitted_sent_session)
                 or record.get("conversation_url")
                 or not record.get("session_id")
                 or not record.get("current_target_id")

@@ -653,6 +653,8 @@ def test_stderr_mutation_disallowed_json_is_send_rejected(tmp_path: Path) -> Non
     }
 
     def runner(argv, env, timeout):
+        if argv[1:] == ["tabs", "--json"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="[]", stderr="")
         return subprocess.CompletedProcess(argv, 2, stdout="", stderr=json.dumps(error_payload))
 
     runtime = bridge.Bridge(state_root=tmp_path / "state", runner=runner, headed_runtime_preflight=False)
@@ -763,9 +765,35 @@ def test_uncertain_without_identity_reclassifies_from_verified_stderr_and_retrie
     )
     project = tmp_path / "project"
     project.mkdir()
-    runtime = bridge.Bridge(
-        state_root=tmp_path / "state",
-        runner=lambda argv, env, timeout: completed(
+    tabs_calls = 0
+
+    def runner(argv, env, timeout):
+        nonlocal tabs_calls
+        if argv[1:] == ["tabs", "--json"]:
+            tabs_calls += 1
+            return completed(
+                argv,
+                stdout=json.dumps(
+                    []
+                    if tabs_calls == 1
+                    else [{"targetId": "T-RECLASSIFIED", "url": "https://chatgpt.com/c/reclassified"}]
+                ),
+            )
+        if argv[1:4] == ["web-ai", "sessions", "show"]:
+            return completed(
+                argv,
+                stdout=json.dumps(
+                    {
+                        "ok": True,
+                        "session": {
+                            "sessionId": "S-RECLASSIFIED",
+                            "targetId": "T-RECLASSIFIED",
+                            "conversationUrl": "https://chatgpt.com/c/reclassified",
+                        },
+                    }
+                ),
+            )
+        return completed(
             argv,
             stdout=json.dumps(
                 {
@@ -776,8 +804,9 @@ def test_uncertain_without_identity_reclassifies_from_verified_stderr_and_retrie
                     "conversationUrl": "https://chatgpt.com/c/reclassified",
                 }
             ),
-        ),
-    )
+        )
+
+    runtime = bridge.Bridge(state_root=tmp_path / "state", runner=runner)
     record = runtime.store.create_run(
         project_root=str(project),
         manifest_path=str(manifest),
@@ -1043,6 +1072,13 @@ def test_app_activation_failure_retry_accepts_fresh_pre_submit_target(tmp_path: 
                             "conversationUrl": "https://chatgpt.com/c/retry-smoke",
                         },
                     }
+                ),
+            )
+        if argv[1:] == ["tabs", "--json"]:
+            return completed(
+                argv,
+                stdout=json.dumps(
+                    [{"targetId": "T-2", "url": "https://chatgpt.com/c/retry-smoke"}]
                 ),
             )
         raise AssertionError(argv)

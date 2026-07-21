@@ -89,7 +89,7 @@ One exclusive global composer lease begins before target creation and remains he
 
 One active or uncertain workflow is allowed per normalized project-root hash. Different projects use distinct parallel sessions/targets. Project identity never comes from an output directory.
 
-Each stage journals its immutable descriptor and send boundary before execution. After the send boundary, failures retain the lock and recover the exact recorded run first. Recovery uses the recorded session and canonical URL, then bounded read-only history adjudication by the unique run-owned prompt filename. It never infers “not sent” from a click trace and never creates a replacement while ownership remains unresolved.
+Each stage journals its immutable descriptor and send boundary before execution. After the send boundary, failures retain the lock and recover the exact recorded run first. The canonical conversation URL plus the unique run-owned prompt filename are job identity; target IDs are locators/ownership evidence, while PIDs, heartbeats, locks, and local session status are diagnostics. Recovery observes one unique exact canonical URL without navigation, then uses the exact owned target, and only when the URL is missing performs bounded read-only history adjudication. Polling never uses `--navigate` on a URL-bound run. It never infers “not sent” from a click trace and never creates a replacement while ownership remains unresolved.
 
 Completion requires terminal provider state, a nonempty current-run answer, immutable capture hashes, and durable result state. A dead local owner is not proof of completion or absence; it triggers adjudication.
 

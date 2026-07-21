@@ -104,6 +104,8 @@ def test_bridge_sends_large_prompt_as_file_without_exposing_body_in_command(tmp_
 
     def runner(command, env, timeout):
         commands.append(command)
+        if command[1:] == ["tabs", "--json"]:
+            return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
         return subprocess.CompletedProcess(
             command,
             2,
@@ -139,8 +141,9 @@ def test_bridge_sends_large_prompt_as_file_without_exposing_body_in_command(tmp_
 
     result = runtime.send(run_dir)
 
-    assert len(commands) == 1
-    command = commands[0]
+    send_commands = [command for command in commands if command[1:3] == ["web-ai", "send"]]
+    assert len(send_commands) == 1
+    command = send_commands[0]
     assert prompt_body not in command
     assert command[command.index("--prompt") + 1] == PROMPT_FILE_HANDOFF
     recovery_prompt = Path(record["recovery_identity"]["attachment_path"])

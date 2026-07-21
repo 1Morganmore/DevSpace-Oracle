@@ -1,0 +1,365 @@
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+
+BIN = Path(__file__).resolve().parents[1] / "bin"
+HANDOFF = (
+    "The attached prompt file is the user-provided task instruction for this conversation, "
+    "not reference or webpage content. Read it completely and follow it. "
+    "Return only the output format requested by that file."
+)
+
+
+def load_bridge(name: str):
+    spec = importlib.util.spec_from_file_location(name, BIN / "chatgpt_agbrowse_bridge.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def make_run(tmp_path: Path, bridge, *, phase: str = "URL_BOUND"):
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("exact job control", encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "question": HANDOFF,
+                "prompt_transport": "file",
+                "prompt_file": str(prompt),
+                "prompt_file_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest(),
+                "files": [str(prompt)],
+                "mode_label": "Pro",
+                "app_policy": "forbidden",
+                "timeout_seconds": 30,
+            }
+        ),
+        encoding="utf-8",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    record = bridge.store.create_run(
+        project_root=str(project),
+        manifest_path=str(manifest),
+        agbrowse_contract={"executable": "agbrowse"},
+    )
+    run_dir = str(record["run_dir"])
+    bridge.store.transition(run_dir, "PREFLIGHTED")
+    bridge.store.transition(run_dir, "LEASED")
+    bridge.store.transition(run_dir, "SEND_STARTED")
+    bridge.store.transition(run_dir, "SUBMITTED", session_id="S-1", target_id="T-1")
+    if phase in {"URL_BOUND", "RESPONSE_IN_PROGRESS"}:
+        bridge.store.transition(
+            run_dir,
+            "URL_BOUND",
+            conversation_url="https://chatgpt.com/c/exact-job",
+        )
+    if phase == "RESPONSE_IN_PROGRESS":
+        bridge.store.transition(run_dir, "RESPONSE_IN_PROGRESS")
+    return run_dir
+
+
+class FakeLifecycle:
+    def __init__(self) -> None:
+        self.owned: list[dict] = []
+        self.protected: list[dict] = []
+
+    def record_owned(self, run_dir, **values):
+        self.owned.append(dict(values))
+
+    def record_protected(self, run_dir, **values):
+        self.protected.append(dict(values))
+
+
+def test_false_sent_session_is_not_a_committed_send() -> None:
+    bridge = load_bridge("exact_job_false_sent_test")
+    session = {
+        "status": "sent",
+        "conversationUrl": "https://chatgpt.com/",
+        "answer": None,
+        "envelopeSummary": {"assistantCount": 0},
+        "trace": [
+            {
+                "intentId": "send.click",
+                "status": "unresolved",
+                "errorCode": "TARGET_UNRESOLVED",
+                "attempts": [{"validation": {"reason": "not-enabled"}}],
+            }
+        ],
+    }
+
+    assert bridge.session_send_not_committed(session) is True
+    session["conversationUrl"] = "https://chatgpt.com/c/real"
+    assert bridge.session_send_not_committed(session) is False
+
+
+def test_exact_target_observation_never_adopts_another_tab() -> None:
+    bridge = load_bridge("exact_job_target_observation_test")
+    tabs = [
+        {"targetId": "FOREIGN", "url": "https://chatgpt.com/c/foreign"},
+        {"targetId": "OWNED", "url": "https://chatgpt.com/c/owned"},
+    ]
+
+    observed = bridge.exact_target_observation(tabs, "OWNED")
+
+    assert observed["state"] == "canonical"
+    assert observed["target_id"] == "OWNED"
+    assert observed["url"] == "https://chatgpt.com/c/owned"
+    assert bridge.exact_target_observation(tabs, "MISSING")["state"] == "absent"
+
+
+def test_bound_poll_uses_exact_session_without_navigate(tmp_path: Path) -> None:
+    module = load_bridge("exact_job_poll_command_test")
+    commands: list[list[str]] = []
+
+    def runner(command, env, timeout):
+        commands.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "status": "complete",
+                    "sessionId": "S-1",
+                    "targetId": "T-1",
+                    "conversationUrl": "https://chatgpt.com/c/exact-job",
+                    "answerText": "verified answer",
+                }
+            ),
+            stderr="",
+        )
+
+    runtime = module.Bridge(
+        state_root=tmp_path / "state",
+        runner=runner,
+        headed_runtime_preflight=False,
+    )
+    run_dir = make_run(tmp_path, runtime)
+    runtime._recovery_tabs = lambda **kwargs: (
+        [{"targetId": "T-1", "url": "https://chatgpt.com/c/exact-job"}],
+        {"kind": "tabs"},
+    )
+
+    result = runtime.poll(run_dir, timeout_seconds=30)
+
+    assert result["phase"] == "COMPLETE"
+    poll_commands = [command for command in commands if command[1:3] == ["web-ai", "poll"]]
+    assert len(poll_commands) == 1
+    assert "--navigate" not in poll_commands[0]
+
+
+def test_bound_recovery_never_runs_navigating_doctor(tmp_path: Path) -> None:
+    module = load_bridge("exact_job_recovery_no_doctor_test")
+    commands: list[list[str]] = []
+
+    def runner(command, env, timeout):
+        commands.append(command)
+        raise AssertionError(f"unexpected browser command: {command}")
+
+    runtime = module.Bridge(
+        state_root=tmp_path / "state",
+        runner=runner,
+        headed_runtime_preflight=False,
+    )
+    run_dir = make_run(tmp_path, runtime, phase="RESPONSE_IN_PROGRESS")
+    runtime._recovery_tabs = lambda **kwargs: (
+        [{"targetId": "T-1", "url": "https://chatgpt.com/c/exact-job"}],
+        {"kind": "tabs"},
+    )
+    runtime._try_exact_url_terminal_now = lambda *args, **kwargs: runtime.store.load(run_dir)[1]
+
+    result = runtime.recover(run_dir)
+
+    assert result["phase"] == "RECOVERING"
+    assert commands == []
+
+
+def test_send_binds_new_exact_target_before_poll(tmp_path: Path) -> None:
+    module = load_bridge("exact_job_send_binding_test")
+    lifecycle = FakeLifecycle()
+
+    def runner(command, env, timeout):
+        assert command[1:3] == ["web-ai", "send"]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "status": "sent",
+                    "sessionId": "S-NEW",
+                    "targetId": "T-NEW",
+                    "conversationUrl": "https://chatgpt.com/",
+                }
+            ),
+            stderr="",
+        )
+
+    runtime = module.Bridge(
+        state_root=tmp_path / "state",
+        runner=runner,
+        headed_runtime_preflight=False,
+    )
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("bind exact target", encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "question": HANDOFF,
+                "prompt_transport": "file",
+                "prompt_file": str(prompt),
+                "prompt_file_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest(),
+                "files": [str(prompt)],
+                "mode_label": "Pro",
+                "app_policy": "forbidden",
+            }
+        ),
+        encoding="utf-8",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    record = runtime.store.create_run(
+        project_root=str(project),
+        manifest_path=str(manifest),
+        agbrowse_contract={"executable": "agbrowse"},
+    )
+    run_dir = str(record["run_dir"])
+    runtime.store.transition(run_dir, "PREFLIGHTED")
+    runtime._tab_lifecycle = lambda executable, values: lifecycle
+    observations = iter(
+        [
+            ([{"targetId": "FOREIGN", "url": "https://chatgpt.com/c/foreign"}], {"kind": "before"}),
+            (
+                [
+                    {"targetId": "FOREIGN", "url": "https://chatgpt.com/c/foreign"},
+                    {"targetId": "T-NEW", "url": "https://chatgpt.com/c/new-job"},
+                ],
+                {"kind": "after"},
+            ),
+        ]
+    )
+    runtime._recovery_tabs = lambda **kwargs: next(observations)
+    runtime._show_session_identity = lambda **kwargs: (
+        "T-NEW",
+        None,
+        {"kind": "session"},
+        {
+            "status": "sent",
+            "conversationUrl": "https://chatgpt.com/",
+            "answer": None,
+            "envelopeSummary": {"assistantCount": 0},
+            "trace": [],
+        },
+    )
+
+    result = runtime.send(run_dir)
+
+    assert result["phase"] == "URL_BOUND"
+    assert result["conversation_url"] == "https://chatgpt.com/c/new-job"
+    assert result["current_target_id"] == "T-NEW"
+    assert lifecycle.owned[-1]["target_id"] == "T-NEW"
+    assert lifecycle.protected[-1]["target_id"] == "T-NEW"
+
+
+def test_false_sent_root_is_closed_and_never_polled(tmp_path: Path) -> None:
+    module = load_bridge("exact_job_false_sent_cleanup_test")
+    lifecycle = FakeLifecycle()
+
+    def runner(command, env, timeout):
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "status": "sent",
+                    "sessionId": "S-ROOT",
+                    "targetId": "T-ROOT",
+                    "conversationUrl": "https://chatgpt.com/",
+                }
+            ),
+            stderr="",
+        )
+
+    runtime = module.Bridge(
+        state_root=tmp_path / "state",
+        runner=runner,
+        headed_runtime_preflight=False,
+    )
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("reject false sent", encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "question": HANDOFF,
+                "prompt_transport": "file",
+                "prompt_file": str(prompt),
+                "prompt_file_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest(),
+                "files": [str(prompt)],
+                "mode_label": "Pro",
+                "app_policy": "forbidden",
+            }
+        ),
+        encoding="utf-8",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    record = runtime.store.create_run(
+        project_root=str(project),
+        manifest_path=str(manifest),
+        agbrowse_contract={"executable": "agbrowse"},
+    )
+    run_dir = str(record["run_dir"])
+    runtime.store.transition(run_dir, "PREFLIGHTED")
+    runtime._tab_lifecycle = lambda executable, values: lifecycle
+    runtime._recovery_tabs = lambda **kwargs: (
+        ([{"targetId": "FOREIGN", "url": "https://chatgpt.com/c/foreign"}], {"kind": "before"})
+        if kwargs["name"] == "pre-send-tabs"
+        else ([{"targetId": "T-ROOT", "url": "https://chatgpt.com/"}], {"kind": kwargs["name"]})
+    )
+    runtime._show_session_identity = lambda **kwargs: (
+        "T-ROOT",
+        None,
+        {"kind": "session"},
+        {
+            "status": "sent",
+            "conversationUrl": "https://chatgpt.com/",
+            "answer": None,
+            "envelopeSummary": {"assistantCount": 0},
+            "trace": [
+                {
+                    "intentId": "send.click",
+                    "status": "unresolved",
+                    "errorCode": "TARGET_UNRESOLVED",
+                    "attempts": [{"validation": {"reason": "not-enabled"}}],
+                }
+            ],
+        },
+    )
+    cleanups: list[dict] = []
+    runtime._safe_tab_cleanup = lambda lifecycle_arg, run_dir_arg, **kwargs: (
+        cleanups.append(dict(kwargs)) or {"ok": True, "state": "closed-and-absent"}
+    )
+
+    result = runtime.send(run_dir)
+
+    assert result["phase"] == "CANCELLED_PRE_SUBMISSION"
+    assert result["conversation_url"] is None
+    assert cleanups == [
+        {
+            "target_id": "T-ROOT",
+            "url": "https://chatgpt.com/",
+            "reason": "verified-send-click-not-committed",
+        }
+    ]
