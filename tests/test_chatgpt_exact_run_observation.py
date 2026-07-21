@@ -114,3 +114,37 @@ def test_incomplete_persisted_identity_requires_exact_recovery(monkeypatch, tmp_
     assert result["state"] == "IDENTITY_INCOMPLETE"
     assert "canonical_url" in result["missing_identity_fields"]
     assert "do not inspect or submit through another tab" in result["next_action"]
+
+
+def test_live_exact_target_outweighs_temporary_session_web_url(monkeypatch, tmp_path: Path) -> None:
+    _, record = _record(tmp_path)
+    state_file = tmp_path / "run.json"
+    fake = Bridge(Store(state_file, record))
+    monkeypatch.setattr(RUN.BRIDGE, "Bridge", lambda state_root=None: fake)
+    monkeypatch.setattr(RUN.BRIDGE, "read_contract", lambda path: {})
+    monkeypatch.setattr(RUN.BRIDGE, "contract_executable", lambda contract: "agbrowse")
+    monkeypatch.setattr(RUN.BRIDGE, "bridge_env", lambda manifest: {})
+
+    def runner(command, env, timeout):
+        if "sessions" in command:
+            payload = {
+                "sessionId": "SESSION-1",
+                "targetId": "TARGET-1",
+                "conversationUrl": "https://chatgpt.com/c/WEB:temporary-id",
+                "status": "running",
+            }
+        else:
+            payload = [{
+                "targetId": "TARGET-1",
+                "url": "https://chatgpt.com/c/conversation-1",
+                "activeCommand": {"sessionId": "SESSION-1"},
+            }]
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(RUN.BRIDGE, "default_runner", runner)
+    result = RUN.observe_exact_run(str(tmp_path))
+
+    assert result["state"] == "EXACT_ACTIVE"
+    assert result["identity_mismatches"] == []
+    assert result["observed"]["session_url_temporary"] is True
+    assert result["observed"]["effective_canonical_url"] == record["conversation_url"]

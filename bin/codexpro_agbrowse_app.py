@@ -298,11 +298,12 @@ class AgbrowseGateway:
         self._browser_ready = False
         self._owned_startup_targets: dict[str, str] = {}
         self._owned_utility_targets: set[str] = set()
+        self._owned_composer_targets: set[str] = set()
         self._pinned_target_id: str | None = None
         self.command_count = 0
 
     def pin_target(self, target_id: str) -> None:
-        if target_id not in self._owned_utility_targets:
+        if target_id not in self._owned_utility_targets and target_id not in self._owned_composer_targets:
             raise AppBridgeError(
                 "APP_UTILITY_TARGET_NOT_OWNED",
                 "cannot pin a target that was not created by this utility operation",
@@ -409,13 +410,14 @@ class AgbrowseGateway:
                     self._owned_startup_targets[target_id] = url
 
     def snapshot(self) -> Snapshot:
-        payload = self.call("observe-bundle", "--max-nodes", "400")
-        reported_target_id = str(payload.get("targetId") or payload.get("target_id") or "")
-        # agbrowse 0.1.18 observe-bundle reports the CDP runtime identity
-        # (``cdp:<port>``), while tabs/new-tab/active-tab use page target IDs.
-        # Resolve that documented runtime identity through the read-only
-        # active-tab contract before any ownership comparison.
-        if reported_target_id.startswith("cdp:"):
+        last_drift: dict[str, Any] | None = None
+        for attempt in range(1, 4):
+            payload = self.call("observe-bundle", "--max-nodes", "400")
+            reported_target_id = str(payload.get("targetId") or payload.get("target_id") or "")
+            # agbrowse 0.1.18 observe-bundle reports the CDP runtime identity
+            # (``cdp:<port>``), while tabs/new-tab/active-tab use page target IDs.
+            if not reported_target_id.startswith("cdp:"):
+                return Snapshot(payload)
             active = self.call("active-tab")
             active_target_id = str(active.get("targetId") or active.get("target_id") or "")
             active_url = str(active.get("url") or "")
@@ -426,30 +428,37 @@ class AgbrowseGateway:
                     "active-tab did not return an exact page target and URL for the fresh observation",
                     {"observation_target_id": reported_target_id},
                 )
-            if (
-                active_url != observation_url
-                or (
-                    self._pinned_target_id is not None
-                    and active_target_id != self._pinned_target_id
-                )
+            if active_url == observation_url and (
+                self._pinned_target_id is None or active_target_id == self._pinned_target_id
             ):
-                raise AppBridgeError(
-                    "APP_OBSERVATION_TARGET_DRIFT",
-                    "observe-bundle and active-tab did not identify the same exact active page",
-                    {
-                        "observation_target_id": reported_target_id,
-                        "observation_url": observation_url,
-                        "active_target_id": active_target_id,
-                        "active_url": active_url,
-                        "pinned_target_id": self._pinned_target_id,
-                    },
-                )
-            payload = {
-                **payload,
-                "observationTargetId": reported_target_id,
-                "targetId": active_target_id,
+                return Snapshot({
+                    **payload,
+                    "observationTargetId": reported_target_id,
+                    "targetId": active_target_id,
+                })
+            last_drift = {
+                "observation_target_id": reported_target_id,
+                "observation_url": observation_url,
+                "active_target_id": active_target_id,
+                "active_url": active_url,
+                "pinned_target_id": self._pinned_target_id,
+                "snapshot_attempt": attempt,
             }
-        return Snapshot(payload)
+            # A pinned target mismatch is ownership drift, not a retry cue.
+            # Never switch tabs from inside a read-only observation.
+            if (
+                self._pinned_target_id is None
+                or active_target_id != self._pinned_target_id
+                or attempt >= 3
+            ):
+                break
+            self.activate_target(self._pinned_target_id)
+            time.sleep(0.1)
+        raise AppBridgeError(
+            "APP_OBSERVATION_TARGET_DRIFT",
+            "observe-bundle and active-tab did not identify the same exact active page",
+            last_drift or {},
+        )
 
     def click(self, node: Node) -> None:
         self.call("click", node.ref, json_output=False)
@@ -468,6 +477,27 @@ class AgbrowseGateway:
 
     def new_tab(self, url: str) -> dict[str, Any]:
         return self.call("new-tab", url)
+
+    def open_composer_target(self, url: str) -> dict[str, Any]:
+        """Create and pin one composer target proven absent before new-tab."""
+        before = self.list_tabs()
+        preexisting = {
+            str(tab.get("targetId") or tab.get("target_id") or "") for tab in before
+        }
+        preexisting.discard("")
+        created = self.new_tab(url)
+        target_id = str(created.get("targetId") or created.get("target_id") or "")
+        if not target_id:
+            raise AppBridgeError("APP_COMPOSER_TARGET_MISSING", "new composer tab did not return a target id")
+        if target_id in preexisting:
+            raise AppBridgeError(
+                "APP_COMPOSER_TARGET_REUSED_FOREIGN",
+                "agbrowse new-tab returned a preexisting composer target",
+                {"target_id": target_id},
+            )
+        self._owned_composer_targets.add(target_id)
+        self._pinned_target_id = target_id
+        return {**created, "newTargetProven": True}
 
     def open_utility_target(self, url: str) -> dict[str, Any]:
         self.ensure_started()
@@ -947,21 +977,23 @@ class AppConnector:
         settle = getattr(self.ui, "settle", None)
         ambiguity_counts: list[int] = []
         rate_limit_dismissed = False
+        target_mismatches: list[str] = []
         for attempt in range(1, max(1, min(3, attempts)) + 1):
             self.ui.activate_target(target_id)
             if callable(settle):
                 settle()
-            page = self.ui.snapshot()
+            try:
+                page = self.ui.snapshot()
+            except AppBridgeError as exc:
+                if exc.code != "APP_OBSERVATION_TARGET_DRIFT":
+                    raise
+                target_mismatches.append(str(exc.evidence.get("active_target_id") or "unknown"))
+                ambiguity_counts.append(-1)
+                continue
             if page.target_id != target_id:
-                raise AppBridgeError(
-                    "APP_COMPOSER_TARGET_MISMATCH",
-                    "fresh composer snapshot did not belong to the run-owned target",
-                    {
-                        "expected_target_id": target_id,
-                        "actual_target_id": page.target_id,
-                        "snapshot_attempts": attempt,
-                    },
-                )
+                target_mismatches.append(page.target_id)
+                ambiguity_counts.append(-1)
+                continue
             if (
                 not page.url.startswith("https://chatgpt.com/")
                 or "#settings" in page.url.casefold()
@@ -984,6 +1016,16 @@ class AppConnector:
                 and self._dismiss_exact_rate_limit_ack(page, target_id=target_id)
             ):
                 rate_limit_dismissed = True
+        if target_mismatches and len(target_mismatches) == len(ambiguity_counts):
+            raise AppBridgeError(
+                "APP_COMPOSER_TARGET_MISMATCH",
+                "fresh composer snapshots did not belong to the run-owned target",
+                {
+                    "expected_target_id": target_id,
+                    "actual_target_ids": target_mismatches,
+                    "snapshot_attempts": len(ambiguity_counts),
+                },
+            )
         raise AppBridgeError(
             "APP_UI_DRIFT",
             "composer textbox was not uniquely available after bounded fresh snapshots",
@@ -1001,8 +1043,10 @@ class AppConnector:
         started = time.monotonic()
         starting_command_count = int(getattr(self.ui, "command_count", 0))
         self.ui.ensure_started()
-        created = self.ui.new_tab(composer_url)
+        opener = getattr(self.ui, "open_composer_target", None)
+        created = opener(composer_url) if callable(opener) else self.ui.new_tab(composer_url)
         target_id = str(created.get("targetId") or created.get("target_id") or "")
+        new_target_proven = bool(created.get("newTargetProven"))
         if not target_id:
             raise AppBridgeError("APP_COMPOSER_TARGET_MISSING", "new composer tab did not return a target id")
         try:
@@ -1046,6 +1090,7 @@ class AppConnector:
                 "url": composer_url,
                 "selection_method": "exact-at-mention-then-tab",
                 "mention_text_sha256": hashlib.sha256(mention_text.encode("utf-8")).hexdigest(),
+                "new_target_proven": new_target_proven,
                 "textbox_resolution_attempts": resolution["snapshot_attempts"],
                 "textbox_ambiguity_counts": resolution["ambiguity_counts"],
                 "rate_limit_dismissed": resolution["rate_limit_dismissed"],
@@ -1063,6 +1108,7 @@ class AppConnector:
                     **exc.evidence,
                     "owned_target_id": target_id,
                     "owned_stage": "pre-submit-composer",
+                    "new_target_proven": new_target_proven,
                     "duration_ms": round((time.monotonic() - started) * 1000),
                     "agbrowse_command_count": max(
                         0,
@@ -1077,6 +1123,7 @@ class AppConnector:
                 {
                     "owned_target_id": target_id,
                     "owned_stage": "pre-submit-composer",
+                    "new_target_proven": new_target_proven,
                     "duration_ms": round((time.monotonic() - started) * 1000),
                     "agbrowse_command_count": max(
                         0,

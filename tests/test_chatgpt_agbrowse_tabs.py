@@ -765,6 +765,34 @@ def test_pre_submit_target_id_reuse_on_conversation_url_fails_closed(tmp_path: P
     assert [call[1] for call in runner.calls] == ["tabs"]
 
 
+def test_proven_new_pre_submit_composer_can_close_after_app_mention_created_conversation_url(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    run_dir = write_run(
+        state_root,
+        run_id="run-proven-composer",
+        project_key="project-a",
+        phase="PREFLIGHT_BLOCKED",
+        target_id="T-PROVEN",
+    )
+    url = "https://chatgpt.com/c/app-mention-only"
+    runner = BrowserRunner([{"targetId": "T-PROVEN", "url": url}])
+    lifecycle = TABS.TabLifecycle(state_root=state_root, runner=runner)
+    lifecycle.record_owned(
+        str(run_dir),
+        target_id="T-PROVEN",
+        url="https://chatgpt.com/",
+        stage="pre-submit-composer-proven",
+    )
+
+    result = lifecycle.close_pre_submit(str(run_dir), target_id="T-PROVEN", reason="app-prep-failed")
+
+    assert result["state"] == "closed-and-absent"
+    assert [call[1] for call in runner.calls] == ["tabs", "tab-close", "tabs"]
+    assert runner.tabs == []
+
+
 def test_tab_close_failure_is_reported_without_false_absence_evidence(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
     run_dir = write_run(

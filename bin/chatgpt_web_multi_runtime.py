@@ -690,6 +690,31 @@ def parse_stage_answer(
     return envelope
 
 
+def normalized_stage_answer_from_result(result: Mapping[str, Any]) -> str | None:
+    """Derive visible Web Multi text from immutable exact-URL snapshot evidence.
+
+    The child result remains immutable.  This is only a workflow-local parser
+    fallback for agbrowse accessibility trees that split tagged payload text
+    across ``- text:`` nodes.
+    """
+    evidence = result.get("evidence") if isinstance(result.get("evidence"), Mapping) else {}
+    snapshot = evidence.get("snapshot") if isinstance(evidence.get("snapshot"), Mapping) else {}
+    stdout_path = Path(str(snapshot.get("stdout") or ""))
+    expected_sha = str(snapshot.get("stdout_sha256") or "")
+    if not stdout_path.is_file() or stdout_path.is_symlink():
+        return None
+    if expected_sha and sha256_file(stdout_path) != expected_sha:
+        return None
+    try:
+        payload = json.loads(stdout_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    tree = str(payload.get("text") or "") if isinstance(payload, Mapping) else ""
+    visible = BRIDGE._ax_snapshot_visible_text(tree)
+    extracted = BRIDGE._web_multi_assistant_answer(visible)
+    return extracted or None
+
+
 def validate_manifest(value: Mapping[str, Any], manifest_path: Path) -> dict[str, Any]:
     schema = str(value.get("schema") or "")
     if schema not in {V1_SCHEMA, V2_SCHEMA}:
@@ -1440,10 +1465,35 @@ class WebMultiRuntime:
                     ),
                 )
                 retry_index = 0
+
+                def cleanup_permits_fresh_target(value: Mapping[str, Any]) -> bool:
+                    events = value.get("recovery_events")
+                    if not isinstance(events, list) or not events:
+                        return True
+                    latest_event = events[-1] if isinstance(events[-1], dict) else {}
+                    if str(latest_event.get("kind") or "") in {
+                        "app-composer-preparation-failed",
+                        "app-composer-target-activation-failed",
+                        "research-composer-preparation-failed",
+                        "research-selection-final-check-failed",
+                    }:
+                        # These failures occur while acquiring or re-activating
+                        # one proven composer. Opening a replacement composer
+                        # creates blank ChatGPT home tabs and cannot repair
+                        # cross-project active-target interference.
+                        return False
+                    cleanup = latest_event.get("cleanup")
+                    if not isinstance(cleanup, dict):
+                        return True
+                    # A failed cleanup means a run-owned composer may still be
+                    # live.  Reuse/recovery must resolve it; never create a
+                    # replacement composer target in the retry loop.
+                    return cleanup.get("ok") is True
+
                 while True:
                     try:
                         current = bridge.send(run_dir)
-                    except Exception:
+                    except Exception as exc:
                         _, latest = self.store.load(run_dir)
                         safe_retry = bool(
                             latest.get("phase") in {"PREFLIGHT_BLOCKED", "BLOCKED_APP_TRANSACTION"}
@@ -1451,6 +1501,7 @@ class WebMultiRuntime:
                             and not latest.get("session_id")
                             and not latest.get("conversation_url")
                             and latest.get("submission_receipt") is None
+                            and cleanup_permits_fresh_target(latest)
                             and retry_index < retry_limit
                         )
                         if not safe_retry:
@@ -1476,6 +1527,7 @@ class WebMultiRuntime:
                         and not current.get("session_id")
                         and not current.get("conversation_url")
                         and current.get("submission_receipt") is None
+                        and cleanup_permits_fresh_target(current)
                         and retry_index < retry_limit
                     )
                     if not safe_retry:
@@ -1568,18 +1620,33 @@ class WebMultiRuntime:
         except Exception as exc:
             self.store.record_child_cleanup(run_dir, {"ok": False, "state": "cleanup-pending", "detail": str(exc)})
             raise WebMultiError("CHILD_COMPLETED_TAB_CLEANUP_FAILED", spec.stage_id, {"detail": str(exc)}) from exc
-        envelope = parse_stage_answer(
-            answer_text,
-            spec,
-            solver_count=(
+        parse_kwargs = {
+            "solver_count": (
                 int(self.manifest["solver_count"])
                 if self.manifest["manifest_schema"] == V1_SCHEMA
                 else None
             ),
-            manifest_schema=str(self.manifest["manifest_schema"]),
-            repair_evidence_path=Path(run_dir) / "json-transport-repair.json",
-            transport_evidence_path=Path(run_dir) / "stage-transport.json",
-        )
+            "manifest_schema": str(self.manifest["manifest_schema"]),
+            "repair_evidence_path": Path(run_dir) / "json-transport-repair.json",
+            "transport_evidence_path": Path(run_dir) / "stage-transport.json",
+        }
+        try:
+            envelope = parse_stage_answer(answer_text, spec, **parse_kwargs)
+        except WebMultiError as exc:
+            normalized = normalized_stage_answer_from_result(result)
+            if normalized is None:
+                raise
+            envelope = parse_stage_answer(normalized, spec, **parse_kwargs)
+            write_immutable_json(
+                Path(run_dir) / "stage-answer-normalization.json",
+                {
+                    "schema": "codex.chatgpt.web-multi-stage-normalization/v1",
+                    "reason": exc.code,
+                    "raw_answer_sha256": sha256_bytes(answer_text.encode("utf-8")),
+                    "normalized_answer_sha256": sha256_bytes(normalized.encode("utf-8")),
+                    "source_snapshot": result.get("evidence", {}).get("snapshot"),
+                },
+            )
         return envelope, started, ended
 
     def _validate_envelope(

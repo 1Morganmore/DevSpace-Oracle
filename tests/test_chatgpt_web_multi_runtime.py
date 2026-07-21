@@ -722,6 +722,64 @@ def test_transient_app_pre_send_failure_retries_same_child_five_bounded_times(
     assert latest["conversation_url"] is None
 
 
+def test_app_composer_preparation_failure_never_opens_a_replacement_target(
+    tmp_path: Path,
+) -> None:
+    manifest = make_manifest(tmp_path, solver_count=2)
+    runtime = RUNTIME.WebMultiRuntime(manifest, state_root=tmp_path / "state")
+    evidence_map = runtime._source_evidence_map()
+    runtime.workflow_dir.mkdir(parents=True, exist_ok=True)
+    RUNTIME.write_immutable_json(runtime.evidence_map_path, evidence_map)
+    runtime.parent = runtime.store.create_parent_workflow(
+        project_root=runtime.manifest["project_root"],
+        manifest_path=runtime.manifest_path,
+        workflow_id=runtime.workflow_id,
+        agbrowse_contract=runtime.contract,
+    )
+    runtime.parent["run_dir"] = str(Path(runtime.parent["run_dir"]).resolve())
+    spec = RUNTIME.StageSpec("planner", "Planner", 0, 0, runtime.manifest["question"], tuple())
+    artifacts = runtime._stage_artifacts(spec, runtime.parent, evidence_map)
+    child = runtime.store.create_child_run(
+        parent_run_dir=runtime.parent["run_dir"],
+        manifest_path=artifacts["manifest_path"],
+        agbrowse_contract=runtime.contract,
+        role=spec.role,
+        lane=spec.lane,
+        iteration=spec.iteration,
+        stage_id=spec.stage_id,
+        send_limit=1,
+    )
+    runtime.store.transition(child["run_dir"], "PREFLIGHTED")
+
+    class ComposerFailureBridge:
+        def __init__(self):
+            self.send_calls = 0
+
+        def send(self, run_dir):
+            self.send_calls += 1
+            return runtime.store.transition(
+                run_dir,
+                "BLOCKED_APP_TRANSACTION",
+                recovery_event={
+                    "kind": "app-composer-preparation-failed",
+                    "cleanup": {"ok": True, "state": "closed-and-absent"},
+                },
+            )
+
+    bridge = ComposerFailureBridge()
+    runtime.bridge_factory = lambda: bridge
+
+    with pytest.raises(RUNTIME.WebMultiError) as failure:
+        runtime._actual_execute(child, spec)
+
+    assert failure.value.code == "CHILD_NOT_COMPLETE"
+    assert bridge.send_calls == 1
+    _, latest = runtime.store.load(child["run_dir"])
+    assert latest["send_attempt_count"] == 0
+    assert latest["session_id"] is None
+    assert latest["conversation_url"] is None
+
+
 def test_resumed_wave_does_not_make_one_unfinished_stage_wait_for_cached_lanes(tmp_path: Path) -> None:
     manifest = make_manifest(tmp_path, solver_count=4)
     runtime = RUNTIME.WebMultiRuntime(manifest, state_root=tmp_path / "state")
@@ -1010,6 +1068,32 @@ def test_resume_active_runtime_recovery_continues_same_parent_without_drain_reac
         and event.get("to") == "PARENT_ACTIVE"
         for event in latest["phase_events"]
     )
+
+
+def test_completed_exact_capture_can_derive_tagged_answer_from_snapshot(tmp_path: Path) -> None:
+    answer = (
+        "<<<WEB_MULTI_HEADER_V1>>>\n"
+        '{"stage_id":"solver-1"}\n'
+        "<<<END_WEB_MULTI_HEADER_V1>>>\n"
+        "<<<WEB_MULTI_PAYLOAD_V1>>>\n"
+        "<<<CONTENT>>>\nwide answer\n<<<END_CONTENT>>>\n"
+        "<<<END_WEB_MULTI_PAYLOAD_V1>>>"
+    )
+    snapshot = tmp_path / "exact-url-terminal-snapshot.stdout.txt"
+    snapshot.write_text(
+        json.dumps({"text": f'- text: {json.dumps(answer)}'}),
+        encoding="utf-8",
+    )
+    result = {
+        "evidence": {
+            "snapshot": {
+                "stdout": str(snapshot),
+                "stdout_sha256": RUNTIME.sha256_file(snapshot),
+            }
+        }
+    }
+
+    assert RUNTIME.normalized_stage_answer_from_result(result) == answer
 
 
 def test_resume_resultless_recovery_required_parent_fails_closed_and_releases_lock(tmp_path: Path) -> None:

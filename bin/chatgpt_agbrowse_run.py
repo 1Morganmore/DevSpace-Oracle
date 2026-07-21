@@ -263,6 +263,14 @@ def observe_exact_run(run_dir: str, state_root: Path | None = None) -> dict[str,
     observed_url = str(
         session.get("conversationUrl") or session.get("conversation_url") or session.get("originalUrl") or ""
     )
+    live_target_url = str(exact_tab.get("url") or "") if isinstance(exact_tab, dict) else ""
+    live_target_canonical = bool(BRIDGE.STATE.CANONICAL_CHAT_RE.fullmatch(live_target_url))
+    session_url_canonical = bool(BRIDGE.STATE.CANONICAL_CHAT_RE.fullmatch(observed_url))
+    # agbrowse can persist a temporary /c/WEB:<uuid> locator while the same
+    # exact target has already committed a real /c/<id> URL.  The live exact
+    # target is stronger identity evidence; a temporary session locator must
+    # never turn that into an active-tab mismatch.
+    effective_url = live_target_url if live_target_canonical else observed_url
     provider_status = str(session.get("status") or "").casefold()
     active_statuses = {"created", "sent", "polling", "running", "pending", "response_in_progress", "streaming"}
     terminal_statuses = {"complete", "completed", "done", "cancelled", "canceled", "failed"}
@@ -272,11 +280,16 @@ def observe_exact_run(run_dir: str, state_root: Path | None = None) -> dict[str,
         mismatches.append("session_id")
     if observed_target_id and expected["target_id"] and observed_target_id != str(expected["target_id"]):
         mismatches.append("target_id")
-    if observed_url and expected["canonical_url"] and observed_url != str(expected["canonical_url"]):
+    if (
+        session_url_canonical
+        and expected["canonical_url"]
+        and observed_url != str(expected["canonical_url"])
+        and not (live_target_canonical and live_target_url == str(expected["canonical_url"]))
+    ):
         mismatches.append("canonical_url")
     if len(target_matches) > 1 or len(url_matches) > 1:
         mismatches.append("ambiguous_live_target")
-    if exact_tab and expected["canonical_url"] and str(exact_tab.get("url") or "") != str(expected["canonical_url"]):
+    if exact_tab and expected["canonical_url"] and live_target_url != str(expected["canonical_url"]):
         mismatches.append("live_target_url")
     if active_session_id and active_session_id != str(expected["session_id"] or ""):
         mismatches.append("active_command_session")
@@ -310,6 +323,8 @@ def observe_exact_run(run_dir: str, state_root: Path | None = None) -> dict[str,
             "session_id": observed_session_id or None,
             "target_id": observed_target_id or None,
             "canonical_url": observed_url or None,
+            "effective_canonical_url": effective_url or None,
+            "session_url_temporary": bool(observed_url and not session_url_canonical),
             "provider_status": provider_status or None,
             "active_command_session_id": active_session_id or None,
             "target_match_count": len(target_matches),

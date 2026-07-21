@@ -5,6 +5,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -55,6 +56,28 @@ def write_prompt_manifest(path: Path, payload: dict) -> Path:
     value = prompt_payload(path.parent, payload, name=f"{path.stem}-prompt.txt")
     path.write_text(json.dumps(value), encoding="utf-8")
     return path
+
+
+def test_recovery_uses_one_host_global_browser_mutation_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = load("chatgpt_agbrowse_bridge_global_mutation_lock_test", "chatgpt_agbrowse_bridge.py")
+    expected = tmp_path / "global-dispatch.lock"
+    acquired: list[Path] = []
+
+    @contextmanager
+    def fake_lock(path: Path, timeout_seconds: int = 120):
+        acquired.append(Path(path))
+        yield
+
+    monkeypatch.setattr(bridge, "GLOBAL_BROWSER_MUTATION_LOCK", expected)
+    monkeypatch.setattr(bridge, "exclusive_composer_lock", fake_lock)
+    instance = object.__new__(bridge.Bridge)
+    instance._recover_locked = lambda run_dir: {"operation": "recover", "run_dir": run_dir}
+
+    assert instance.recover("run-a")["operation"] == "recover"
+    assert acquired == [expected]
 
 
 @pytest.mark.parametrize(
@@ -368,6 +391,8 @@ def test_warm_composer_fast_path_uses_five_agbrowse_commands_without_tab_switch(
 
     def runner(argv, env, timeout):
         calls.append(argv)
+        if argv[1] == "tabs":
+            return completed(argv, stdout="[]")
         if argv[1] == "new-tab":
             return completed(argv, stdout=json.dumps({"targetId": "T-COMPOSER"}))
         if argv[1] == "active-tab":
@@ -395,9 +420,9 @@ def test_warm_composer_fast_path_uses_five_agbrowse_commands_without_tab_switch(
     gateway._browser_ready = True
     result = app.AppConnector(gateway).prepare_composer_app("CodexPro-CDrive-v14")
 
-    assert result["agbrowse_command_count"] == 5
+    assert result["agbrowse_command_count"] == 6
     assert result["duration_ms"] < 1000
-    assert [argv[1] for argv in calls] == ["new-tab", "active-tab", "observe-bundle", "type", "press"]
+    assert [argv[1] for argv in calls] == ["tabs", "new-tab", "active-tab", "observe-bundle", "type", "press"]
 
 
 def test_connected_auto_prepares_fresh_chat_target_without_app_pill() -> None:
@@ -695,6 +720,119 @@ def test_session_store_lock_is_verified_pre_submit_rejection() -> None:
     assert bridge.classify_pre_submit_failure(envelope) == "SEND_REJECTED"
     envelope["mutation_allowed"] = True
     assert bridge.classify_pre_submit_failure(envelope) == "SUBMISSION_UNCERTAIN_IDENTITY_MISSING"
+
+
+def test_internal_reasoning_picker_timeout_with_no_mutation_is_send_rejected() -> None:
+    bridge = load("chatgpt_agbrowse_bridge_picker_timeout_test", "chatgpt_agbrowse_bridge.py")
+    envelope = {
+        "error_code": "internal.unhandled",
+        "error_stage": "internal",
+        "mutation_allowed": False,
+        "message": "locator.click: Timeout 5000ms exceeded while selecting reasoning",
+    }
+
+    assert bridge.classify_pre_submit_failure(envelope) == "SEND_REJECTED"
+
+
+def test_mutation_disallowed_unprepared_send_closes_only_unique_new_root(tmp_path: Path) -> None:
+    bridge = load("chatgpt_agbrowse_bridge_unprepared_root_cleanup_test", "chatgpt_agbrowse_bridge.py")
+    project = tmp_path / "project"
+    project.mkdir()
+    manifest = tmp_path / "manifest.json"
+    write_prompt_manifest(manifest, {"question": "smoke", "mode_label": "Pro", "app_policy": "forbidden"})
+    tabs = [
+        {"targetId": "FOREIGN", "url": "https://chatgpt.com/c/foreign", "type": "page"},
+        {"targetId": "NEW-ROOT", "url": "https://chatgpt.com/", "type": "page"},
+    ]
+
+    def runner(argv, env, timeout):
+        if argv[1:] == ["tabs", "--json"]:
+            return subprocess.CompletedProcess(argv, 0, json.dumps(tabs), "")
+        if argv[1] == "tab-close":
+            assert argv[2] == "NEW-ROOT"
+            tabs[:] = [tab for tab in tabs if tab["targetId"] != "NEW-ROOT"]
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"ok": True}), "")
+        raise AssertionError(argv)
+
+    runtime = bridge.Bridge(state_root=tmp_path / "state", runner=runner, headed_runtime_preflight=False)
+    record = runtime.store.create_run(
+        project_root=str(project), manifest_path=str(manifest), agbrowse_contract={"executable": "agbrowse"}
+    )
+    run_dir = str(record["run_dir"])
+    runtime.store.transition(run_dir, "PREFLIGHTED")
+    runtime.store.transition(run_dir, "LEASED")
+    runtime.store.transition(run_dir, "SEND_STARTED")
+    rejected = runtime.store.transition(run_dir, "SEND_REJECTED")
+
+    cleanup = runtime._cleanup_new_root_after_unprepared_rejection(
+        run_dir,
+        rejected,
+        pre_send_tabs=[tabs[0]],
+    )
+
+    assert cleanup is not None
+    assert cleanup["state"] == "closed-and-absent"
+    assert [tab["targetId"] for tab in tabs] == ["FOREIGN"]
+
+
+def test_stop_confirmation_modal_requires_one_exact_confirm_ref() -> None:
+    bridge = load("chatgpt_agbrowse_bridge_stop_modal_ref_test", "chatgpt_agbrowse_bridge.py")
+    snapshot = {
+        "textSummary": "응답 생성을 중지할까요?",
+        "snapshotNodes": [
+            {"ref": "cancel", "role": "button", "name": "취소"},
+            {"ref": "stop", "role": "button", "name": "중지"},
+        ],
+    }
+
+    assert bridge._stop_confirmation_ref(snapshot) == "stop"
+    assert bridge._stop_confirmation_ref({"snapshotNodes": []}) is None
+
+
+def test_blocked_interrupt_envelope_is_not_pre_submit_quiescence(tmp_path: Path) -> None:
+    bridge = load("chatgpt_agbrowse_bridge_blocked_stop_not_quiescent_test", "chatgpt_agbrowse_bridge.py")
+    session = {
+        "sessionId": "S-1",
+        "targetId": "T-1",
+        "conversationUrl": "https://chatgpt.com/",
+        "status": "sent",
+        "answer": None,
+        "tabId": None,
+        "trace": [],
+        "envelopeSummary": {"assistantCount": 0},
+    }
+
+    def runner(argv, env, timeout):
+        if argv[1:4] == ["web-ai", "sessions", "list"]:
+            payload = {"sessions": [session]}
+        elif argv[1:3] == ["web-ai", "stop"]:
+            payload = {
+                "ok": True,
+                "status": "blocked",
+                "interrupt": True,
+                "sessionId": "S-1",
+                "targetId": "T-1",
+                "url": "https://chatgpt.com/",
+            }
+        elif argv[1:4] == ["web-ai", "sessions", "show"]:
+            payload = {"session": session}
+        else:
+            raise AssertionError(argv)
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+    runtime = bridge.Bridge(state_root=tmp_path / "state", runner=runner, headed_runtime_preflight=False)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    with pytest.raises(bridge.BridgeError) as failure:
+        runtime._adjudicate_pre_submit_session_artifact(
+            run_dir=run_dir,
+            executable="agbrowse",
+            manifest={},
+            target_id="T-1",
+        )
+
+    assert failure.value.code == "PRE_SUBMIT_RETRY_SESSION_NOT_QUIESCENT"
 
 
 def test_web_multi_answer_extractor_requires_complete_payload() -> None:

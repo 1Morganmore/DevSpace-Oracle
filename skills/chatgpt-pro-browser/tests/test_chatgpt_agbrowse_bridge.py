@@ -1758,6 +1758,18 @@ def test_poll_captures_completed_exact_url_before_long_session_poll(tmp_path: Pa
     bridge, record = prepared_bridge(tmp_path, runner)
     run_dir = record["run_dir"]
     bridge.send(run_dir)
+    bridge.store.transition(
+        run_dir,
+        "RECOVERY_REQUIRED",
+        target_id="exact-target",
+        recovery_event={"kind": "test-exact-terminal"},
+    )
+    bridge.store.transition(run_dir, "RECOVERING")
+    bridge.store.transition(
+        run_dir,
+        "URL_BOUND",
+        conversation_url="https://chatgpt.com/c/already-finished",
+    )
     bridge.store.transition(run_dir, "RECOVERY_REQUIRED", recovery_event={"kind": "stale-poll"})
 
     done = bridge.poll(run_dir, timeout_seconds=14400)
@@ -2376,12 +2388,15 @@ def test_history_adjudication_blocks_one_match_when_another_candidate_is_unread(
 
     recovered = bridge.recover(run_dir)
 
-    assert recovered["phase"] == "BLOCKED_RECOVERY_EXHAUSTED"
-    assert recovered["terminal_block_code"] == "HISTORY_CANDIDATE_CLASSIFICATION_INCOMPLETE"
-    assert recovered["conversation_url"] is None
+    # A run-owned prompt alias is a high-entropy immutable identity. One exact
+    # alias match remains authoritative even if another recent chat cannot be
+    # read; the unread chat cannot contain the same run-owned filename.
+    assert recovered["phase"] == "COMPLETE"
+    assert recovered["terminal_block_code"] is None
+    assert recovered["conversation_url"] == "https://chatgpt.com/c/recovered-exact"
     assert recovered["current_target_id"] == "target-lost"
     assert recovered["target_rebind_events"] == []
     adjudication = json.loads(Path(run_dir, "history-adjudication.json").read_text(encoding="utf-8"))
-    assert adjudication["outcome"] == "incomplete-candidate-classification"
-    assert adjudication["exact_match_urls"] == ["https://chatgpt.com/c/recovered-exact"]
-    assert len(adjudication["incomplete_candidates"]) == 1
+    assert adjudication["outcome"] == "matched-complete"
+    assert adjudication["conversation_url"] == "https://chatgpt.com/c/recovered-exact"
+    assert len([item for item in adjudication["checked"] if item.get("state")]) == 1

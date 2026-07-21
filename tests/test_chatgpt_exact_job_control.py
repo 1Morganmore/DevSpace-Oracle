@@ -101,6 +101,29 @@ def test_false_sent_session_is_not_a_committed_send() -> None:
     assert bridge.session_send_not_committed(session) is False
 
 
+def test_ax_snapshot_web_multi_payload_is_decoded_without_tree_markup() -> None:
+    bridge = load_bridge("exact_job_ax_snapshot_decode_test")
+    snapshot = (
+        '    - text: "<<<WEB_MULTI_HEADER_V1>>>"\n'
+        '    - text: "{\\"schema\\":\\"codex.chatgpt.web-multi-stage/v1\\"}"\n'
+        '    - text: "<<<END_WEB_MULTI_HEADER_V1>>>"\n'
+        '    - text: "<<<WEB_MULTI_PAYLOAD_V1>>>"\n'
+        '    - text: "<<"\n'
+        '    - text: "<CONTENT>"\n'
+        '    - text: ">>"\n'
+        '    - text: "answer"\n'
+        '    - text: "<<<END_CONTENT>>>"\n'
+        '    - text: "<<<END_WEB_MULTI_PAYLOAD_V1>>>"\n'
+    )
+
+    visible = bridge._ax_snapshot_visible_text(snapshot)
+    answer = bridge._web_multi_assistant_answer(visible)
+
+    assert answer is not None
+    assert "- text:" not in answer
+    assert "<<<CONTENT>>>\nanswer\n<<<END_CONTENT>>>" in answer
+
+
 def test_exact_target_observation_never_adopts_another_tab() -> None:
     bridge = load_bridge("exact_job_target_observation_test")
     tabs = [
@@ -116,33 +139,43 @@ def test_exact_target_observation_never_adopts_another_tab() -> None:
     assert bridge.exact_target_observation(tabs, "MISSING")["state"] == "absent"
 
 
-def test_bound_poll_uses_exact_session_without_navigate(tmp_path: Path) -> None:
+def test_bound_poll_uses_exact_url_read_only_checks_without_session_poll(tmp_path: Path) -> None:
     module = load_bridge("exact_job_poll_command_test")
     commands: list[list[str]] = []
 
     def runner(command, env, timeout):
         commands.append(command)
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout=json.dumps(
-                {
-                    "ok": True,
-                    "status": "complete",
-                    "sessionId": "S-1",
-                    "targetId": "T-1",
-                    "conversationUrl": "https://chatgpt.com/c/exact-job",
-                    "answerText": "verified answer",
-                }
-            ),
-            stderr="",
-        )
+        if command[1] == "tab-switch":
+            payload = {"ok": True}
+        elif command[1:] == ["active-tab", "--json"]:
+            payload = {"targetId": "T-1", "url": "https://chatgpt.com/c/exact-job"}
+        elif command[1:3] == ["web-ai", "status"]:
+            payload = {
+                "ok": True,
+                "capabilities": [{
+                    "capabilityId": "chatgpt-response-streaming",
+                    "evidence": {"streaming": False},
+                }],
+            }
+        elif command[1:3] == ["web-ai", "snapshot"]:
+            payload = {"text": "1m 2s 동안 처리함\nFINAL_RESULT\nverified answer"}
+        elif command[1] == "text":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="1m 2s 동안 처리함\nFINAL_RESULT\nverified answer\n출처",
+                stderr="",
+            )
+        else:
+            raise AssertionError(f"unexpected command: {command}")
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
 
     runtime = module.Bridge(
         state_root=tmp_path / "state",
         runner=runner,
         headed_runtime_preflight=False,
     )
+    runtime.exact_url_only_poll = True
     run_dir = make_run(tmp_path, runtime)
     runtime._recovery_tabs = lambda **kwargs: (
         [{"targetId": "T-1", "url": "https://chatgpt.com/c/exact-job"}],
@@ -153,8 +186,8 @@ def test_bound_poll_uses_exact_session_without_navigate(tmp_path: Path) -> None:
 
     assert result["phase"] == "COMPLETE"
     poll_commands = [command for command in commands if command[1:3] == ["web-ai", "poll"]]
-    assert len(poll_commands) == 1
-    assert "--navigate" not in poll_commands[0]
+    assert poll_commands == []
+    assert all("--navigate" not in command for command in commands)
 
 
 def test_bound_recovery_never_runs_navigating_doctor(tmp_path: Path) -> None:
@@ -181,6 +214,155 @@ def test_bound_recovery_never_runs_navigating_doctor(tmp_path: Path) -> None:
 
     assert result["phase"] == "RECOVERING"
     assert commands == []
+
+
+def test_known_url_root_target_is_restored_in_place_without_new_tab_or_doctor(tmp_path: Path) -> None:
+    module = load_bridge("exact_job_known_url_restore_test")
+    commands: list[list[str]] = []
+    restored = {"value": False}
+
+    def runner(command, env, timeout):
+        commands.append(command)
+        if command[1:] == ["tabs", "--json"]:
+            url = "https://chatgpt.com/c/exact-job" if restored["value"] else "https://chatgpt.com/"
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps([{"targetId": "T-1", "url": url}]),
+                stderr="",
+            )
+        if command[1] == "tab-switch":
+            payload = {"ok": True}
+        elif command[1:] == ["active-tab", "--json"]:
+            url = "https://chatgpt.com/c/exact-job" if restored["value"] else "https://chatgpt.com/"
+            payload = {"targetId": "T-1", "url": url}
+        elif command[1] == "navigate":
+            assert command[2] == "https://chatgpt.com/c/exact-job"
+            restored["value"] = True
+            payload = {"ok": True, "targetId": "T-1", "url": command[2]}
+        elif command[1:3] == ["web-ai", "status"]:
+            payload = {
+                "ok": True,
+                "capabilities": [{
+                    "capabilityId": "chatgpt-response-streaming",
+                    "evidence": {"streaming": True},
+                }],
+            }
+        else:
+            raise AssertionError(f"unexpected command: {command}")
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+    runtime = module.Bridge(
+        state_root=tmp_path / "state",
+        runner=runner,
+        headed_runtime_preflight=False,
+    )
+    run_dir = make_run(tmp_path, runtime, phase="RESPONSE_IN_PROGRESS")
+    runtime.store.transition(run_dir, "RECOVERY_REQUIRED", recovery_event={"kind": "stale-root"})
+
+    result = runtime.recover(run_dir)
+
+    assert result["phase"] == "RECOVERING"
+    assert restored["value"] is True
+    assert sum(command[1] == "navigate" for command in commands) == 1
+    assert not any(command[1] == "new-tab" for command in commands)
+    assert not any(command[1:3] == ["web-ai", "sessions"] for command in commands)
+
+
+def test_known_url_is_reopened_once_when_recorded_target_is_absent(tmp_path: Path) -> None:
+    module = load_bridge("exact_job_known_url_reopen_test")
+    commands: list[list[str]] = []
+    opened = {"value": False}
+
+    def runner(command, env, timeout):
+        commands.append(command)
+        if command[1:] == ["tabs", "--json"]:
+            tabs = (
+                [{"targetId": "T-2", "url": "https://chatgpt.com/c/exact-job"}]
+                if opened["value"]
+                else [{"targetId": "FOREIGN", "url": "https://chatgpt.com/c/foreign"}]
+            )
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(tabs), stderr="")
+        if command[1] == "new-tab":
+            assert command[2] == "https://chatgpt.com/c/exact-job"
+            opened["value"] = True
+            payload = {"targetId": "T-2", "url": command[2]}
+        elif command[1] == "tab-switch":
+            payload = {"ok": True}
+        elif command[1:] == ["active-tab", "--json"]:
+            payload = {"targetId": "T-2", "url": "https://chatgpt.com/c/exact-job"}
+        elif command[1:3] == ["web-ai", "status"]:
+            payload = {
+                "ok": True,
+                "capabilities": [{
+                    "capabilityId": "chatgpt-response-streaming",
+                    "evidence": {"streaming": True},
+                }],
+            }
+        else:
+            raise AssertionError(f"unexpected command: {command}")
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+    runtime = module.Bridge(
+        state_root=tmp_path / "state",
+        runner=runner,
+        headed_runtime_preflight=False,
+    )
+    run_dir = make_run(tmp_path, runtime, phase="RESPONSE_IN_PROGRESS")
+    runtime.store.transition(run_dir, "RECOVERY_REQUIRED", recovery_event={"kind": "target-absent"})
+
+    result = runtime.recover(run_dir)
+
+    assert result["phase"] == "URL_BOUND"
+    assert result["current_target_id"] == "T-2"
+    opens = [command for command in commands if command[1] == "new-tab"]
+    assert opens == [["agbrowse", "new-tab", "https://chatgpt.com/c/exact-job", "--json"]]
+    assert not any(command[1] == "navigate" for command in commands)
+    assert not any(command[1:3] == ["web-ai", "sessions"] for command in commands)
+
+
+def test_recorded_target_canonical_url_binds_before_doctor_or_history(tmp_path: Path) -> None:
+    module = load_bridge("exact_job_visible_target_bind_test")
+    commands: list[list[str]] = []
+
+    def runner(command, env, timeout):
+        commands.append(command)
+        if command[1:] == ["tabs", "--json"]:
+            payload = [{"targetId": "T-1", "url": "https://chatgpt.com/c/exact-job"}]
+        elif command[1] == "tab-switch":
+            payload = {"ok": True}
+        elif command[1:] == ["active-tab", "--json"]:
+            payload = {"targetId": "T-1", "url": "https://chatgpt.com/c/exact-job"}
+        elif command[1:3] == ["web-ai", "status"]:
+            payload = {
+                "ok": True,
+                "capabilities": [{
+                    "capabilityId": "chatgpt-response-streaming",
+                    "evidence": {"streaming": True},
+                }],
+            }
+        else:
+            raise AssertionError(f"unexpected command: {command}")
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+    runtime = module.Bridge(
+        state_root=tmp_path / "state",
+        runner=runner,
+        headed_runtime_preflight=False,
+    )
+    run_dir = make_run(tmp_path, runtime, phase="SUBMITTED")
+    runtime.store.transition(run_dir, "RECOVERY_REQUIRED", recovery_event={"kind": "url-envelope-late"})
+
+    result = runtime.recover(run_dir)
+
+    assert result["phase"] == "URL_BOUND"
+    assert result["conversation_url"] == "https://chatgpt.com/c/exact-job"
+    assert any(
+        event.get("kind") == "recorded-target-canonical-before-doctor"
+        for event in result["recovery_events"]
+    )
+    assert not any(command[1:3] == ["web-ai", "sessions"] for command in commands)
+    assert not any(command[1] in {"new-tab", "navigate", "click"} for command in commands)
 
 
 def test_send_binds_new_exact_target_before_poll(tmp_path: Path) -> None:
@@ -236,6 +418,9 @@ def test_send_binds_new_exact_target_before_poll(tmp_path: Path) -> None:
     run_dir = str(record["run_dir"])
     runtime.store.transition(run_dir, "PREFLIGHTED")
     runtime._tab_lifecycle = lambda executable, values: lifecycle
+    runtime.capture_pre_send_tabs = True
+    runtime.observe_post_send_targets = True
+    runtime.exact_url_only_poll = True
     observations = iter(
         [
             ([{"targetId": "FOREIGN", "url": "https://chatgpt.com/c/foreign"}], {"kind": "before"}),
@@ -323,6 +508,9 @@ def test_false_sent_root_is_closed_and_never_polled(tmp_path: Path) -> None:
     run_dir = str(record["run_dir"])
     runtime.store.transition(run_dir, "PREFLIGHTED")
     runtime._tab_lifecycle = lambda executable, values: lifecycle
+    runtime.capture_pre_send_tabs = True
+    runtime.observe_post_send_targets = True
+    runtime.exact_url_only_poll = True
     runtime._recovery_tabs = lambda **kwargs: (
         ([{"targetId": "FOREIGN", "url": "https://chatgpt.com/c/foreign"}], {"kind": "before"})
         if kwargs["name"] == "pre-send-tabs"
@@ -363,3 +551,56 @@ def test_false_sent_root_is_closed_and_never_polled(tmp_path: Path) -> None:
             "reason": "verified-send-click-not-committed",
         }
     ]
+
+
+def test_dead_exact_session_command_lock_is_reclaimed_without_waiting(tmp_path: Path, monkeypatch) -> None:
+    module = load_bridge("dead_exact_session_command_lock_test")
+    home = tmp_path / "home"
+    lock_dir = home / ".browser-agent"
+    lock_dir.mkdir(parents=True)
+    session_id = "SESSION-DEAD"
+    lock = lock_dir / f"web-ai-sessions.json.cmd.{session_id}.lock"
+    lock.write_text(
+        json.dumps({
+            "pid": 424242,
+            "sessionId": session_id,
+            "acquiredAt": "2026-07-21T00:00:00Z",
+            "heartbeatAt": "2026-07-21T00:00:01Z",
+            "expiresAt": "2099-01-01T00:00:00Z",
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(module.STATE, "process_identity", lambda pid: {"pid": pid, "creation_time": None, "alive": False})
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    runtime = module.Bridge(state_root=tmp_path / "state", headed_runtime_preflight=False)
+
+    result = runtime._reclaim_dead_session_command_lock(run_dir=run_dir, session_id=session_id)
+
+    assert result["state"] == "reclaimed-and-absent"
+    assert not lock.exists()
+    assert (run_dir / "agbrowse-evidence" / "dead-session-command-lock.json").is_file()
+
+
+def test_live_exact_session_command_lock_is_never_reclaimed(tmp_path: Path, monkeypatch) -> None:
+    module = load_bridge("live_exact_session_command_lock_test")
+    home = tmp_path / "home"
+    lock_dir = home / ".browser-agent"
+    lock_dir.mkdir(parents=True)
+    session_id = "SESSION-LIVE"
+    lock = lock_dir / f"web-ai-sessions.json.cmd.{session_id}.lock"
+    lock.write_text(
+        json.dumps({"pid": 12, "sessionId": session_id, "acquiredAt": "2026-07-21T00:00:00Z"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(module.STATE, "process_identity", lambda pid: {"pid": pid, "creation_time": 1784592000.0, "alive": True})
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    runtime = module.Bridge(state_root=tmp_path / "state", headed_runtime_preflight=False)
+
+    result = runtime._reclaim_dead_session_command_lock(run_dir=run_dir, session_id=session_id)
+
+    assert result["state"] == "owner-alive"
+    assert lock.is_file()

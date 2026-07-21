@@ -113,7 +113,9 @@ def test_foreign_snapshot_target_is_never_clicked_or_typed() -> None:
                 ],
                 target_id="T-FOREIGN",
                 text="rate limit",
-            )
+            ),
+            snapshot([], target_id="T-FOREIGN"),
+            snapshot([], target_id="T-FOREIGN"),
         ]
     )
 

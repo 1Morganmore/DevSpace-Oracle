@@ -223,7 +223,14 @@ class TabLifecycle:
             and re.fullmatch(r"[0-9a-f]{64}", str(result.get("sha256") or "")) is not None
             and actual_sha256 == str(result.get("sha256") or "")
             and str(result.get("provider_status") or "").lower()
-            in {"complete", "completed", "done", "response_ready", "history-adjudicated-terminal"}
+            in {
+                "complete",
+                "completed",
+                "done",
+                "response_ready",
+                "history-adjudicated-terminal",
+                "exact-url-adjudicated-terminal",
+            }
             and isinstance(result.get("evidence"), dict)
             and bool(result["evidence"])
         )
@@ -249,7 +256,14 @@ class TabLifecycle:
                 and hashlib.sha256(answer_path.read_bytes()).hexdigest() == str(failure.get("answer_sha256") or "")
                 and str(failure.get("signature") or "") == "chatgpt-stream-error-retry-v1"
                 and str(failure.get("provider_status") or "").lower()
-                in {"complete", "completed", "done", "response_ready", "history-adjudicated-terminal"}
+                in {
+                    "complete",
+                    "completed",
+                    "done",
+                    "response_ready",
+                    "history-adjudicated-terminal",
+                    "exact-url-adjudicated-terminal",
+                }
                 and str(failure.get("session_id") or "") == str(record.get("session_id") or "")
                 and str(failure.get("target_id") or "") == str(record.get("current_target_id") or "")
                 and normalized_url(str(failure.get("conversation_url") or ""))
@@ -1130,7 +1144,20 @@ class TabLifecycle:
         if len(matches) != 1:
             raise TabLifecycleError("TAB_TARGET_AMBIGUOUS", "target id matched multiple live tabs", {"target_id": target_id})
         url = _tab_url(matches[0])
-        if not is_pre_submit_composer_url(url):
+        lifecycle = read_json(self._lifecycle_file(state_file))
+        proven_new_composer = any(
+            isinstance(event, dict)
+            and event.get("kind") == "owned"
+            and str(event.get("target_id") or "") == target_id
+            and event.get("stage") == "pre-submit-composer-proven"
+            for event in lifecycle.get("events") or []
+        )
+        canonical_pre_submit_only = bool(
+            proven_new_composer
+            and int(record.get("send_attempt_count") or 0) == 0
+            and CANONICAL_CHAT_RE.fullmatch(normalized_url(url))
+        )
+        if not is_pre_submit_composer_url(url) and not canonical_pre_submit_only:
             raise TabLifecycleError(
                 "TAB_PRE_SUBMIT_URL_FORBIDDEN",
                 "automatic cleanup is limited to unsubmitted ChatGPT composer tabs",

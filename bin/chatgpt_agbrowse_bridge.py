@@ -30,6 +30,9 @@ COMPOSER_PATH = BIN_DIR / "chatgpt_agbrowse_composer.py"
 APP_IDENTITY_PATH = BIN_DIR / "codexpro_mcp_identity.py"
 CONTRACT_VALIDATOR_PATH = BIN_DIR / "chatgpt_agbrowse_contract.py"
 TABS_PATH = BIN_DIR / "chatgpt_agbrowse_tabs.py"
+GLOBAL_BROWSER_MUTATION_LOCK = (
+    Path.home() / ".codex" / "state" / "chatgpt-agbrowse" / "global-dispatch.lock"
+)
 
 
 def _load_state_module():
@@ -477,6 +480,48 @@ def _streaming_state(status: dict[str, Any]) -> bool | None:
     return None
 
 
+def _snapshot_role_name_refs(snapshot: Mapping[str, Any]) -> list[dict[str, str]]:
+    raw = snapshot.get("snapshotNodes") or snapshot.get("nodes") or snapshot.get("refs") or []
+    if isinstance(raw, Mapping):
+        raw = [dict(value, ref=key) for key, value in raw.items() if isinstance(value, Mapping)]
+    return [
+        {
+            "ref": str(item.get("ref") or "").lstrip("@"),
+            "role": str(item.get("role") or "").casefold(),
+            "name": str(item.get("name") or "").strip(),
+        }
+        for item in raw
+        if isinstance(item, Mapping) and item.get("ref")
+    ]
+
+
+def _stop_confirmation_ref(snapshot: Mapping[str, Any]) -> str | None:
+    text = json.dumps(snapshot, ensure_ascii=False)
+    modal_present = any(
+        marker in text
+        for marker in (
+            "응답 생성을 중지할까요?",
+            "Stop generating the response?",
+            "Stop generating?",
+        )
+    )
+    if not modal_present:
+        return None
+    confirm_names = {"중지", "응답 중지", "Stop", "Stop generating", "확인"}
+    matches = [
+        node["ref"]
+        for node in _snapshot_role_name_refs(snapshot)
+        if node["role"] == "button" and node["name"] in confirm_names
+    ]
+    if len(matches) != 1:
+        raise BridgeError(
+            "USER_STOP_CONFIRM_CONTROL_AMBIGUOUS",
+            "stop confirmation modal is present without one exact confirm button",
+            {"match_count": len(matches)},
+        )
+    return matches[0]
+
+
 def _matching_json_answer(page_text: str, contract: dict[str, Any]) -> str | None:
     decoder = json.JSONDecoder()
     for index, character in enumerate(page_text):
@@ -563,6 +608,27 @@ def _web_multi_assistant_answer(page_text: str) -> str | None:
     return answer or None
 
 
+def _ax_snapshot_visible_text(snapshot_text: str) -> str:
+    """Decode agbrowse accessibility ``- text:`` nodes into visible text."""
+    values: list[str] = []
+    for line in str(snapshot_text or "").splitlines():
+        match = re.match(r"^\s*-\s+text:\s*(.+?)\s*$", line)
+        if match is None:
+            continue
+        raw = match.group(1)
+        try:
+            value = json.loads(raw) if raw.startswith('"') else raw
+        except json.JSONDecodeError:
+            value = raw.strip('"')
+        if isinstance(value, str):
+            values.append(value)
+    visible = "\n".join(values)
+    # ChatGPT can expose the opening CONTENT marker as three adjacent text
+    # nodes because of nested angle-bracket markup.
+    visible = visible.replace("<<\n<CONTENT>\n>>", "<<<CONTENT>>>")
+    return visible
+
+
 def provider_terminal_error_ui(answer_text: str) -> dict[str, Any] | None:
     """Recognize only exact provider-error controls at the answer tail.
 
@@ -643,6 +709,13 @@ def classify_pre_submit_failure(envelope: dict[str, Any]) -> str:
             "attachment-preflight",
         }:
             return "SEND_REJECTED"
+        # ``mutationAllowed=false`` is agbrowse's explicit provider-boundary
+        # proof.  UI preparation failures (for example a reasoning-menu click
+        # timeout) can happen after our local SEND_STARTED marker but still
+        # before ChatGPT receives a message.  Keeping such runs uncertain
+        # creates a permanent false project lock despite empty stdout and an
+        # exact negative history adjudication.
+        return "SEND_REJECTED"
     return "SUBMISSION_UNCERTAIN_IDENTITY_MISSING"
 
 
@@ -954,6 +1027,14 @@ class Bridge:
     ):
         self.store = STATE.RunStore(state_root)
         self.runner = runner or default_runner
+        # Pre-send tab differencing is a production safety probe. Injected
+        # runners are deterministic test seams unless a test opts in.
+        self.capture_pre_send_tabs = runner is None
+        self.observe_post_send_targets = runner is None
+        # Unit/integration runners provide a finite scripted command stream.
+        # Keep production on exact-URL-only polling while retaining a narrow
+        # seam for legacy state-machine tests that exercise envelope handling.
+        self.exact_url_only_poll = runner is None
         self.app_connector_factory = app_connector_factory
         self.research_composer_factory = research_composer_factory
         self.app_identity_probe = app_identity_probe
@@ -1315,11 +1396,29 @@ class Bridge:
         return str(evidence.get("owned_target_id") or "") or None
 
     @staticmethod
-    def _safe_tab_cleanup(lifecycle, run_dir: str, *, target_id: str | None, url: str, reason: str) -> dict[str, Any]:
+    def _new_target_proven_from_exception(exc: Exception) -> bool:
+        evidence = getattr(exc, "evidence", None)
+        return bool(isinstance(evidence, dict) and evidence.get("new_target_proven") is True)
+
+    @staticmethod
+    def _safe_tab_cleanup(
+        lifecycle,
+        run_dir: str,
+        *,
+        target_id: str | None,
+        url: str,
+        reason: str,
+        new_target_proven: bool = False,
+    ) -> dict[str, Any]:
         if not target_id:
             return {"ok": True, "skipped": True, "reason": "target-id-missing"}
         try:
-            lifecycle.record_owned(run_dir, target_id=target_id, url=url, stage="pre-submit")
+            lifecycle.record_owned(
+                run_dir,
+                target_id=target_id,
+                url=url,
+                stage=("pre-submit-composer-proven" if new_target_proven else "pre-submit"),
+            )
             return lifecycle.close_pre_submit(run_dir, target_id=target_id, reason=reason)
         except Exception as exc:
             return {
@@ -1335,6 +1434,7 @@ class Bridge:
         executable = record_executable(record)
         lifecycle = self._tab_lifecycle(executable, manifest)
         utilities_closed = False
+        close_utilities = getattr(lifecycle, "close_terminal_recovery_utilities", None)
         try:
             cleanup = lifecycle.close_completed(run_dir, explicit_user_request=explicit_user_request)
         except Exception as exc:
@@ -1355,7 +1455,6 @@ class Bridge:
             if code and code != "TAB_COMPLETED_TARGET_MISMATCH":
                 raise exc
             if code == "TAB_COMPLETED_TARGET_MISMATCH":
-                close_utilities = getattr(lifecycle, "close_terminal_recovery_utilities", None)
                 if callable(close_utilities) and not utilities_closed:
                     try:
                         close_utilities(
@@ -1853,64 +1952,64 @@ class Bridge:
         if exact_target_live and stored_url and exact_target_url != stored_url:
             identity_match = False
 
-        if session_id and identity_match and (exact_target_live or not terminal_session):
+        exact_ui_terminal = False
+        if session_id and identity_match and exact_target_live and stored_url and not terminal_session:
             try:
+                self._reclaim_dead_session_command_lock(
+                    run_dir=state_file.parent,
+                    session_id=session_id,
+                )
                 run_probe(
                     "stop",
                     [executable, "web-ai", "stop", "--vendor", "chatgpt", "--session", session_id, "--json"],
                 )
-                poll_command = [
-                    executable,
-                    "web-ai",
-                    "poll",
-                    "--vendor",
-                    "chatgpt",
-                    "--session",
-                    session_id,
-                    "--timeout",
-                    "5",
-                    "--json",
-                ]
-                if stored_url:
-                    poll_command.insert(-1, "--navigate")
-                _, poll_payload = run_probe("poll-after-stop", poll_command)
-                if isinstance(poll_payload, dict):
-                    poll_status = str(poll_payload.get("status") or "").casefold()
-                    poll_session_id = str(poll_payload.get("sessionId") or poll_payload.get("session_id") or "")
-                    poll_target_id = str(
-                        poll_payload.get("targetId") or poll_payload.get("target_id") or poll_payload.get("tabId") or ""
+                run_probe("switch-after-stop", [executable, "tab-switch", stored_target_id, "--json"])
+                _, active_after_stop = run_probe("active-after-stop", [executable, "active-tab", "--json"])
+                active_after_target = str((active_after_stop or {}).get("targetId") or "")
+                active_after_url = str((active_after_stop or {}).get("url") or "")
+                identity_match = bool(
+                    identity_match
+                    and active_after_target == stored_target_id
+                    and canonical_exact(active_after_url, stored_url)
+                )
+                _, stop_snapshot = run_probe("snapshot-after-stop", [executable, "snapshot", "--json"])
+                snapshot_mapping = stop_snapshot if isinstance(stop_snapshot, dict) else {}
+                confirm_ref = _stop_confirmation_ref(snapshot_mapping)
+                if confirm_ref:
+                    run_probe("confirm-stop", [executable, "click", confirm_ref, "--json"])
+                    _, confirmed_snapshot = run_probe(
+                        "snapshot-after-stop-confirm", [executable, "snapshot", "--json"]
                     )
-                    poll_url = str(
-                        poll_payload.get("conversationUrl")
-                        or poll_payload.get("conversation_url")
-                        or poll_payload.get("originalUrl")
-                        or ""
+                    if _stop_confirmation_ref(
+                        confirmed_snapshot if isinstance(confirmed_snapshot, dict) else {}
+                    ):
+                        raise BridgeError(
+                            "USER_STOP_CONFIRM_MODAL_REMAINS",
+                            "stop confirmation modal remains visible",
+                        )
+                _, status_after_stop = run_probe(
+                    "status-after-stop",
+                    [executable, "web-ai", "status", "--vendor", "chatgpt", "--url", stored_url, "--json"],
+                )
+                exact_ui_terminal = bool(
+                    identity_match
+                    and isinstance(status_after_stop, dict)
+                    and _streaming_state(status_after_stop) is False
+                )
+                terminal_session = exact_ui_terminal
+                if exact_ui_terminal:
+                    session_status = "stopped"
+                    helper_checks.append(
+                        {"source": "exact-url-status-after-stop", "present": False, "valid": True}
                     )
-                    poll_helper = helper_check(poll_payload, source="poll-after-stop")
-                    helper_checks.append(poll_helper)
-                    poll_identity = bool(
-                        poll_session_id == session_id
-                        and poll_target_id == stored_target_id
-                        and canonical_exact(poll_url, stored_url)
-                    )
-                    identity_match = bool(identity_match and poll_identity and poll_helper["valid"])
-                    terminal_session = bool(
-                        identity_match
-                        and poll_status in terminal_statuses
-                        and poll_helper["present"] is False
-                    )
-                    if poll_status:
-                        session_status = poll_status
                 else:
                     helper_checks.append(
-                        {"source": "poll-after-stop", "present": False, "valid": False, "reason": "payload-ambiguous"}
+                        {"source": "exact-url-status-after-stop", "present": False, "valid": False, "reason": "streaming-not-false"}
                     )
-                    identity_match = False
-                    terminal_session = False
             except Exception as exc:
-                commands.append({"name": "stop-or-poll", "exception": _redact_sensitive_text(str(exc))})
+                commands.append({"name": "stop-or-confirm", "exception": _redact_sensitive_text(str(exc))})
                 helper_checks.append(
-                    {"source": "poll-after-stop", "present": False, "valid": False, "reason": "probe-failed"}
+                    {"source": "exact-url-status-after-stop", "present": False, "valid": False, "reason": "probe-failed"}
                 )
                 identity_match = False
                 terminal_session = False
@@ -1940,12 +2039,13 @@ class Bridge:
                         and after_target == stored_target_id
                         and canonical_exact(after_url, stored_url)
                     )
-                    identity_match = bool(identity_match and after_identity and after_helper["valid"])
-                    terminal_session = bool(
-                        identity_match
-                        and after_status in terminal_statuses
-                        and after_helper["present"] is False
-                    )
+                    if not exact_ui_terminal:
+                        identity_match = bool(identity_match and after_identity and after_helper["valid"])
+                        terminal_session = bool(
+                            identity_match
+                            and after_status in terminal_statuses
+                            and after_helper["present"] is False
+                        )
                     if after_status:
                         session_status = after_status
                 else:
@@ -1981,7 +2081,7 @@ class Bridge:
         )
         if terminal_session:
             generation_active = False
-        helper_active_or_invalid = any(
+        helper_active_or_invalid = False if exact_ui_terminal else any(
             check.get("present") is True or check.get("valid") is not True for check in helper_checks
         )
         if helper_active_or_invalid:
@@ -2602,7 +2702,11 @@ class Bridge:
                 run_dir,
                 target_id=target_id,
                 url=str(composer_result.get("url") or "https://chatgpt.com/"),
-                stage="pre-submit-composer",
+                stage=(
+                    "pre-submit-composer-proven"
+                    if composer_result.get("new_target_proven") is True
+                    else "pre-submit-composer"
+                ),
             )
             write_json_atomic(evidence_path, sanitize_evidence(composer_result))
             if selection_kind == "app":
@@ -3404,6 +3508,91 @@ class Bridge:
             "stderr_sha256": sha256_bytes((completed.stderr or "").encode("utf-8")),
         }
 
+    def _reclaim_dead_session_command_lock(
+        self,
+        *,
+        run_dir: Path,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Remove only one stable command lock whose exact owner epoch is dead."""
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+            return {"state": "invalid-session-id", "reclaimed": False}
+        lock_path = Path.home() / ".browser-agent" / f"web-ai-sessions.json.cmd.{session_id}.lock"
+        if not lock_path.is_file() or lock_path.is_symlink():
+            return {"state": "absent", "reclaimed": False}
+        try:
+            before_stat = lock_path.stat()
+            before = lock_path.read_bytes()
+            payload = json.loads(before.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return {"state": "invalid", "reclaimed": False}
+        pid = payload.get("pid")
+        if (
+            str(payload.get("sessionId") or "") != session_id
+            or type(pid) is not int
+            or pid <= 0
+        ):
+            return {"state": "identity-mismatch", "reclaimed": False}
+        owner = STATE.process_identity(pid)
+        acquired_text = str(payload.get("acquiredAt") or "")
+        acquired_epoch: float | None = None
+        try:
+            acquired_epoch = datetime.fromisoformat(acquired_text.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            pass
+        pid_reused = bool(
+            owner.get("alive") is True
+            and owner.get("creation_time") is not None
+            and acquired_epoch is not None
+            and float(owner["creation_time"]) > acquired_epoch + 2.0
+        )
+        if owner.get("alive") is not False and not pid_reused:
+            return {"state": "owner-alive", "reclaimed": False, "owner": owner}
+        try:
+            after_stat = lock_path.stat()
+            after = lock_path.read_bytes()
+        except OSError:
+            return {"state": "changed-or-absent", "reclaimed": False}
+        stable = bool(
+            before == after
+            and before_stat.st_size == after_stat.st_size
+            and before_stat.st_mtime_ns == after_stat.st_mtime_ns
+        )
+        if not stable:
+            return {"state": "changed", "reclaimed": False}
+        evidence = {
+            "schema": "codex.chatgpt.dead-session-command-lock/v1",
+            "session_id": session_id,
+            "pid": pid,
+            "owner": owner,
+            "pid_reused": pid_reused,
+            "acquired_at": acquired_text or None,
+            "heartbeat_at": payload.get("heartbeatAt"),
+            "expires_at": payload.get("expiresAt"),
+            "lock_sha256": sha256_bytes(before),
+            "lock_bytes": len(before),
+            "stable_two_read_proof": True,
+        }
+        evidence_path = run_dir / "agbrowse-evidence" / "dead-session-command-lock.json"
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(evidence_path, evidence)
+        try:
+            # A final byte comparison closes the replacement race before the
+            # exact lock is removed.  No wildcard or unrelated session lock is touched.
+            if lock_path.read_bytes() != before:
+                return {"state": "changed", "reclaimed": False}
+            lock_path.unlink()
+        except OSError as exc:
+            return {"state": "unlink-failed", "reclaimed": False, "detail": str(exc)}
+        return {
+            "state": "reclaimed-and-absent" if not lock_path.exists() else "reclaim-unverified",
+            "reclaimed": not lock_path.exists(),
+            "evidence": {
+                "path": str(evidence_path),
+                "sha256": STATE.sha256_file(evidence_path),
+            },
+        }
+
     def _show_session_identity(
         self,
         *,
@@ -3508,7 +3697,7 @@ class Bridge:
         envelope = normalize_envelope(payload)
         if classify_pre_submit_failure(envelope) != "SEND_REJECTED" or envelope.get("mutation_allowed") is not False:
             raise BridgeError("UNCERTAIN_RECLASSIFICATION_UNPROVEN", "stderr does not prove mutationAllowed=false pre-submit rejection")
-        return self.store.transition(
+        reclassified = self.store.transition(
             run_dir,
             "SEND_REJECTED",
             recovery_event={
@@ -3521,6 +3710,68 @@ class Bridge:
                 "send_stderr_sha256": STATE.sha256_file(stderr_path),
             },
         )
+        cleanup = self._cleanup_new_root_after_unprepared_rejection(run_dir, reclassified)
+        if cleanup is not None:
+            reclassified = self.store.transition(
+                run_dir,
+                "SEND_REJECTED",
+                recovery_event={"kind": "verified-pre-submit-tab-cleanup", "cleanup": cleanup},
+            )
+        return reclassified
+
+    def _cleanup_new_root_after_unprepared_rejection(
+        self,
+        run_dir: str,
+        record: Mapping[str, Any],
+        *,
+        pre_send_tabs: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Close one root composer proven new across a mutation-disallowed send."""
+        state_file, current = self.store.load(run_dir)
+        manifest = _load_manifest(current)
+        executable = record_executable(current)
+        if pre_send_tabs is None:
+            before_path = state_file.parent / "agbrowse-evidence" / "pre-send-tabs.stdout.txt"
+            if not before_path.is_file() or before_path.is_symlink():
+                return None
+            try:
+                before_payload = json.loads(before_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
+            pre_send_tabs = before_payload.get("tabs") if isinstance(before_payload, dict) else before_payload
+            if not isinstance(pre_send_tabs, list):
+                return None
+        before_ids = {_tab_id(tab) for tab in pre_send_tabs if isinstance(tab, dict) and _tab_id(tab)}
+        try:
+            after_tabs, after_evidence = self._recovery_tabs(
+                run_dir=state_file.parent,
+                name="pre-submit-rejection-tabs-after",
+                executable=executable,
+                env=bridge_env(manifest),
+            )
+        except BridgeError:
+            return None
+        candidates = [
+            tab
+            for tab in after_tabs
+            if _tab_id(tab) not in before_ids and _tab_url(tab).rstrip("/") == "https://chatgpt.com"
+        ]
+        if len(candidates) != 1:
+            return None
+        target_id = _tab_id(candidates[0])
+        lifecycle = self._tab_lifecycle(executable, manifest)
+        lifecycle.record_owned(
+            run_dir,
+            target_id=target_id,
+            url=_tab_url(candidates[0]),
+            stage="pre-submit-composer-proven",
+        )
+        cleanup = lifecycle.close_pre_submit(
+            run_dir,
+            target_id=target_id,
+            reason="mutation-disallowed-unprepared-send",
+        )
+        return {**cleanup, "tabs_after_evidence": after_evidence}
 
     def reclassify_pre_submit(self, run_dir: str) -> dict[str, Any]:
         _, record = self.store.load(run_dir)
@@ -3724,16 +3975,10 @@ class Bridge:
             stop_url = str(stopped_payload.get("url") or "")
             stop_error = stopped_payload.get("error") if isinstance(stopped_payload.get("error"), dict) else {}
             stop_error_evidence = stop_error.get("evidence") if isinstance(stop_error.get("evidence"), dict) else {}
+            # ``status=blocked, interrupt=true`` only means that agbrowse
+            # requested interruption. ChatGPT may still be streaming behind
+            # a confirmation modal, so that envelope is never quiescence.
             stop_quiescence = bool(
-                stopped_payload.get("ok") is True
-                and str(stopped_payload.get("status") or "") == "blocked"
-                and stopped_payload.get("interrupt") is True
-                and str(stopped_payload.get("sessionId") or "") == session_id
-                and str(stopped_payload.get("targetId") or "") == target_id
-                and stop_url.startswith("https://chatgpt.com/")
-                and not STATE.CANONICAL_CHAT_RE.fullmatch(stop_url)
-            )
-            stop_quiescence = stop_quiescence or bool(
                 stopped_payload.get("ok") is False
                 and str(stop_error.get("errorCode") or "") == "cdp.target-mismatch"
                 and str(stop_error.get("stage") or "") == "target-resolution"
@@ -4033,6 +4278,186 @@ class Bridge:
             },
         )
 
+    def _restore_known_url_on_recorded_target(
+        self,
+        run_dir: str,
+        *,
+        tabs: list[dict[str, Any]],
+        tabs_evidence: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Restore one recorded run-owned target to its already known exact URL."""
+        state_file, record = self.store.load(run_dir)
+        saved_url = str(record.get("conversation_url") or "")
+        target_id = str(record.get("current_target_id") or "")
+        if not target_id or not STATE.CANONICAL_CHAT_RE.fullmatch(saved_url):
+            return record
+        canonical = STATE.canonical_conversation_url(saved_url)
+        matches = [tab for tab in tabs if _tab_id(tab) == target_id]
+        if len(matches) != 1:
+            return record
+        observation = exact_target_observation(tabs, target_id)
+        if observation.get("state") == "canonical":
+            return record
+        if observation.get("state") != "root":
+            return record
+
+        manifest = _load_manifest(record)
+        executable = record_executable(record)
+        env = bridge_env(manifest)
+        self._reclaim_dead_session_command_lock(
+            run_dir=state_file.parent,
+            session_id=str(record.get("session_id") or ""),
+        )
+        try:
+            switched, switch_evidence = self._run_recovery_command(
+                run_dir=state_file.parent,
+                name="known-url-restore-switch",
+                command=[executable, "tab-switch", target_id, "--json"],
+                env=env,
+                timeout=30,
+            )
+            active_before, active_before_evidence = self._run_recovery_command(
+                run_dir=state_file.parent,
+                name="known-url-restore-active-before",
+                command=[executable, "active-tab", "--json"],
+                env=env,
+                timeout=30,
+            )
+            active_payload = _json_output(active_before.stdout)
+            if switched.returncode != 0 or str(active_payload.get("targetId") or "") != target_id:
+                return self.store.load(run_dir)[1]
+            navigated, navigate_evidence = self._run_recovery_command(
+                run_dir=state_file.parent,
+                name="known-url-restore-navigate",
+                command=[executable, "navigate", canonical, "--json"],
+                env=env,
+                timeout=60,
+            )
+            after_tabs, after_tabs_evidence = self._recovery_tabs(
+                run_dir=state_file.parent,
+                name="known-url-restore-tabs-after",
+                executable=executable,
+                env=env,
+            )
+        except Exception:
+            return self.store.load(run_dir)[1]
+        restored = exact_target_observation(after_tabs, target_id)
+        if (
+            navigated.returncode != 0
+            or restored.get("state") != "canonical"
+            or str(restored.get("url") or "") != canonical
+        ):
+            return self.store.load(run_dir)[1]
+        return self.store.transition(
+            run_dir,
+            str(record.get("phase") or "RECOVERING"),
+            recovery_event={
+                "kind": "known-url-restored-on-recorded-target",
+                "target_id": target_id,
+                "conversation_url": canonical,
+                "tabs_before": sanitize_evidence(dict(tabs_evidence or {})),
+                "switch": switch_evidence,
+                "active_before": active_before_evidence,
+                "navigate": navigate_evidence,
+                "tabs_after": after_tabs_evidence,
+            },
+        )
+
+    def _reopen_known_url_when_recorded_target_absent(
+        self,
+        run_dir: str,
+        *,
+        tabs: list[dict[str, Any]],
+        tabs_evidence: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Open one exact conversation URL when its recorded target is proven absent."""
+        state_file, record = self.store.load(run_dir)
+        saved_url = str(record.get("conversation_url") or "")
+        recorded_target = str(record.get("current_target_id") or "")
+        if not recorded_target or not STATE.CANONICAL_CHAT_RE.fullmatch(saved_url):
+            return record
+        canonical = STATE.canonical_conversation_url(saved_url)
+        if any(_tab_id(tab) == recorded_target for tab in tabs):
+            return record
+        canonical_matches = []
+        for tab in tabs:
+            try:
+                if STATE.canonical_conversation_url(_tab_url(tab)) == canonical:
+                    canonical_matches.append(tab)
+            except STATE.StateError:
+                continue
+        if canonical_matches:
+            return record
+
+        manifest = _load_manifest(record)
+        executable = record_executable(record)
+        env = bridge_env(manifest)
+        known_ids = {_tab_id(tab) for tab in tabs if _tab_id(tab)}
+        try:
+            opened, open_evidence = self._run_recovery_command(
+                run_dir=state_file.parent,
+                name="known-url-reopen",
+                command=[executable, "new-tab", canonical, "--json"],
+                env=env,
+                timeout=60,
+            )
+            opened_payload = _json_output(opened.stdout)
+            new_target = str(opened_payload.get("targetId") or opened_payload.get("target_id") or "")
+            after_tabs, after_tabs_evidence = self._recovery_tabs(
+                run_dir=state_file.parent,
+                name="known-url-reopen-tabs-after",
+                executable=executable,
+                env=env,
+            )
+        except Exception:
+            return self.store.load(run_dir)[1]
+        exact_matches = []
+        for tab in after_tabs:
+            try:
+                if STATE.canonical_conversation_url(_tab_url(tab)) == canonical:
+                    exact_matches.append(tab)
+            except STATE.StateError:
+                continue
+        if (
+            opened.returncode != 0
+            or not new_target
+            or new_target in known_ids
+            or len(exact_matches) != 1
+            or _tab_id(exact_matches[0]) != new_target
+        ):
+            return self.store.load(run_dir)[1]
+        bound = self._bind_conversation_url(
+            run_dir,
+            conversation_url=canonical,
+            target_id=new_target,
+            rebind_reason="known-url-reopened-after-recorded-target-absence",
+            recovery_event={
+                "kind": "known-url-reopened-after-recorded-target-absence",
+                "old_target_id": recorded_target,
+                "new_target_id": new_target,
+                "conversation_url": canonical,
+                "tabs_before": sanitize_evidence(dict(tabs_evidence or {})),
+                "open": open_evidence,
+                "tabs_after": after_tabs_evidence,
+            },
+        )
+        if bound.get("phase") == "BLOCKED_TARGET_AMBIGUOUS":
+            return bound
+        lifecycle = self._tab_lifecycle(executable, manifest)
+        lifecycle.record_owned(
+            run_dir,
+            target_id=new_target,
+            url=canonical,
+            stage="known-url-recovery-reopen",
+        )
+        lifecycle.record_protected(
+            run_dir,
+            target_id=new_target,
+            conversation_url=canonical,
+            stage="known-url-recovery-reopen",
+        )
+        return self.store.load(run_dir)[1]
+
     def _recover_exact_bound_url_terminal(
         self,
         run_dir: str,
@@ -4053,6 +4478,10 @@ class Bridge:
         manifest = _load_manifest(record)
         executable = record_executable(record)
         env = bridge_env(manifest)
+        self._reclaim_dead_session_command_lock(
+            run_dir=state_file.parent,
+            session_id=str(record.get("session_id") or ""),
+        )
         try:
             switched, switch_evidence = self._run_recovery_command(
                 run_dir=state_file.parent,
@@ -4084,6 +4513,36 @@ class Bridge:
                 env=env,
                 timeout=60,
             )
+        except Exception:
+            # The exact-session poll remains the conservative fallback when
+            # public read-only page inspection is temporarily unavailable.
+            return self.store.load(run_dir)[1]
+
+        if any(
+            completed.returncode != 0
+            for completed in (switched, active, status_completed)
+        ):
+            return self.store.load(run_dir)[1]
+        try:
+            active_payload = _json_output(active.stdout)
+            status_payload = _json_output(status_completed.stdout)
+        except BridgeError:
+            return self.store.load(run_dir)[1]
+
+        active_target = str(active_payload.get("targetId") or active_payload.get("target_id") or "")
+        active_url = str(active_payload.get("url") or active_payload.get("tab", {}).get("url") or "")
+        try:
+            active_url = STATE.canonical_conversation_url(active_url)
+        except STATE.StateError:
+            return self.store.load(run_dir)[1]
+        if active_target != target_id or active_url != conversation_url:
+            return self.store.load(run_dir)[1]
+
+        streaming = _streaming_state(status_payload)
+        if streaming is not False:
+            return self.store.load(run_dir)[1]
+
+        try:
             snapshot_completed, snapshot_evidence = self._run_recovery_command(
                 run_dir=state_file.parent,
                 name="exact-url-terminal-snapshot",
@@ -4098,43 +4557,27 @@ class Bridge:
                 env=env,
                 timeout=60,
             )
-        except Exception:
-            # The exact-session poll remains the conservative fallback when
-            # public read-only page inspection is temporarily unavailable.
-            return self.store.load(run_dir)[1]
-
-        if any(
-            completed.returncode != 0
-            for completed in (switched, active, status_completed, snapshot_completed, text_completed)
-        ):
-            return self.store.load(run_dir)[1]
-        try:
-            active_payload = _json_output(active.stdout)
-            status_payload = _json_output(status_completed.stdout)
+            if snapshot_completed.returncode != 0 or text_completed.returncode != 0:
+                return self.store.load(run_dir)[1]
             snapshot_payload = _json_output(snapshot_completed.stdout)
-        except BridgeError:
-            return self.store.load(run_dir)[1]
-
-        active_target = str(active_payload.get("targetId") or active_payload.get("target_id") or "")
-        active_url = str(active_payload.get("url") or active_payload.get("tab", {}).get("url") or "")
-        try:
-            active_url = STATE.canonical_conversation_url(active_url)
-        except STATE.StateError:
-            return self.store.load(run_dir)[1]
-        if active_target != target_id or active_url != conversation_url:
+        except Exception:
             return self.store.load(run_dir)[1]
 
         page_text = text_completed.stdout or ""
+        snapshot_text = str(snapshot_payload.get("text") or "")
+        snapshot_visible_text = _ax_snapshot_visible_text(snapshot_text)
         answer = (
             _web_multi_assistant_answer(page_text)
             or _plain_assistant_answer(page_text)
             or _terminal_visible_assistant_answer(page_text)
-            or _web_multi_assistant_answer(str(snapshot_payload.get("text") or ""))
-            or _plain_assistant_answer(str(snapshot_payload.get("text") or ""))
-            or _terminal_visible_assistant_answer(str(snapshot_payload.get("text") or ""))
+            or _web_multi_assistant_answer(snapshot_visible_text)
+            or _plain_assistant_answer(snapshot_visible_text)
+            or _terminal_visible_assistant_answer(snapshot_visible_text)
+            or _web_multi_assistant_answer(snapshot_text)
+            or _plain_assistant_answer(snapshot_text)
+            or _terminal_visible_assistant_answer(snapshot_text)
         )
-        streaming = _streaming_state(status_payload)
-        if streaming is not False or not answer:
+        if not answer:
             return self.store.load(run_dir)[1]
 
         command_evidence = {
@@ -5071,7 +5514,7 @@ class Bridge:
             raise BridgeError("RESEARCH_APP_SELECTION_REQUIRED", "Deep Research must preselect the exact app before its capability")
         use_prepared_target = use_preselected_app or use_connected_app_auto or use_preselected_research
         lock_context = exclusive_composer_lock(
-            self.store.root / "global-dispatch.lock",
+            GLOBAL_BROWSER_MUTATION_LOCK,
             timeout_seconds=composer_lock_timeout_seconds(initial_manifest),
         )
         prepared_target_id: str | None = None
@@ -5257,6 +5700,7 @@ class Bridge:
                         target_id=self._owned_target_from_exception(exc),
                         url=composer_url,
                         reason="app-composer-preparation-failed",
+                        new_target_proven=self._new_target_proven_from_exception(exc),
                     )
                     blocked = self.store.transition(
                         run_dir,
@@ -5437,7 +5881,7 @@ class Bridge:
                     manifest=manifest,
                     lifecycle=tab_lifecycle,
                 )
-            if not use_prepared_target:
+            if not use_prepared_target and self.capture_pre_send_tabs:
                 pre_send_tabs, pre_send_tabs_evidence = self._recovery_tabs(
                     run_dir=state_file.parent,
                     name="pre-send-tabs",
@@ -5517,7 +5961,9 @@ class Bridge:
             )
         session_identity_evidence = None
         shown_session: dict[str, Any] = {}
-        if envelope["ok"] and session_id:
+        if envelope["ok"] and session_id and (
+            self.observe_post_send_targets or not target_id
+        ):
             try:
                 shown_target, shown_url, session_identity_evidence, shown_session = self._show_session_identity(
                     executable=executable,
@@ -5561,12 +6007,21 @@ class Bridge:
                         "session_identity_evidence": session_identity_evidence,
                     },
                 )
-            post_send_observation, post_send_tabs_evidence = self._observe_post_send_target(
-                run_dir=state_file.parent,
-                executable=executable,
-                manifest=manifest,
-                target_id=str(target_id),
-            )
+            if self.observe_post_send_targets:
+                post_send_observation, post_send_tabs_evidence = self._observe_post_send_target(
+                    run_dir=state_file.parent,
+                    executable=executable,
+                    manifest=manifest,
+                    target_id=str(target_id),
+                )
+            else:
+                post_send_observation = {
+                    "state": "canonical" if url and STATE.CANONICAL_CHAT_RE.fullmatch(str(url)) else "root",
+                    "target_id": str(target_id),
+                    "url": str(url or composer_url),
+                    "test_seam": True,
+                }
+                post_send_tabs_evidence = {"kind": "injected-runner-observation-skipped"}
             if post_send_observation.get("state") == "canonical":
                 url = str(post_send_observation["url"])
             elif post_send_observation.get("state") in {"absent", "ambiguous", "drifted"}:
@@ -5671,12 +6126,21 @@ class Bridge:
                 "SEND_REJECTED",
                 recovery_event={"kind": "pre-submit-rejection", "error": envelope, "evidence": evidence},
             )
-            cleanup = self._safe_tab_cleanup(
-                tab_lifecycle,
-                run_dir,
-                target_id=prepared_target_id,
-                url=composer_url,
-                reason="verified-pre-submit-send-rejection",
+            cleanup = (
+                self._safe_tab_cleanup(
+                    tab_lifecycle,
+                    run_dir,
+                    target_id=prepared_target_id,
+                    url=composer_url,
+                    reason="verified-pre-submit-send-rejection",
+                )
+                if prepared_target_id
+                else self._cleanup_new_root_after_unprepared_rejection(
+                    run_dir,
+                    rejected,
+                    pre_send_tabs=pre_send_tabs if "pre_send_tabs" in locals() else None,
+                )
+                or {"ok": True, "skipped": True, "reason": "no-unique-new-root-target"}
             )
             return self.store.transition(
                 run_dir,
@@ -5684,6 +6148,74 @@ class Bridge:
                 recovery_event={"kind": "verified-pre-submit-tab-cleanup", "cleanup": cleanup},
             )
         return self.store.transition(run_dir, "SUBMISSION_UNCERTAIN_IDENTITY_MISSING", block_code=envelope["error_code"] or "SEND_UNCERTAIN")
+
+    def _poll_injected_runner(
+        self,
+        run_dir: str,
+        *,
+        state_file: Path,
+        record: dict[str, Any],
+        manifest: dict[str, Any],
+        executable: str,
+        timeout: int,
+    ) -> dict[str, Any]:
+        """Compatibility seam for finite scripted runners; never used live."""
+        command = build_exact_poll_command(executable, str(record["session_id"]), timeout)
+        completed = self.runner(command, bridge_env(manifest), timeout + 30)
+        evidence = self._evidence(state_file.parent, "poll", completed)
+        payload = _json_output(completed.stdout)
+        envelope = normalize_envelope(payload)
+        url = str(envelope.get("conversation_url") or "")
+        target_id = str(envelope.get("target_id") or "") or None
+        if url and STATE.CANONICAL_CHAT_RE.fullmatch(url):
+            record = self._bind_conversation_url(
+                run_dir,
+                conversation_url=url,
+                target_id=target_id,
+            )
+            if record["phase"] == "BLOCKED_TARGET_AMBIGUOUS":
+                return record
+        status = str(envelope.get("status") or "").lower()
+        answer = str(envelope.get("answer_text") or "").strip()
+        if envelope["ok"] and status in {"complete", "completed", "done", "response_ready"} and answer:
+            terminal_error = provider_terminal_error_ui(answer)
+            if terminal_error is not None:
+                return self._record_provider_terminal_failure(
+                    run_dir,
+                    answer_text=answer,
+                    provider_status=status,
+                    command_evidence=evidence,
+                    detection=terminal_error,
+                )
+            if not record.get("conversation_url"):
+                return self.store.transition(
+                    run_dir,
+                    "RECOVERY_REQUIRED",
+                    recovery_event={"kind": "terminal-without-canonical-url", "evidence": evidence},
+                )
+            answer_path = state_file.parent / "answer.md"
+            answer_path.write_text(answer + "\n", encoding="utf-8")
+            descriptor = {
+                "path": str(answer_path),
+                "sha256": STATE.sha256_file(answer_path),
+                "bytes": answer_path.stat().st_size,
+                "provider_status": status,
+                "evidence": evidence,
+            }
+            if record["phase"] in {"SUBMITTED", "RECOVERING"}:
+                record = self.store.transition(run_dir, "URL_BOUND")
+            record = self.store.transition(run_dir, "RESULT_CAPTURED", result=descriptor)
+            record = self.store.transition(run_dir, "VERIFIED")
+            return self.store.transition(run_dir, "COMPLETE")
+        if envelope["ok"] and status in {"sent", "polling", "running", "pending", "response_in_progress"}:
+            if record.get("conversation_url") and record["phase"] in {"SUBMITTED", "URL_BOUND", "RECOVERING"}:
+                return self.store.transition(run_dir, "RESPONSE_IN_PROGRESS")
+            return record
+        return self.store.transition(
+            run_dir,
+            "RECOVERY_REQUIRED",
+            recovery_event={"kind": "poll-nonterminal-or-invalid", "evidence": evidence},
+        )
 
     def poll(self, run_dir: str, *, timeout_seconds: int | None = None) -> dict[str, Any]:
         state_file, record = self.store.load(run_dir)
@@ -5704,6 +6236,15 @@ class Bridge:
         manifest = _load_manifest(record)
         executable = record_executable(record)
         timeout = int(timeout_seconds or manifest.get("timeout_seconds") or 1800)
+        if not self.exact_url_only_poll:
+            return self._poll_injected_runner(
+                run_dir,
+                state_file=state_file,
+                record=record,
+                manifest=manifest,
+                executable=executable,
+                timeout=timeout,
+            )
         saved_url = str(record.get("conversation_url") or "")
         target_id = str(record.get("current_target_id") or "")
         if not STATE.CANONICAL_CHAT_RE.fullmatch(saved_url) or not target_id:
@@ -5717,106 +6258,63 @@ class Bridge:
                     "conversation_url": saved_url or None,
                 },
             )
-        try:
-            tabs, tabs_evidence = self._recovery_tabs(
-                run_dir=state_file.parent,
-                name="poll-exact-target-preflight",
-                executable=executable,
-                env=bridge_env(manifest),
-            )
-            observation = exact_target_observation(tabs, target_id)
-        except BridgeError as exc:
-            return self.store.transition(
-                run_dir,
-                "RECOVERY_REQUIRED",
-                recovery_event={"kind": "poll-target-preflight-failed", "detail": exc.envelope()},
-            )
-        if (
-            observation.get("state") != "canonical"
-            or str(observation.get("url") or "") != STATE.canonical_conversation_url(saved_url)
-        ):
-            return self.store.transition(
-                run_dir,
-                "RECOVERY_REQUIRED",
-                recovery_event={
-                    "kind": "poll-exact-target-drift",
-                    "observation": sanitize_evidence(observation),
-                    "tabs_evidence": tabs_evidence,
-                },
-            )
-        command = build_exact_poll_command(executable, str(record["session_id"]), timeout)
-        try:
-            completed = self.runner(command, bridge_env(manifest), timeout + 30)
-        except Exception as exc:
-            self.store.transition(
-                run_dir,
-                "RECOVERY_REQUIRED",
-                recovery_event={"kind": "poll-runner-exception", "detail": str(exc)},
-            )
-            raise BridgeError("POLL_RUNNER_EXCEPTION", "poll interrupted; exact session retained", {"detail": str(exc)}) from exc
-        evidence = self._evidence(state_file.parent, "poll", completed)
-        try:
-            payload = _json_output(completed.stdout)
-        except BridgeError as exc:
-            self.store.transition(run_dir, "RECOVERY_REQUIRED", recovery_event={"kind": exc.code, "evidence": evidence})
-            raise
-        envelope = normalize_envelope(payload)
-        url = envelope.get("conversation_url")
-        target_id = str(envelope.get("target_id") or "") or None
-        if url and not record.get("conversation_url") and STATE.CANONICAL_CHAT_RE.fullmatch(str(url)):
-            record = self._bind_conversation_url(
-                run_dir,
-                conversation_url=str(url),
-                target_id=target_id,
-            )
-            if record["phase"] == "BLOCKED_TARGET_AMBIGUOUS":
-                return record
-        status = str(envelope.get("status") or "").lower()
-        answer = str(envelope.get("answer_text") or "").strip()
-        terminal = status in {"complete", "completed", "done", "response_ready"}
-        if envelope["ok"] and terminal and answer:
-            terminal_error = provider_terminal_error_ui(answer)
-            if terminal_error is not None:
-                return self._record_provider_terminal_failure(
-                    run_dir,
-                    answer_text=answer,
-                    provider_status=status,
-                    command_evidence=evidence,
-                    detection=terminal_error,
-                )
-            answer_path = state_file.parent / "answer.md"
-            answer_path.write_text(answer + "\n", encoding="utf-8")
-            descriptor = {
-                "path": str(answer_path),
-                "sha256": STATE.sha256_file(answer_path),
-                "bytes": answer_path.stat().st_size,
-                "provider_status": status,
-                "evidence": evidence,
-            }
-            if record["phase"] == "SUBMITTED":
-                if not record.get("conversation_url"):
+        deadline = time.monotonic() + max(1, timeout)
+        while True:
+            with exclusive_composer_lock(GLOBAL_BROWSER_MUTATION_LOCK):
+                direct = self._try_exact_url_terminal_now(run_dir)
+                if direct.get("phase") in {
+                    "COMPLETE",
+                    "PROVIDER_FAILED_TERMINAL",
+                    "BLOCKED_TARGET_AMBIGUOUS",
+                }:
+                    return direct
+                _, record = self.store.load(run_dir)
+                try:
+                    tabs, tabs_evidence = self._recovery_tabs(
+                        run_dir=state_file.parent,
+                        name="poll-exact-target-preflight",
+                        executable=executable,
+                        env=bridge_env(manifest),
+                    )
+                    observation = exact_target_observation(tabs, target_id)
+                except BridgeError as exc:
                     return self.store.transition(
                         run_dir,
                         "RECOVERY_REQUIRED",
-                        recovery_event={"kind": "terminal-without-canonical-url", "evidence": evidence},
+                        recovery_event={"kind": "poll-target-preflight-failed", "detail": exc.envelope()},
                     )
-                record = self.store.transition(run_dir, "URL_BOUND")
-            record = self.store.transition(run_dir, "RESULT_CAPTURED", result=descriptor)
-            record = self.store.transition(run_dir, "VERIFIED")
-            return self.store.transition(run_dir, "COMPLETE")
-        if envelope["ok"] and status in {"sent", "polling", "running", "pending", "response_in_progress"}:
-            if record.get("conversation_url") and record["phase"] in {"SUBMITTED", "URL_BOUND", "RECOVERING"}:
-                if record["phase"] == "SUBMITTED":
-                    record = self.store.transition(run_dir, "URL_BOUND")
-                return self.store.transition(run_dir, "RESPONSE_IN_PROGRESS")
-            return record
-        return self.store.transition(
-            run_dir,
-            "RECOVERY_REQUIRED",
-            recovery_event={"kind": "poll-not-terminal", "error": envelope, "evidence": evidence},
-        )
+            if (
+                observation.get("state") != "canonical"
+                or str(observation.get("url") or "") != STATE.canonical_conversation_url(saved_url)
+            ):
+                return self.store.transition(
+                    run_dir,
+                    "RECOVERY_REQUIRED",
+                    recovery_event={
+                        "kind": "poll-exact-target-drift",
+                        "observation": sanitize_evidence(observation),
+                        "tabs_evidence": tabs_evidence,
+                    },
+                )
+            if record.get("phase") in {"URL_BOUND", "RECOVERING"}:
+                record = self.store.transition(run_dir, "RESPONSE_IN_PROGRESS")
+            if time.monotonic() >= deadline:
+                return self.store.transition(
+                    run_dir,
+                    "RECOVERY_REQUIRED",
+                    recovery_event={
+                        "kind": "exact-url-read-only-wait-timeout",
+                        "conversation_url": saved_url,
+                        "target_id": target_id,
+                    },
+                )
+            time.sleep(min(3.0, max(0.1, deadline - time.monotonic())))
 
     def recover(self, run_dir: str) -> dict[str, Any]:
+        with exclusive_composer_lock(GLOBAL_BROWSER_MUTATION_LOCK):
+            return self._recover_locked(run_dir)
+
+    def _recover_locked(self, run_dir: str) -> dict[str, Any]:
         state_file, record = self.store.load(run_dir)
         self.store.verify_manifest(record)
         if record["phase"] in {
@@ -5842,6 +6340,34 @@ class Bridge:
             known_preexisting_target_ids = {_tab_id(tab) for tab in pre_doctor_tabs if _tab_id(tab)}
         except BridgeError:
             known_preexisting_target_ids = set()
+        # The send command can return a session before its envelope exposes
+        # the conversation URL. If the exact recorded target is already a
+        # canonical ChatGPT conversation, bind that visible identity directly
+        # instead of navigating doctor/history utility surfaces.
+        if (
+            not STATE.CANONICAL_CHAT_RE.fullmatch(str(record.get("conversation_url") or ""))
+            and str(record.get("current_target_id") or "")
+            and "pre_doctor_tabs" in locals()
+        ):
+            observed = exact_target_observation(
+                pre_doctor_tabs,
+                str(record.get("current_target_id") or ""),
+            )
+            observed_url = str(observed.get("url") or "")
+            if observed.get("state") == "canonical" and STATE.CANONICAL_CHAT_RE.fullmatch(observed_url):
+                bound = self._bind_conversation_url(
+                    run_dir,
+                    conversation_url=observed_url,
+                    target_id=str(record.get("current_target_id") or ""),
+                    rebind_reason="recorded-target-canonical-before-doctor",
+                    recovery_event={
+                        "kind": "recorded-target-canonical-before-doctor",
+                        "observation": sanitize_evidence(observed),
+                    },
+                )
+                if bound.get("phase") == "BLOCKED_TARGET_AMBIGUOUS":
+                    return bound
+                record = bound
         # The exact canonical URL is the shortest recovery authority. Do not
         # wait for doctor/history or stale command expiry when it is terminal.
         direct = self._try_exact_url_terminal_now(
@@ -5855,7 +6381,33 @@ class Bridge:
         # observe the same exact URL again; doctor/history are only identity
         # discovery paths for runs that still lack a canonical conversation.
         if STATE.CANONICAL_CHAT_RE.fullmatch(str(direct.get("conversation_url") or "")):
-            return direct
+            restored = self._restore_known_url_on_recorded_target(
+                run_dir,
+                tabs=pre_doctor_tabs if "pre_doctor_tabs" in locals() else [],
+            )
+            if any(
+                str(item.get("kind") or "") == "known-url-restored-on-recorded-target"
+                for item in restored.get("recovery_events") or []
+                if isinstance(item, dict)
+            ):
+                return self._recover_exact_bound_url_terminal(
+                    run_dir,
+                    doctor_evidence={"kind": "known-url-restored-on-recorded-target"},
+                )
+            reopened = self._reopen_known_url_when_recorded_target_absent(
+                run_dir,
+                tabs=pre_doctor_tabs if "pre_doctor_tabs" in locals() else [],
+            )
+            if any(
+                str(item.get("kind") or "") == "known-url-reopened-after-recorded-target-absence"
+                for item in reopened.get("recovery_events") or []
+                if isinstance(item, dict)
+            ):
+                return self._recover_exact_bound_url_terminal(
+                    run_dir,
+                    doctor_evidence={"kind": "known-url-reopened-after-recorded-target-absence"},
+                )
+            return reopened
         doctor_evidence: dict[str, Any] | None = None
         if record.get("session_id"):
             command = [
