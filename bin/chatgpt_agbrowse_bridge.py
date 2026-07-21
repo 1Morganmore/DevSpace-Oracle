@@ -1181,11 +1181,39 @@ class Bridge:
         prepared = self.store.transition(run_dir, "PREFLIGHTED")
         return {**prepared, "run_dir": run_dir, "state_file": str(Path(run_dir) / "run.json")}
 
-    def _app_connector(self, executable: str):
+    def _app_connector(
+        self,
+        executable: str,
+        *,
+        owned_startup_targets: Mapping[str, str] | None = None,
+    ):
         if self.app_connector_factory:
             return self.app_connector_factory(executable)
         module = _load_app_module()
-        return module.AppConnector(module.AgbrowseGateway(executable=executable))
+        gateway = module.AgbrowseGateway(executable=executable)
+        if owned_startup_targets:
+            gateway.adopt_owned_startup_targets(owned_startup_targets)
+        return module.AppConnector(gateway)
+
+    @staticmethod
+    def _owned_startup_targets(record: Mapping[str, Any]) -> dict[str, str]:
+        for event in reversed(record.get("recovery_events") or []):
+            if not isinstance(event, Mapping):
+                continue
+            if str(event.get("kind") or "") not in {
+                "headed-runtime-ready",
+                "headless-runtime-safely-restarted-headed",
+            }:
+                continue
+            targets = event.get("owned_startup_targets")
+            if isinstance(targets, Mapping):
+                return {
+                    str(target_id): str(url)
+                    for target_id, url in targets.items()
+                    if str(target_id) and str(url) == "about:blank"
+                }
+            return {}
+        return {}
 
     def _research_composer(self, executable: str):
         if self.research_composer_factory:
@@ -1285,6 +1313,21 @@ class Bridge:
             started,
         )
         if started.returncode == 0:
+            owned_startup_targets: dict[str, str] = {}
+            if "Chrome started (CDP:" in str(started.stdout or ""):
+                try:
+                    for tab in lifecycle.list_tabs():
+                        target_id = str(
+                            tab.get("targetId")
+                            or tab.get("target_id")
+                            or tab.get("id")
+                            or ""
+                        )
+                        url = str(tab.get("url") or "")
+                        if target_id and url == "about:blank":
+                            owned_startup_targets[target_id] = url
+                except Exception:
+                    owned_startup_targets = {}
             return self.store.transition(
                 run_dir,
                 str(record["phase"]),
@@ -1292,6 +1335,7 @@ class Bridge:
                     "kind": "headed-runtime-ready",
                     "port": port,
                     "evidence": start_evidence,
+                    "owned_startup_targets": owned_startup_targets,
                 },
             )
 
@@ -1375,6 +1419,21 @@ class Bridge:
                     "restart_evidence": restart_evidence,
                 },
             )
+        owned_startup_targets: dict[str, str] = {}
+        if "Chrome started (CDP:" in str(restarted.stdout or ""):
+            try:
+                for tab in lifecycle.list_tabs():
+                    target_id = str(
+                        tab.get("targetId")
+                        or tab.get("target_id")
+                        or tab.get("id")
+                        or ""
+                    )
+                    url = str(tab.get("url") or "")
+                    if target_id and url == "about:blank":
+                        owned_startup_targets[target_id] = url
+            except Exception:
+                owned_startup_targets = {}
         return self.store.transition(
             run_dir,
             str(record["phase"]),
@@ -1385,6 +1444,7 @@ class Bridge:
                 "stop_evidence": stop_evidence,
                 "restart_evidence": restart_evidence,
                 "verified_blank_tab_count": len(tabs),
+                "owned_startup_targets": owned_startup_targets,
             },
         )
 
@@ -5570,7 +5630,10 @@ class Bridge:
             if use_preselected_research:
                 connector = self._research_composer(executable)
             elif use_prepared_target:
-                connector = self._app_connector(executable)
+                connector = self._app_connector(
+                    executable,
+                    owned_startup_targets=self._owned_startup_targets(record),
+                )
             else:
                 connector = None
             if reuse_prepared_retry:

@@ -425,6 +425,62 @@ def test_warm_composer_fast_path_uses_five_agbrowse_commands_without_tab_switch(
     assert [argv[1] for argv in calls] == ["tabs", "new-tab", "active-tab", "observe-bundle", "type", "press"]
 
 
+def test_fresh_browser_closes_only_owned_blank_startup_before_composer_new_tab() -> None:
+    app = load("codexpro_agbrowse_app_startup_target_test", "codexpro_agbrowse_app.py")
+    calls: list[list[str]] = []
+    tabs = [{"targetId": "T-START", "url": "about:blank"}]
+
+    def runner(argv, env, timeout):
+        calls.append(argv)
+        if argv[1] == "tabs":
+            return completed(argv, stdout=json.dumps(tabs))
+        if argv[1] == "tab-close":
+            assert argv[2] == "T-START"
+            tabs.clear()
+            return completed(argv, stdout=json.dumps({"ok": True}))
+        if argv[1] == "new-tab":
+            tabs.append({"targetId": "T-COMPOSER", "url": "https://chatgpt.com/"})
+            return completed(argv, stdout=json.dumps({"targetId": "T-COMPOSER"}))
+        raise AssertionError(f"unexpected command: {argv}")
+
+    gateway = app.AgbrowseGateway(runner=runner)
+    gateway._browser_ready = True
+    gateway._owned_startup_targets["T-START"] = "about:blank"
+
+    created = gateway.open_composer_target("https://chatgpt.com/")
+
+    assert created["targetId"] == "T-COMPOSER"
+    assert created["newTargetProven"] is True
+    assert gateway._pinned_target_id == "T-COMPOSER"
+    assert [argv[1] for argv in calls] == ["tabs", "tab-close", "tabs", "new-tab"]
+
+
+def test_startup_cleanup_never_closes_unowned_or_navigated_tabs() -> None:
+    app = load("codexpro_agbrowse_app_startup_foreign_test", "codexpro_agbrowse_app.py")
+    calls: list[list[str]] = []
+    tabs = [
+        {"targetId": "T-FOREIGN-BLANK", "url": "about:blank"},
+        {"targetId": "T-START-NAVIGATED", "url": "https://chatgpt.com/"},
+    ]
+
+    def runner(argv, env, timeout):
+        calls.append(argv)
+        if argv[1] == "tabs":
+            return completed(argv, stdout=json.dumps(tabs))
+        if argv[1] == "new-tab":
+            return completed(argv, stdout=json.dumps({"targetId": "T-NEW"}))
+        raise AssertionError(f"unexpected command: {argv}")
+
+    gateway = app.AgbrowseGateway(runner=runner)
+    gateway._browser_ready = True
+    gateway._owned_startup_targets["T-START-NAVIGATED"] = "about:blank"
+
+    created = gateway.open_composer_target("https://chatgpt.com/")
+
+    assert created["targetId"] == "T-NEW"
+    assert not any(argv[1] == "tab-close" for argv in calls)
+
+
 def test_connected_auto_prepares_fresh_chat_target_without_app_pill() -> None:
     app = load("codexpro_agbrowse_app_connected_chat_test", "codexpro_agbrowse_app.py")
 

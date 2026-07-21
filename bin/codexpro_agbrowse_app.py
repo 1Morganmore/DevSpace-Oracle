@@ -315,6 +315,14 @@ class AgbrowseGateway:
         if self._pinned_target_id == target_id:
             self._pinned_target_id = None
 
+    def adopt_owned_startup_targets(self, targets: Mapping[str, str]) -> None:
+        """Accept startup ownership proved by the outer bridge's exact start."""
+        for target_id, url in targets.items():
+            normalized_id = str(target_id or "").strip()
+            normalized_url = str(url or "").strip()
+            if normalized_id and normalized_url == "about:blank":
+                self._owned_startup_targets[normalized_id] = normalized_url
+
     def _invoke(self, command: str, *args: str, json_output: bool = True) -> Any:
         if command not in ALLOWED_COMMANDS:
             raise AppBridgeError("APP_COMMAND_FORBIDDEN", f"non-agbrowse or unapproved command: {command}")
@@ -478,9 +486,49 @@ class AgbrowseGateway:
     def new_tab(self, url: str) -> dict[str, Any]:
         return self.call("new-tab", url)
 
+    def _retire_owned_startup_targets(
+        self,
+        tabs: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Remove only connector-owned blank startup pages before ``new-tab``.
+
+        agbrowse may implement ``new-tab`` by navigating Chrome's sole blank
+        startup page and returning that page's existing target id.  That is a
+        legitimate browser optimization but cannot satisfy the bridge's fresh
+        target contract.  Close only targets that this gateway recorded while
+        starting Chrome and that are still exactly ``about:blank``, then prove
+        their absence before creating the work target.
+        """
+        candidates = {
+            str(tab.get("targetId") or tab.get("target_id") or "")
+            for tab in tabs
+            if str(tab.get("targetId") or tab.get("target_id") or "")
+            in self._owned_startup_targets
+            and str(tab.get("url") or "") == "about:blank"
+        }
+        candidates.discard("")
+        if not candidates:
+            return tabs
+        for target_id in sorted(candidates):
+            self.call("tab-close", target_id)
+        after = self.list_tabs()
+        survivors = {
+            str(tab.get("targetId") or tab.get("target_id") or "")
+            for tab in after
+        } & candidates
+        if survivors:
+            raise AppBridgeError(
+                "APP_STARTUP_TARGET_CLEANUP_FAILED",
+                "connector-owned blank startup target remained after close",
+                {"target_ids": sorted(survivors)},
+            )
+        for target_id in candidates:
+            self._owned_startup_targets.pop(target_id, None)
+        return after
+
     def open_composer_target(self, url: str) -> dict[str, Any]:
         """Create and pin one composer target proven absent before new-tab."""
-        before = self.list_tabs()
+        before = self._retire_owned_startup_targets(self.list_tabs())
         preexisting = {
             str(tab.get("targetId") or tab.get("target_id") or "") for tab in before
         }
@@ -501,7 +549,7 @@ class AgbrowseGateway:
 
     def open_utility_target(self, url: str) -> dict[str, Any]:
         self.ensure_started()
-        before = self.list_tabs()
+        before = self._retire_owned_startup_targets(self.list_tabs())
         preexisting_target_ids = {
             str(tab.get("targetId") or tab.get("target_id") or "") for tab in before
         }

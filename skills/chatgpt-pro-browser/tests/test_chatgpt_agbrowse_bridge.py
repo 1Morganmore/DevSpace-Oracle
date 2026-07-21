@@ -1147,6 +1147,46 @@ def test_pro_headless_runtime_is_safely_restarted_once_before_send(tmp_path: Pat
     )
 
 
+def test_headed_start_records_owned_blank_target_for_app_connector(tmp_path: Path):
+    attachment = tmp_path / "context.zip"
+    attachment.write_bytes(b"zip")
+
+    def runner(command, env, timeout):
+        if command[1] == "start":
+            return raw_completed("Chrome started (CDP: http://127.0.0.1:9222)")
+        if command[1:3] == ["web-ai", "send"]:
+            return completed({"ok": True, "status": "sent", "sessionId": "s", "targetId": "t"})
+        raise AssertionError(f"unexpected command: {command}")
+
+    bridge, record = prepared_bridge(
+        tmp_path,
+        runner,
+        headed_runtime_preflight=True,
+        mode_label="Pro",
+        mode_variant=None,
+        app_policy="forbidden",
+        files=[str(attachment)],
+    )
+
+    class Lifecycle:
+        @staticmethod
+        def list_tabs():
+            return [
+                {"targetId": "T-START", "url": "about:blank"},
+                {"targetId": "T-FOREIGN", "url": "https://example.com/"},
+            ]
+
+        @staticmethod
+        def record_owned(*args, **kwargs):
+            return None
+
+    bridge._tab_lifecycle = lambda executable, manifest: Lifecycle()
+    sent = bridge.send(record["run_dir"])
+
+    assert sent["phase"] in {"SUBMITTED", "RECOVERY_REQUIRED"}
+    assert bridge._owned_startup_targets(sent) == {"T-START": "about:blank"}
+
+
 def test_pro_headless_runtime_never_restarts_over_other_active_work(tmp_path: Path):
     attachment = tmp_path / "context.zip"
     attachment.write_bytes(b"zip")
