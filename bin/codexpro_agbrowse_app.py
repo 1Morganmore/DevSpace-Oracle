@@ -509,6 +509,18 @@ class AgbrowseGateway:
         candidates.discard("")
         if not candidates:
             return tabs
+        # Closing Chrome's sole page terminates the headed runtime on Windows,
+        # making the immediately following new-tab fail. Keep that one
+        # connector-owned blank page and allow open_composer_target to promote
+        # it only after an exact URL re-read. Utility/settings targets retain
+        # the stricter absent-before-new-tab rule.
+        live_ids = {
+            str(tab.get("targetId") or tab.get("target_id") or "")
+            for tab in tabs
+            if str(tab.get("targetId") or tab.get("target_id") or "")
+        }
+        if live_ids == candidates and len(candidates) == 1:
+            return tabs
         for target_id in sorted(candidates):
             self.call("tab-close", target_id)
         after = self.list_tabs()
@@ -538,6 +550,28 @@ class AgbrowseGateway:
         if not target_id:
             raise AppBridgeError("APP_COMPOSER_TARGET_MISSING", "new composer tab did not return a target id")
         if target_id in preexisting:
+            owned_startup_promotion = (
+                target_id in self._owned_startup_targets
+                and self._owned_startup_targets.get(target_id) == "about:blank"
+            )
+            if owned_startup_promotion:
+                after = self.list_tabs()
+                matches = [
+                    tab for tab in after
+                    if str(tab.get("targetId") or tab.get("target_id") or "") == target_id
+                ]
+                expected_url = url.rstrip("/")
+                actual_url = str(matches[0].get("url") or "").rstrip("/") if len(matches) == 1 else ""
+                if len(matches) == 1 and actual_url == expected_url:
+                    self._owned_startup_targets.pop(target_id, None)
+                    self._owned_composer_targets.add(target_id)
+                    self._pinned_target_id = target_id
+                    return {
+                        **created,
+                        "newTargetProven": True,
+                        "startupTargetPromoted": True,
+                        "promotionUrlVerified": True,
+                    }
             raise AppBridgeError(
                 "APP_COMPOSER_TARGET_REUSED_FOREIGN",
                 "agbrowse new-tab returned a preexisting composer target",

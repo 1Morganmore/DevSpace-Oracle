@@ -428,7 +428,10 @@ def test_warm_composer_fast_path_uses_five_agbrowse_commands_without_tab_switch(
 def test_fresh_browser_closes_only_owned_blank_startup_before_composer_new_tab() -> None:
     app = load("codexpro_agbrowse_app_startup_target_test", "codexpro_agbrowse_app.py")
     calls: list[list[str]] = []
-    tabs = [{"targetId": "T-START", "url": "about:blank"}]
+    tabs = [
+        {"targetId": "T-START", "url": "about:blank"},
+        {"targetId": "T-KEEPALIVE", "url": "https://example.com/"},
+    ]
 
     def runner(argv, env, timeout):
         calls.append(argv)
@@ -436,7 +439,7 @@ def test_fresh_browser_closes_only_owned_blank_startup_before_composer_new_tab()
             return completed(argv, stdout=json.dumps(tabs))
         if argv[1] == "tab-close":
             assert argv[2] == "T-START"
-            tabs.clear()
+            tabs[:] = [tab for tab in tabs if tab["targetId"] != "T-START"]
             return completed(argv, stdout=json.dumps({"ok": True}))
         if argv[1] == "new-tab":
             tabs.append({"targetId": "T-COMPOSER", "url": "https://chatgpt.com/"})
@@ -453,6 +456,34 @@ def test_fresh_browser_closes_only_owned_blank_startup_before_composer_new_tab()
     assert created["newTargetProven"] is True
     assert gateway._pinned_target_id == "T-COMPOSER"
     assert [argv[1] for argv in calls] == ["tabs", "tab-close", "tabs", "new-tab"]
+
+
+def test_sole_owned_startup_target_is_promoted_only_after_exact_url_readback() -> None:
+    app = load("codexpro_agbrowse_app_startup_promotion_test", "codexpro_agbrowse_app.py")
+    calls: list[list[str]] = []
+    tabs = [{"targetId": "T-START", "url": "about:blank"}]
+
+    def runner(argv, env, timeout):
+        calls.append(argv)
+        if argv[1] == "tabs":
+            return completed(argv, stdout=json.dumps(tabs))
+        if argv[1] == "new-tab":
+            tabs[0]["url"] = "https://chatgpt.com/"
+            return completed(argv, stdout=json.dumps({"targetId": "T-START"}))
+        raise AssertionError(f"unexpected command: {argv}")
+
+    gateway = app.AgbrowseGateway(runner=runner)
+    gateway._browser_ready = True
+    gateway._owned_startup_targets["T-START"] = "about:blank"
+
+    created = gateway.open_composer_target("https://chatgpt.com/")
+
+    assert created["targetId"] == "T-START"
+    assert created["newTargetProven"] is True
+    assert created["startupTargetPromoted"] is True
+    assert created["promotionUrlVerified"] is True
+    assert not any(argv[1] == "tab-close" for argv in calls)
+    assert [argv[1] for argv in calls] == ["tabs", "new-tab", "tabs"]
 
 
 def test_startup_cleanup_never_closes_unowned_or_navigated_tabs() -> None:
