@@ -60,6 +60,8 @@ Any failure before ff-only apply must leave canonical source unchanged and write
 ## Codex-Side Ownership Latch
 
 - In orchestrator mode, Codex is the manager, verifier, and local-host executor. GPT is the first implementation owner.
+- Same-project web work keeps one active or uncertain submission, but the single GPT `ExecutionMission` owns parallelism inside the task. GPT should split safe independent exploration, editing, and testing into internal lanes or parallel tool calls and integrate them before returning.
+- Global advice to parallelize independent local tool calls does not broaden Codex's ownership in orchestrator mode. Codex must not start local strategy searches, code-writing lanes, alternate implementations, or expensive project execution merely because those actions are parallelizable.
 - Before the GPT result, Codex may only prepare the prompt/manifest, run preflight, collect compact evidence needed to brief GPT, recover/wait on the live lane, and maintain runtime health.
 - After the GPT result, Codex may verify, run deterministic commands/tests, apply GPT-provided patches when direct CodexPro writes were unavailable, integrate, commit, report, and clean up.
 - Advisory-only GPT output is incomplete. Correct it in the same GPT lane by asking for direct CodexPro edits or patch-shaped edits, changed-file list, commands/tests, blockers, and the exact Codex-local verification step.

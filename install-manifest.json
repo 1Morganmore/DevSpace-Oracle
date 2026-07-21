@@ -16,6 +16,7 @@
     "bin/codexpro_agbrowse_app.py",
     "bin/codexpro_exact_unit_authority.py",
     "bin/codexpro_exact_unit_cloudflare_bootstrap.ps1",
+    "bin/codexpro_fixed_runtime_watchdog.py",
     "bin/codexpro_mcp_identity.py",
     "bin/codexpro_project_app_manager.py",
     "bin/codexpro_project_cloudflare_bootstrap.ps1",

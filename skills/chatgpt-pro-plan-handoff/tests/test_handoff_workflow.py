@@ -640,6 +640,21 @@ def test_v2_auto_skips_optional_stages_and_binds_skip_descriptors(tmp_path: Path
     assert result["orchestrator_envelope"]["input_research_descriptor_sha256"] == result["research_descriptor_sha256"]
     assert result["orchestrator_envelope"]["input_advisory_descriptor_sha256"] == result["advisory_descriptor_sha256"]
 
+    orchestrator_manifest = runtime.manifests[-1]
+    prompt = Path(orchestrator_manifest["prompt_file"]).read_text(encoding="utf-8")
+    mission_path = next(
+        Path(item) for item in orchestrator_manifest["read_only_paths"]
+        if Path(item).name == "execution-mission.json"
+    )
+    mission = json.loads(mission_path.read_text(encoding="utf-8"))
+    parallelism = mission["execution_parallelism"]
+    assert parallelism["owner"] == "web-gpt-orchestrator"
+    assert parallelism["scope"] == "within-single-execution-mission"
+    assert parallelism["same_project_web_submissions"] == "one-active-or-uncertain-run"
+    assert "no delegated strategy search" in parallelism["local_codex"]
+    assert "internal lanes or parallel tool calls" in prompt
+    assert "do not return strategy search or implementation to local codex" in prompt.casefold()
+
 
 def test_v2_research_trigger_runs_app_backed_deep_stage_at_high(tmp_path: Path) -> None:
     events: list[str] = []

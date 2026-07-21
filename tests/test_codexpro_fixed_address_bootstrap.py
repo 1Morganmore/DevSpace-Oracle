@@ -9,6 +9,7 @@ from pathlib import Path
 
 CODEX_HOME = Path(__file__).resolve().parents[1]
 BOOTSTRAP = CODEX_HOME / "bin" / "codexpro_project_cloudflare_bootstrap.ps1"
+WATCHDOG = CODEX_HOME / "bin" / "codexpro_fixed_runtime_watchdog.py"
 
 
 def _source() -> str:
@@ -106,6 +107,22 @@ def test_fixed_ngrok_recovery_starts_only_the_local_codexpro_server() -> None:
     assert '"--tunnel", "none", "--token", $Token' in source
     assert 'launchMode = "reuse-fixed-tunnel-start-local-server-only"' in source
     assert "do not launch a second ngrok tunnel" in source
+
+
+def test_fixed_ngrok_ready_path_starts_singleton_runtime_watchdog() -> None:
+    source = _source()
+    assert "function Start-FixedRuntimeWatchdog" in source
+    assert '"bin\\codexpro_fixed_runtime_watchdog.py"' in source
+    assert "watchdog_start_requested" in source
+
+
+def test_fixed_runtime_watchdog_repairs_listener_without_creating_tunnel() -> None:
+    source = WATCHDOG.read_text(encoding="utf-8")
+    assert '"-TunnelProvider",' in source
+    assert '"auto",' in source
+    assert "fixed_tunnel_present" in source
+    assert "the exact fixed ngrok tunnel is absent" in source
+    assert "ngrok http" not in source
 
 
 def test_registered_runtime_url_keeps_the_query_delimiter_and_token() -> None:

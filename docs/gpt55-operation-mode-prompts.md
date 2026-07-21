@@ -31,7 +31,11 @@ explicit review or counterexample roles.
 - `orchestrator`: own live workspace exploration, decisions, edits, tests, and
   bounded adaptation from an `ExecutionMission`. The plan is guidance, not a
   cage. Codex retains locks, hashes, exact browser identity, deterministic
-  host-only verification, release, and irreversible boundaries.
+  host-only verification, release, and irreversible boundaries. Same-project
+  web submission remains serialized, while the one web GPT partitions safe
+  independent implementation work into internal lanes or parallel tool calls.
+  Local Codex must not turn generic parallel-tool guidance into local strategy
+  exploration, code authoring, or alternate implementation paths.
 - `synthesis`: create a coherent new synthesis rather than concatenate or vote.
 
 ## Web Multi-GPT roles

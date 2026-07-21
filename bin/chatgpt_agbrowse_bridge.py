@@ -190,6 +190,98 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     STATE.write_json_atomic(path, payload)
 
 
+@contextmanager
+def exclusive_agbrowse_lease_store_lock(path: Path, timeout_seconds: float = 5.0):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + max(0.1, timeout_seconds)
+    fd: int | None = None
+    while fd is None:
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+            os.write(fd, json.dumps({"pid": os.getpid(), "acquiredAt": datetime.now(timezone.utc).isoformat()}).encode("utf-8"))
+        except FileExistsError:
+            try:
+                stale = time.time() - path.stat().st_mtime > 30
+            except OSError:
+                stale = False
+            if stale:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                continue
+            if time.monotonic() >= deadline:
+                raise BridgeError("AGBROWSE_LEASE_STORE_BUSY", "agbrowse tab lease store remained locked")
+            time.sleep(0.025)
+    try:
+        yield
+    finally:
+        try:
+            os.close(fd)
+        finally:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def reconcile_absent_dead_owner_capacity_leases(
+    store_path: Path,
+    *,
+    live_target_ids: set[str],
+    browser_profile_key: str,
+) -> dict[str, Any]:
+    if not store_path.is_file():
+        return {"state": "store-absent", "removed": []}
+    with exclusive_agbrowse_lease_store_lock(Path(f"{store_path}.lock")):
+        raw = store_path.read_bytes()
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise BridgeError("AGBROWSE_LEASE_STORE_INVALID", "agbrowse tab lease store is not valid UTF-8 JSON") from exc
+        leases = payload.get("leases") if isinstance(payload, dict) else None
+        if not isinstance(leases, list):
+            raise BridgeError("AGBROWSE_LEASE_STORE_INVALID", "agbrowse tab lease store has no lease list")
+        kept: list[Any] = []
+        removed: list[dict[str, Any]] = []
+        for lease in leases:
+            if not isinstance(lease, dict):
+                kept.append(lease)
+                continue
+            target_id = str(lease.get("targetId") or "")
+            owner_pid = int(lease.get("ownerPid") or 0)
+            eligible = bool(
+                lease.get("state") == "active-session"
+                and lease.get("owner") == "web-ai"
+                and lease.get("vendor") == "chatgpt"
+                and str(lease.get("browserProfileKey") or "") == str(browser_profile_key)
+                and target_id
+                and target_id not in live_target_ids
+                and owner_pid > 0
+                and STATE.process_identity(owner_pid).get("alive") is False
+            )
+            if eligible:
+                removed.append({
+                    "session_id": str(lease.get("sessionId") or ""),
+                    "target_id": target_id,
+                    "owner_pid": owner_pid,
+                    "reason": "owner-dead-and-target-absent",
+                })
+            else:
+                kept.append(lease)
+        if removed:
+            write_json_atomic(store_path, {**payload, "leases": kept})
+        return {
+            "schema": "codex.chatgpt.absent-dead-capacity-lease-reconcile/v1",
+            "state": "reconciled" if removed else "unchanged",
+            "browser_profile_key": str(browser_profile_key),
+            "live_target_count": len(live_target_ids),
+            "before_sha256": hashlib.sha256(raw).hexdigest(),
+            "after_sha256": STATE.sha256_file(store_path),
+            "removed": removed,
+        }
+
+
 def read_contract(path: Path) -> dict[str, Any]:
     value = STATE.read_json(path)
     result = value.get("result") if isinstance(value.get("result"), dict) else value
@@ -3673,9 +3765,9 @@ class Bridge:
         return {
             "exit_code": completed.returncode,
             "stdout": str(stdout_path),
-            "stdout_sha256": sha256_bytes((completed.stdout or "").encode("utf-8")),
+            "stdout_sha256": STATE.sha256_file(stdout_path),
             "stderr": str(stderr_path),
-            "stderr_sha256": sha256_bytes((completed.stderr or "").encode("utf-8")),
+            "stderr_sha256": STATE.sha256_file(stderr_path),
         }
 
     def _reclaim_dead_session_command_lock(
@@ -5837,6 +5929,27 @@ class Bridge:
                 )
                 if record["phase"] == "PREFLIGHT_BLOCKED":
                     return record
+            if self.headed_runtime_preflight:
+                live_tabs = tab_lifecycle.list_tabs()
+                browser_home = Path(tab_lifecycle.env.get("BROWSER_AGENT_HOME") or (Path.home() / ".browser-agent"))
+                capacity_reconcile = reconcile_absent_dead_owner_capacity_leases(
+                    browser_home / "web-ai-tab-leases.json",
+                    live_target_ids={_tab_id(tab) for tab in live_tabs if _tab_id(tab)},
+                    browser_profile_key=str(tab_lifecycle.env.get("CDP_PORT") or "9222"),
+                )
+                if capacity_reconcile.get("removed"):
+                    capacity_path = state_file.parent / "agbrowse-evidence" / "pre-submit-capacity-reconcile.json"
+                    write_json_atomic(capacity_path, capacity_reconcile)
+                    record = self.store.transition(
+                        run_dir,
+                        record["phase"],
+                        recovery_event={
+                            "kind": "pre-submit-capacity-reconcile",
+                            "evidence": str(capacity_path),
+                            "evidence_sha256": STATE.sha256_file(capacity_path),
+                            "removed_count": len(capacity_reconcile["removed"]),
+                        },
+                    )
             if record["phase"] == "PREFLIGHTED":
                 record = self.ensure_app(run_dir)
                 record = self.store.transition(run_dir, "LEASED")

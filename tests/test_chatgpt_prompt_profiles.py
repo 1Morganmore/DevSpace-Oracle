@@ -56,3 +56,14 @@ def test_orchestrator_profile_owns_adaptation_without_release_authority() -> Non
     assert receipt["architecture"] == "codex.chatgpt.prompt-architecture/v3"
     assert receipt["action_authority"] == "workspace-write"
     assert receipt["context_policy"] == "execution-mission-live-workspace-plan-as-guide"
+
+    prompt = PROFILES.render_prompt(
+        "orchestrator",
+        original_task="implement the task",
+        stage_mission="execute",
+        output_instructions="report",
+    )
+    assert "[EXECUTION OWNERSHIP]" in prompt
+    assert "internal lanes or parallel tool calls inside this single ExecutionMission" in prompt
+    assert "Same-project web submissions remain serialized" in prompt
+    assert "Never return delegated implementation to local Codex" in prompt

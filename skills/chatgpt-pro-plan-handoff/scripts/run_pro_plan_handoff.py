@@ -1203,6 +1203,13 @@ class ProPlanHandoffDriver:
                     "run_proportionate_tests": True,
                     "report_changed_files_commands_and_blockers": True,
                 },
+                "execution_parallelism": {
+                    "owner": "web-gpt-orchestrator",
+                    "scope": "within-single-execution-mission",
+                    "lane_policy": "partition safe independent exploration, editing, and tests into internal lanes or parallel tool calls, then integrate",
+                    "same_project_web_submissions": "one-active-or-uncertain-run",
+                    "local_codex": "host-control-only; no delegated strategy search, code authoring, alternate implementation paths, or execution",
+                },
                 "host_only_boundaries": [
                     "project lock and immutable hashes",
                     "exact browser run/session/target/canonical-URL ownership",
@@ -1239,7 +1246,9 @@ class ProPlanHandoffDriver:
                     ),
                     stage_mission=(
                         "Use the selected app to inspect the live workspace, implement, test, inspect results, "
-                        "and adapt within the mission's deviation policy. Keep local Codex token use minimal."
+                        "and adapt within the mission's deviation policy. Partition safe independent work into "
+                        "internal lanes or parallel tool calls and integrate it yourself. Do not return strategy "
+                        "search or implementation to local Codex; keep local Codex token use minimal."
                     ),
                     output_instructions=(
                         "Return exactly one final fenced JSON object, preserve every identity/hash value in this template, "
@@ -1252,7 +1261,11 @@ class ProPlanHandoffDriver:
                     "orchestrator",
                     original_task=self.question,
                     context_note=f"ExecutionMission: {execution_mission_path}. Plan {plan_path} is guidance, not authority.",
-                    stage_mission="Inspect the live workspace, implement, test, and adapt within the declared mission boundaries.",
+                    stage_mission=(
+                        "Inspect the live workspace, implement, test, and adapt within the declared mission boundaries. "
+                        "Partition safe independent work into internal lanes or parallel tool calls and integrate it "
+                        "yourself; do not return delegated implementation to local Codex."
+                    ),
                     output_instructions=(
                         f"Return one final JSON envelope using schema {ORCHESTRATOR_RESULT_SCHEMA}. "
                         "Keep local Codex token use minimal."

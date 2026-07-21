@@ -46,6 +46,16 @@ CALIBRATED_CHALLENGE = (
     "Do not turn construction, research, synthesis, or execution into a review exercise."
 )
 
+ORCHESTRATOR_OWNERSHIP_CONTRACT = (
+    "The web GPT orchestrator owns all delegated strategy exploration, code authoring, editing, "
+    "testing, and alternate implementation paths. When parallel work is useful, partition independent "
+    "work into internal lanes or parallel tool calls inside this single ExecutionMission and integrate "
+    "the results yourself. Same-project web submissions remain serialized: do not ask the host to start "
+    "another GPT run. Local Codex is limited to submission and recovery, locks and immutable hashes, "
+    "exact browser identity, host-only safety and release actions, and final deterministic verification. "
+    "Never return delegated implementation to local Codex merely because the work can be parallelized."
+)
+
 
 def _profile(
     name: str,
@@ -209,6 +219,8 @@ def render_prompt(
     ]
     if context_note.strip():
         sections.extend(["", "[CONTEXT POSTURE]", context_note.strip()])
+    if profile.name == "orchestrator":
+        sections.extend(["", "[EXECUTION OWNERSHIP]", ORCHESTRATOR_OWNERSHIP_CONTRACT])
     sections.extend(
         [
             "",

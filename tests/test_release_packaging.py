@@ -51,6 +51,7 @@ def test_manifest_covers_runtime_and_schemas() -> None:
         'bin/chatgpt_web_multi_runtime.py',
         'bin/chatgpt_web_multi_upstream.py',
         'bin/codexpro_agbrowse_app.py',
+        'bin/codexpro_fixed_runtime_watchdog.py',
         'bin/codexpro_project_cloudflare_bootstrap.ps1',
         'skills/chatgpt-pro-browser/scripts/run_chatgpt_pro.py',
         'skills/chatgpt-pro-plan-handoff/scripts/run_pro_plan_handoff.py',

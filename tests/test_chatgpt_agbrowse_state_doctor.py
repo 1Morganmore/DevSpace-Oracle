@@ -562,6 +562,113 @@ def test_supported_reconcile_command_releases_safe_stale_run(tmp_path: Path) -> 
     assert cancelled["phase"] == "CANCELLED_PRE_SUBMISSION"
 
 
+def test_reconcile_releases_proven_zero_provider_send_rejection_after_exact_cleanup(
+    tmp_path: Path,
+) -> None:
+    state = load_state("chatgpt_agbrowse_state_zero_provider_reconcile_test")
+    project = tmp_path / "project"
+    project.mkdir()
+    manifest = make_manifest(tmp_path / "manifest.json")
+    store = state.RunStore(tmp_path / "state")
+    run = store.create_run(
+        project_root=project,
+        manifest_path=manifest,
+        agbrowse_contract={"schema": "contract", "version": "0.1.18"},
+    )
+    target_id = "TARGET-CAPACITY-REJECTED"
+    store.transition(run["run_dir"], "PREFLIGHTED")
+    store.transition(run["run_dir"], "LEASED", target_id=target_id)
+    store.transition(run["run_dir"], "SEND_STARTED")
+    evidence_dir = Path(run["run_dir"]) / "agbrowse-evidence"
+    evidence_dir.mkdir()
+    stdout_path = evidence_dir / "send.stdout.txt"
+    stderr_path = evidence_dir / "send.stderr.txt"
+    stdout_path.write_text("", encoding="utf-8")
+    stderr_path.write_text(
+        json.dumps(
+            {
+                "ok": False,
+                "status": "error",
+                "error": {
+                    "errorCode": "provider.active-capacity",
+                    "stage": "provider-capacity",
+                    "mutationAllowed": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    store.transition(
+        run["run_dir"],
+        "SEND_REJECTED",
+        recovery_event={
+            "kind": "pre-submit-rejection",
+            "error": {
+                "error_code": "provider.active-capacity",
+                "error_stage": "provider-capacity",
+                "mutation_allowed": False,
+            },
+            "evidence": {
+                "exit_code": 1,
+                "stdout": str(stdout_path),
+                "stdout_sha256": state.sha256_file(stdout_path),
+                "stderr": str(stderr_path),
+                "stderr_sha256": state.sha256_file(stderr_path),
+            },
+        },
+    )
+    lifecycle_path = record_exact_pre_submit_cleanup(state, run, target_id)
+    cleanup_event = state.read_json(lifecycle_path)["events"][-1]
+    store.transition(
+        run["run_dir"],
+        "SEND_REJECTED",
+        recovery_event={
+            "kind": "verified-pre-submit-tab-cleanup",
+            "cleanup": {
+                **cleanup_event,
+                "evidence": {
+                    "path": str(lifecycle_path),
+                    "sha256": state.sha256_file(lifecycle_path),
+                    "event": cleanup_event,
+                },
+            },
+        },
+    )
+    make_owner_look_stale(state, store, project, run["run_id"])
+
+    diagnosis = store.reconcile_project_lock(project, apply_safe_pre_submission=True)
+    _, settled = store.load(run["run_dir"])
+
+    assert diagnosis["state"] == "STALE_PRE_SUBMISSION_CANCELLED"
+    assert settled["phase"] == "CANCELLED_PRE_SUBMISSION"
+    assert settled["current_target_id"] is None
+    assert not store.paths(project.resolve(), run["run_id"]).lock_file.exists()
+
+
+def test_reconcile_preserves_send_rejection_without_exact_cleanup_proof(tmp_path: Path) -> None:
+    state = load_state("chatgpt_agbrowse_state_unproven_rejection_reconcile_test")
+    project = tmp_path / "project"
+    project.mkdir()
+    manifest = make_manifest(tmp_path / "manifest.json")
+    store = state.RunStore(tmp_path / "state")
+    run = store.create_run(
+        project_root=project,
+        manifest_path=manifest,
+        agbrowse_contract={"schema": "contract", "version": "0.1.18"},
+    )
+    store.transition(run["run_dir"], "PREFLIGHTED")
+    store.transition(run["run_dir"], "LEASED", target_id="TARGET-UNPROVEN")
+    store.transition(run["run_dir"], "SEND_STARTED")
+    store.transition(run["run_dir"], "SEND_REJECTED")
+    make_owner_look_stale(state, store, project, run["run_id"])
+
+    diagnosis = store.reconcile_project_lock(project, apply_safe_pre_submission=True)
+
+    assert diagnosis["ok"] is False
+    assert diagnosis["state"] == "STALE_OWNER_UNRESOLVED_SUBMISSION"
+    assert store.paths(project.resolve(), run["run_id"]).lock_file.is_file()
+
+
 def test_recovery_required_uncommitted_attachment_can_be_reclassified_with_exact_evidence(tmp_path: Path) -> None:
     state = load_state("chatgpt_agbrowse_state_uncommitted_attachment_test")
     project = tmp_path / "project"

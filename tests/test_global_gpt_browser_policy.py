@@ -64,6 +64,14 @@ def test_recovery_is_exact_session_and_never_mixed_backend() -> None:
             assert phrase in text, (path, phrase)
 
 
+def test_all_chatgpt_skills_use_exact_job_identity_over_local_diagnostics() -> None:
+    for path in GPT_SKILLS:
+        text = _text(path)
+        assert "Job identity is the exact canonical conversation URL plus the run-owned `prompt-<run_id>.txt` filename" in text
+        assert "heartbeat" in text
+        assert "diagnostic only" in text
+
+
 def test_completed_owned_conversations_are_automatic_but_uncertain_tabs_are_protected() -> None:
     required = ["automatically close", "uncertain", "unique live"]
     for path in GPT_SKILLS:
@@ -96,6 +104,18 @@ def test_thinking_skill_requires_exact_owned_tab_cleanup_contract() -> None:
         "durable `COMPLETE`",
         "cleanup_pending",
         "one unique live URL match",
+    ):
+        assert phrase in text
+
+
+def test_thinking_skill_forbids_cross_run_evidence_mixing_and_stale_local_precedence() -> None:
+    text = _text(GPT_SKILLS[0])
+    for phrase in (
+        "Job identity is the exact canonical conversation URL plus the run-owned `prompt-<run_id>.txt` filename",
+        "never authorize mixing another URL/run",
+        "stale helper must never delay immediate completion",
+        "Never treat a completed different canonical URL as the current active run",
+        "Automation-repair work and the user's project execution are separate ownership lanes",
     ):
         assert phrase in text
 

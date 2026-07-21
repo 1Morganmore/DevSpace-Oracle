@@ -117,6 +117,8 @@ An explicit update is a short transaction: acquire the local dependency-update l
 
 CodexPro is fetched as `codexpro@latest` during public-address bootstrap. The harness records the resolved version and connector evidence for diagnosis but neither redistributes nor freezes it. If a new candidate app cannot prove its narrow connection contract, it is not promoted and the previous healthy registration remains intact.
 
+For an explicitly configured fixed-ngrok drive contract, the bootstrap starts a singleton local-runtime watchdog after identity succeeds. The watchdog never creates or replaces the tunnel or app registration. It repairs only the missing local listener behind the still-matching fixed hostname and port by invoking the same identity-validating bootstrap path.
+
 ## Public distribution
 
 - Project-owned glue is MIT licensed.

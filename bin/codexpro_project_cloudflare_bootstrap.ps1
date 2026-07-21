@@ -445,6 +445,24 @@ function Test-LocalTcpPort {
     }
 }
 
+function Start-FixedRuntimeWatchdog {
+    if ($EffectiveTunnelProvider -ne "ngrok" -or -not $EffectiveHostname) { return $null }
+    $watchdog = Join-Path $CodexHome "bin\codexpro_fixed_runtime_watchdog.py"
+    if (-not (Test-Path -LiteralPath $watchdog)) { return $null }
+    $python = Get-Command "pythonw.exe", "python.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $python) { return $null }
+    $pythonPath = if ($python.Source) { $python.Source } else { $python.Path }
+    $args = @(
+        $watchdog,
+        "--root", $ResolvedRoot,
+        "--port", "$ResolvedPort",
+        "--hostname", $EffectiveHostname,
+        "--bootstrap", $PSCommandPath,
+        "--state-dir", $ProjectLogDir
+    )
+    return Start-Process -FilePath $pythonPath -ArgumentList $args -WorkingDirectory $ResolvedRoot -WindowStyle Hidden -PassThru
+}
+
 function Get-ExistingFixedNgrokProcess {
     if ($EffectiveTunnelProvider -ne "ngrok" -or -not $EffectiveHostname) { return $null }
     $expectedUpstream = "127.0.0.1:$ResolvedPort"
@@ -494,6 +512,7 @@ if (Test-LocalTcpPort -TargetPort $ResolvedPort) {
             $updateArgs = @("--root", $ResolvedRoot, "--public-url", "$existingUrl", "--port", "$ResolvedPort", "--verified-open-port", "--update")
             if ($ForceRecreate) { $updateArgs += "--force-recreate" }
             $updated = Invoke-ManagerJson -ManagerArgs $updateArgs
+            $watchdogProcess = Start-FixedRuntimeWatchdog
             $payload = [ordered]@{
                 status = "ready"
                 root = $ResolvedRoot
@@ -508,6 +527,8 @@ if (Test-LocalTcpPort -TargetPort $ResolvedPort) {
                 identity = $existingIdentity.result
                 identity_attempts = $existingIdentity.attempts
                 process_id = $null
+                watchdog_start_requested = [bool]$watchdogProcess
+                watchdog_process_id = if ($watchdogProcess) { $watchdogProcess.Id } else { $null }
                 out_log = $outLog
                 err_log = $errLog
             }
@@ -699,6 +720,7 @@ if (-not [bool]$identityProbe.ok) {
 $updateArgs = @("--root", $ResolvedRoot, "--public-url", "$publicUrl", "--port", "$ResolvedPort", "--verified-open-port", "--update")
 if ($ForceRecreate) { $updateArgs += "--force-recreate" }
 $updated = Invoke-ManagerJson -ManagerArgs $updateArgs
+$watchdogProcess = Start-FixedRuntimeWatchdog
 $payload = [ordered]@{
     status = "ready"
     root = $ResolvedRoot
@@ -719,6 +741,8 @@ $payload = [ordered]@{
     fixed_ngrok_contract_reason = [string]$FixedNgrokContract.reason
     fixed_ngrok_process_id = if ($fixedNgrokProcess) { $fixedNgrokProcess.ProcessId } else { $null }
     process_id = if ($process) { $process.Id } else { $null }
+    watchdog_start_requested = [bool]$watchdogProcess
+    watchdog_process_id = if ($watchdogProcess) { $watchdogProcess.Id } else { $null }
     out_log = $outLog
     err_log = $errLog
 }

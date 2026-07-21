@@ -856,7 +856,10 @@ class RunStore:
         record: dict[str, Any],
     ) -> dict[str, Any] | None:
         target_id = str(record.get("current_target_id") or "")
-        if not target_id or cls._crossed_send_boundary(record):
+        zero_provider_rejection = cls._send_rejected_failure_evidence_proof(state_file, record)
+        if not target_id or (
+            cls._crossed_send_boundary(record) and zero_provider_rejection is None
+        ):
             return None
         expected_path = (state_file.parent / "tab-lifecycle.json").resolve()
         allowed_recovery_kinds = {
@@ -959,6 +962,11 @@ class RunStore:
 
     @classmethod
     def _safe_stale_pre_submission(cls, state_file: Path, record: dict[str, Any]) -> bool:
+        if str(record.get("phase") or "") == "SEND_REJECTED":
+            return bool(
+                cls._send_rejected_failure_evidence_proof(state_file, record) is not None
+                and cls._verified_pre_submit_target_cleanup(state_file, record) is not None
+            )
         return bool(
             str(record.get("phase") or "") in SAFE_STALE_PRE_SUBMISSION_PHASES
             and not cls._crossed_send_boundary(record)
@@ -1102,8 +1110,14 @@ class RunStore:
     ) -> dict[str, Any] | None:
         if (
             str(record.get("phase") or "") != "SEND_REJECTED"
-            or int(record.get("send_attempt_count") or 0) != 1
-            or int(record.get("send_limit") or 0) != 1
+            or (
+                record.get("send_attempt_count") is not None
+                and int(record.get("send_attempt_count") or 0) != 1
+            )
+            or (
+                record.get("send_limit") is not None
+                and int(record.get("send_limit") or 0) != 1
+            )
             or record.get("session_id")
             or record.get("conversation_url")
             or record.get("submission_receipt") is not None
@@ -1133,8 +1147,21 @@ class RunStore:
                 or stderr_path.resolve(strict=True) != (evidence_dir / "send.stderr.txt").resolve(strict=True)
                 or stdout_path.is_symlink()
                 or stderr_path.is_symlink()
-                or sha256_file(stdout_path) != str(evidence.get("stdout_sha256") or "")
-                or sha256_file(stderr_path) != str(evidence.get("stderr_sha256") or "")
+            ):
+                return None
+            stdout_sha256 = sha256_file(stdout_path)
+            stderr_sha256 = sha256_file(stderr_path)
+            stdout_recorded_sha256 = str(evidence.get("stdout_sha256") or "")
+            stderr_recorded_sha256 = str(evidence.get("stderr_sha256") or "")
+            stdout_legacy_text_sha256 = sha256_bytes(
+                stdout_path.read_text(encoding="utf-8").encode("utf-8")
+            )
+            stderr_legacy_text_sha256 = sha256_bytes(
+                stderr_path.read_text(encoding="utf-8").encode("utf-8")
+            )
+            if (
+                stdout_recorded_sha256 not in {stdout_sha256, stdout_legacy_text_sha256}
+                or stderr_recorded_sha256 not in {stderr_sha256, stderr_legacy_text_sha256}
                 or not isinstance(evidence.get("exit_code"), int)
                 or int(evidence["exit_code"]) == 0
             ):
@@ -1177,16 +1204,16 @@ class RunStore:
         return {
             "schema": "codex.chatgpt.zero-provider-failure-evidence/v1",
             "run_id": record["run_id"],
-            "parent_run_id": record["parent_run_id"],
-            "stage_id": record["stage_id"],
+            "parent_run_id": record.get("parent_run_id"),
+            "stage_id": record.get("stage_id"),
             "stdout": {
                 "path": str(stdout_path),
-                "sha256": sha256_file(stdout_path),
+                "sha256": stdout_sha256,
                 "bytes": stdout_path.stat().st_size,
             },
             "stderr": {
                 "path": str(stderr_path),
-                "sha256": sha256_file(stderr_path),
+                "sha256": stderr_sha256,
                 "bytes": stderr_path.stat().st_size,
             },
             "exit_code": evidence["exit_code"],
