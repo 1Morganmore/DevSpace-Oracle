@@ -600,6 +600,19 @@ def test_every_fresh_parallel_send_has_explicit_blank_chatgpt_url(tmp_path: Path
     assert "--parallel" in command
 
 
+def test_proven_plain_composer_bypasses_parallel_pool_cleanup(tmp_path: Path) -> None:
+    bridge = load("chatgpt_agbrowse_bridge_plain_composer_test", "chatgpt_agbrowse_bridge.py")
+    command = bridge.build_send_command(
+        {"requested": {"app_policy": "forbidden"}},
+        prompt_payload(tmp_path, {"question": "smoke", "mode_label": "Pro"}),
+        "agbrowse",
+        prepared_target=True,
+    )
+
+    assert "--reuse-tab" in command
+    assert "--parallel" not in command
+
+
 def test_explicit_preselected_app_uses_exact_tab_without_plugin_flag(tmp_path: Path) -> None:
     bridge = load("chatgpt_agbrowse_bridge_connected_auto_test", "chatgpt_agbrowse_bridge.py")
     command = bridge.build_send_command(

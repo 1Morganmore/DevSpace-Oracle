@@ -1257,6 +1257,40 @@ class AppConnector:
                 {"owned_target_id": target_id, "owned_stage": "pre-submit-connected-app"},
             ) from exc
 
+    def prepare_plain_composer(self, *, composer_url: str = COMPOSER_URL) -> dict[str, Any]:
+        """Create one exact run-owned composer without selecting an app."""
+        if not composer_url.startswith("https://chatgpt.com/"):
+            raise AppBridgeError("APP_COMPOSER_URL_INVALID", "composer URL must use the exact https://chatgpt.com/ origin")
+        self.ui.ensure_started()
+        created = self.ui.open_composer_target(composer_url)
+        target_id = str(created.get("targetId") or created.get("target_id") or "")
+        new_target_proven = bool(created.get("newTargetProven"))
+        if not target_id or not new_target_proven:
+            raise AppBridgeError(
+                "APP_COMPOSER_TARGET_UNPROVEN",
+                "plain composer must be a newly proven run-owned target",
+                {"target_id": target_id, "new_target_proven": new_target_proven},
+            )
+        try:
+            self.ui.activate_target(target_id)
+            return {
+                "ok": True,
+                "state": "plain-composer-ready",
+                "target_id": target_id,
+                "url": composer_url,
+                "new_target_proven": True,
+            }
+        except Exception as exc:
+            raise AppBridgeError(
+                "APP_COMPOSER_TARGET_MISMATCH",
+                "plain composer target could not be activated exactly",
+                {
+                    "owned_target_id": target_id,
+                    "owned_stage": "pre-submit-plain-composer",
+                    "new_target_proven": True,
+                },
+            ) from exc
+
     def activate_composer_target(self, target_id: str) -> dict[str, Any]:
         return self.ui.activate_target(target_id)
 

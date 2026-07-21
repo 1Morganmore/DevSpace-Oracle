@@ -25,7 +25,13 @@ def load_bridge(name: str):
     return module
 
 
-def make_run(tmp_path: Path, bridge, *, phase: str = "URL_BOUND"):
+def make_run(
+    tmp_path: Path,
+    bridge,
+    *,
+    phase: str = "URL_BOUND",
+    app_policy: str = "forbidden",
+):
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("exact job control", encoding="utf-8")
     manifest = tmp_path / "manifest.json"
@@ -37,8 +43,9 @@ def make_run(tmp_path: Path, bridge, *, phase: str = "URL_BOUND"):
                 "prompt_file": str(prompt),
                 "prompt_file_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest(),
                 "files": [str(prompt)],
-                "mode_label": "Pro",
-                "app_policy": "forbidden",
+                "mode_label": "GPT-5.6" if app_policy == "required" else "Pro",
+                "app_policy": app_policy,
+                **({"chatgpt_app_name": "CodexPro-Test"} if app_policy == "required" else {}),
                 "timeout_seconds": 30,
             }
         ),
@@ -188,6 +195,171 @@ def test_bound_poll_uses_exact_url_read_only_checks_without_session_poll(tmp_pat
     poll_commands = [command for command in commands if command[1:3] == ["web-ai", "poll"]]
     assert poll_commands == []
     assert all("--navigate" not in command for command in commands)
+
+
+def test_exact_url_timeout_records_long_running_app_work_instead_of_generic_recovery(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_bridge("exact_job_provider_interaction_timeout_test")
+    commands: list[list[str]] = []
+
+    def runner(command, env, timeout):
+        commands.append(command)
+        if command[1:] == ["active-tab", "--json"]:
+            payload = {"targetId": "T-1", "url": "https://chatgpt.com/c/exact-job"}
+        elif command[1:3] == ["web-ai", "status"]:
+            payload = {
+                "ok": True,
+                "url": "https://chatgpt.com/c/exact-job",
+                "capabilities": [{
+                    "capabilityId": "chatgpt-response-streaming",
+                    "evidence": {"streaming": True},
+                }],
+            }
+        elif command[1:3] == ["web-ai", "snapshot"]:
+            payload = {"text": 'button "지금 답변 받기"\nbutton "답변 중지"'}
+        elif command[1] == "text":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="지금 답변 받기\n답변 중지",
+                stderr="",
+            )
+        else:
+            raise AssertionError(f"unexpected command: {command}")
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+    runtime = module.Bridge(
+        state_root=tmp_path / "state",
+        runner=runner,
+        headed_runtime_preflight=False,
+    )
+    runtime.exact_url_only_poll = True
+    run_dir = make_run(
+        tmp_path,
+        runtime,
+        phase="RESPONSE_IN_PROGRESS",
+        app_policy="required",
+    )
+    runtime.store.transition(run_dir, "RECOVERY_REQUIRED", recovery_event={"kind": "runner-timeout"})
+    runtime._try_exact_url_terminal_now = lambda *args, **kwargs: runtime.store.load(run_dir)[1]
+    runtime._recovery_tabs = lambda **kwargs: (
+        [{"targetId": "T-1", "url": "https://chatgpt.com/c/exact-job"}],
+        {"kind": "tabs"},
+    )
+    monkeypatch.setattr(module, "GLOBAL_BROWSER_MUTATION_LOCK", tmp_path / "global.lock")
+    ticks = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(ticks, 2.0))
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+
+    result = runtime.poll(run_dir, timeout_seconds=1)
+
+    assert result["phase"] == "RECOVERY_REQUIRED"
+    event = result["recovery_events"][-1]
+    assert event["kind"] == "exact-url-provider-long-running-app-work"
+    assert event["diagnostic"]["get_answer_now_available"] is True
+    assert event["diagnostic"]["app_policy"] == "required"
+    assert event["diagnostic"]["streaming"] is True
+    assert event["diagnostic"]["stop_control_present"] is True
+    assert "do not resubmit" in event["next_action"]
+    assert not any(command[1] in {"click", "press", "type", "navigate", "new-tab", "tab-close"} for command in commands)
+
+
+def test_recovery_returns_long_running_app_work_without_doctor_or_history(tmp_path: Path) -> None:
+    module = load_bridge("exact_job_provider_interaction_recovery_test")
+    commands: list[list[str]] = []
+
+    def runner(command, env, timeout):
+        commands.append(command)
+        raise AssertionError(f"unexpected browser command: {command}")
+
+    runtime = module.Bridge(
+        state_root=tmp_path / "state",
+        runner=runner,
+        headed_runtime_preflight=False,
+    )
+    runtime.exact_url_only_poll = True
+    run_dir = make_run(tmp_path, runtime, phase="RESPONSE_IN_PROGRESS")
+    runtime.store.transition(run_dir, "RECOVERY_REQUIRED", recovery_event={"kind": "runner-timeout"})
+    runtime._recovery_tabs = lambda **kwargs: (
+        [{"targetId": "T-1", "url": "https://chatgpt.com/c/exact-job"}],
+        {"kind": "tabs"},
+    )
+    runtime._try_exact_url_terminal_now = lambda *args, **kwargs: runtime.store.load(run_dir)[1]
+    runtime._exact_url_timeout_diagnostic = lambda *args, **kwargs: {
+        "ok": True,
+        "streaming": True,
+        "app_policy": "required",
+        "get_answer_now_available": True,
+        "stop_control_present": True,
+    }
+
+    result = runtime.recover(run_dir)
+
+    assert result["phase"] == "RECOVERY_REQUIRED"
+    event = result["recovery_events"][-1]
+    assert event["kind"] == "exact-url-provider-long-running-app-work"
+    assert "do not resubmit or stop" in event["next_action"]
+    assert commands == []
+
+
+def test_recover_complete_cleanup_pending_retries_only_exact_owned_tab_cleanup(tmp_path: Path) -> None:
+    module = load_bridge("exact_job_complete_cleanup_retry_test")
+    commands: list[list[str]] = []
+    url = "https://chatgpt.com/c/exact-job"
+    tabs = [
+        {"targetId": "T-1", "url": url, "type": "page"},
+        {"targetId": "T-KEEP", "url": "https://chatgpt.com/c/foreign", "type": "page"},
+    ]
+
+    def runner(command, env, timeout):
+        commands.append(command)
+        if command[1] == "tabs":
+            payload = list(tabs)
+        elif command[1] == "tab-close":
+            assert command[2] == "T-1"
+            tabs[:] = [tab for tab in tabs if tab["targetId"] != "T-1"]
+            payload = {"ok": True, "targetId": "T-1"}
+        else:
+            raise AssertionError(f"unexpected browser command: {command}")
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+    runtime = module.Bridge(
+        state_root=tmp_path / "state",
+        runner=runner,
+        headed_runtime_preflight=False,
+    )
+    run_dir = make_run(tmp_path, runtime)
+    state_file = Path(run_dir) / "run.json"
+    answer_path = Path(run_dir) / "answer.md"
+    answer_path.write_text("terminal answer", encoding="utf-8")
+    record = json.loads(state_file.read_text(encoding="utf-8"))
+    record.update(
+        {
+            "phase": "COMPLETE",
+            "cleanup_pending": True,
+            "owned_tab_state": "cleanup-pending",
+            "owned_open_tabs": 1,
+            "result": {
+                "path": str(answer_path),
+                "sha256": hashlib.sha256(answer_path.read_bytes()).hexdigest(),
+                "bytes": answer_path.stat().st_size,
+                "provider_status": "complete",
+                "evidence": {"exit_code": 0, "stdout": "captured"},
+            },
+        }
+    )
+    state_file.write_text(json.dumps(record), encoding="utf-8")
+
+    result = runtime.recover(run_dir)
+
+    assert result["phase"] == "COMPLETE"
+    assert result["cleanup_pending"] is False
+    assert result["owned_tab_state"] == "closed-and-absent"
+    assert result["owned_open_tabs"] == 0
+    assert tabs == [{"targetId": "T-KEEP", "url": "https://chatgpt.com/c/foreign", "type": "page"}]
+    assert [command[1] for command in commands] == ["tabs", "tab-close", "tabs", "tabs"]
 
 
 def test_bound_recovery_never_runs_navigating_doctor(tmp_path: Path) -> None:

@@ -844,6 +844,7 @@ def build_send_command(
     preselected_app: bool = False,
     connected_app_auto: bool = False,
     preselected_research: bool = False,
+    prepared_target: bool = False,
 ) -> list[str]:
     try:
         prompt_contract = STATE.prompt_contract(manifest, require_file=True)
@@ -920,7 +921,7 @@ def build_send_command(
             {"fields": inline_metadata},
         )
     command.extend([
-        "--reuse-tab" if (preselected_app or connected_app_auto or preselected_research) else "--parallel",
+        "--reuse-tab" if (prepared_target or preselected_app or connected_app_auto or preselected_research) else "--parallel",
         "--json",
     ])
     return command
@@ -1024,6 +1025,7 @@ class Bridge:
         app_identity_probe=None,
         tab_lifecycle_factory=None,
         headed_runtime_preflight: bool = True,
+        plain_composer_preflight: bool | None = None,
     ):
         self.store = STATE.RunStore(state_root)
         self.runner = runner or default_runner
@@ -1040,6 +1042,9 @@ class Bridge:
         self.app_identity_probe = app_identity_probe
         self.tab_lifecycle_factory = tab_lifecycle_factory
         self.headed_runtime_preflight = bool(headed_runtime_preflight)
+        self.plain_composer_preflight = (
+            runner is None if plain_composer_preflight is None else bool(plain_composer_preflight)
+        )
 
     def _record_provider_terminal_failure(
         self,
@@ -2746,7 +2751,7 @@ class Bridge:
         composer_result: dict[str, Any],
         lifecycle,
         evidence_filename: str = "composer-app-evidence.json",
-        selection_kind: str = "app",
+        selection_kind: str | None = "app",
     ) -> tuple[dict[str, Any], str, Path]:
         target_id = str(composer_result.get("target_id") or "")
         old_target_id = str(record.get("current_target_id") or "") or None
@@ -2769,7 +2774,9 @@ class Bridge:
                 ),
             )
             write_json_atomic(evidence_path, sanitize_evidence(composer_result))
-            if selection_kind == "app":
+            if selection_kind is None:
+                pass
+            elif selection_kind == "app":
                 record = self.store.transition(run_dir, "LEASED", app_evidence_ref=str(evidence_path))
             else:
                 fields: dict[str, Any] = {
@@ -4282,6 +4289,125 @@ class Bridge:
         completed = self.runner(command, env, timeout)
         return completed, self._evidence(run_dir, name, completed)
 
+    def _exact_url_timeout_diagnostic(
+        self,
+        run_dir: str,
+    ) -> dict[str, Any]:
+        """Capture one bounded exact-target diagnostic when a read-only wait expires."""
+        state_file, record = self.store.load(run_dir)
+        conversation_url = str(record.get("conversation_url") or "")
+        target_id = str(record.get("current_target_id") or "")
+        if not target_id or not STATE.CANONICAL_CHAT_RE.fullmatch(conversation_url):
+            return {"ok": False, "reason": "exact-identity-missing"}
+
+        manifest = _load_manifest(record)
+        executable = record_executable(record)
+        env = bridge_env(manifest)
+        commands: dict[str, dict[str, Any]] = {}
+        completed: dict[str, subprocess.CompletedProcess[str]] = {}
+        specs = {
+            "active": [executable, "active-tab", "--json"],
+            "status": [
+                executable,
+                "web-ai",
+                "status",
+                "--vendor",
+                "chatgpt",
+                "--url",
+                conversation_url,
+                "--json",
+            ],
+            "snapshot": [executable, "web-ai", "snapshot", "--vendor", "chatgpt", "--json"],
+            "text": [executable, "text"],
+        }
+        try:
+            for name, command in specs.items():
+                item, evidence = self._run_recovery_command(
+                    run_dir=state_file.parent,
+                    name=f"exact-url-timeout-{name}",
+                    command=command,
+                    env=env,
+                    timeout=60,
+                )
+                completed[name] = item
+                commands[name] = evidence
+        except Exception as exc:
+            return {
+                "ok": False,
+                "reason": "diagnostic-command-failed",
+                "error": type(exc).__name__,
+                "evidence": sanitize_evidence(commands),
+            }
+        if any(item.returncode != 0 for item in completed.values()):
+            return {
+                "ok": False,
+                "reason": "diagnostic-command-nonzero",
+                "evidence": sanitize_evidence(commands),
+            }
+
+        try:
+            active_payload = _json_output(completed["active"].stdout)
+            status_payload = _json_output(completed["status"].stdout)
+            snapshot_payload = _json_output(completed["snapshot"].stdout)
+        except BridgeError as exc:
+            return {
+                "ok": False,
+                "reason": "diagnostic-json-invalid",
+                "error": exc.code,
+                "evidence": sanitize_evidence(commands),
+            }
+
+        active_target = str(active_payload.get("targetId") or active_payload.get("target_id") or "")
+        active_url_raw = str(active_payload.get("url") or active_payload.get("tab", {}).get("url") or "")
+        status_url_raw = str(status_payload.get("url") or "")
+        try:
+            active_url = STATE.canonical_conversation_url(active_url_raw)
+            status_url = STATE.canonical_conversation_url(status_url_raw)
+        except STATE.StateError:
+            return {
+                "ok": False,
+                "reason": "diagnostic-url-invalid",
+                "active_target_id": active_target or None,
+                "active_url": active_url_raw or None,
+                "status_url": status_url_raw or None,
+                "evidence": sanitize_evidence(commands),
+            }
+        if active_target != target_id or active_url != conversation_url or status_url != conversation_url:
+            return {
+                "ok": False,
+                "reason": "diagnostic-exact-identity-mismatch",
+                "expected_target_id": target_id,
+                "expected_url": conversation_url,
+                "active_target_id": active_target or None,
+                "active_url": active_url,
+                "status_url": status_url,
+                "evidence": sanitize_evidence(commands),
+            }
+
+        snapshot_text = str(snapshot_payload.get("text") or "")
+        page_text = str(completed["text"].stdout or "")
+        visible = f"{snapshot_text}\n{page_text}"
+        get_answer_now = any(
+            label in visible
+            for label in ("지금 답변 받기", "Get answer now")
+        )
+        stop_control = any(
+            label in visible
+            for label in ("답변 중지", "Stop generating", "Stop response")
+        )
+        return {
+            "ok": True,
+            "target_id": target_id,
+            "conversation_url": conversation_url,
+            "streaming": _streaming_state(status_payload),
+            "app_policy": str(manifest.get("app_policy") or ""),
+            "get_answer_now_available": get_answer_now,
+            "stop_control_present": stop_control,
+            "snapshot_sha256": hashlib.sha256(snapshot_text.encode("utf-8")).hexdigest(),
+            "text_sha256": hashlib.sha256(page_text.encode("utf-8")).hexdigest(),
+            "evidence": sanitize_evidence(commands),
+        }
+
     def _try_exact_url_terminal_now(
         self,
         run_dir: str,
@@ -5635,7 +5761,14 @@ class Bridge:
                     owned_startup_targets=self._owned_startup_targets(record),
                 )
             else:
-                connector = None
+                connector = (
+                    self._app_connector(
+                        executable,
+                        owned_startup_targets=self._owned_startup_targets(record),
+                    )
+                    if self.plain_composer_preflight
+                    else None
+                )
             if reuse_prepared_retry:
                 prepared_target_id = str(record.get("current_target_id") or "")
                 composer_evidence_path = Path(str(authority["replacement_evidence_path"]))
@@ -5851,6 +5984,51 @@ class Bridge:
                     composer_result=composer_result,
                     lifecycle=tab_lifecycle,
                 )
+            elif self.plain_composer_preflight:
+                try:
+                    composer_result = connector.prepare_plain_composer(composer_url=composer_url)
+                except Exception as exc:
+                    cleanup = self._safe_tab_cleanup(
+                        tab_lifecycle,
+                        run_dir,
+                        target_id=self._owned_target_from_exception(exc),
+                        url=composer_url,
+                        reason="plain-composer-preparation-failed",
+                        new_target_proven=self._new_target_proven_from_exception(exc),
+                    )
+                    blocked = self.store.transition(
+                        run_dir,
+                        "PREFLIGHT_BLOCKED",
+                        block_code="PLAIN_COMPOSER_PREP_FAILED",
+                        recovery_event={
+                            "kind": "plain-composer-preparation-failed",
+                            "detail": _redact_sensitive_text(str(exc)),
+                            "cleanup": cleanup,
+                        },
+                    )
+                    raise BridgeError(
+                        "PLAIN_COMPOSER_PREP_FAILED",
+                        "exact run-owned attachment-only composer could not be prepared",
+                        {"phase": blocked["phase"], "cleanup": cleanup},
+                    ) from exc
+                if not (
+                    composer_result.get("state") == "plain-composer-ready"
+                    and str(composer_result.get("target_id") or "")
+                    and composer_result.get("new_target_proven") is True
+                ):
+                    raise BridgeError(
+                        "PLAIN_COMPOSER_EVIDENCE_INVALID",
+                        "attachment-only composer evidence did not prove one new exact target",
+                    )
+                record, prepared_target_id, composer_evidence_path = self._bind_prepared_composer(
+                    run_dir=run_dir,
+                    state_file=state_file,
+                    record=record,
+                    composer_result=composer_result,
+                    lifecycle=tab_lifecycle,
+                    evidence_filename="composer-target-evidence.json",
+                    selection_kind=None,
+                )
             command = build_send_command(
                 record,
                 manifest,
@@ -5858,6 +6036,7 @@ class Bridge:
                 preselected_app=use_preselected_app,
                 connected_app_auto=use_connected_app_auto,
                 preselected_research=use_preselected_research,
+                prepared_target=bool(prepared_target_id),
             )
             command_budget = pre_send_command_budget(command)
             if not command_budget["within_budget"]:
@@ -5882,7 +6061,7 @@ class Bridge:
                         **command_budget,
                     },
                 )
-            if use_prepared_target:
+            if prepared_target_id:
                 try:
                     if connector is None:
                         raise BridgeError("PREPARED_CONTROLLER_MISSING", "prepared target activation requires a controller")
@@ -5944,7 +6123,7 @@ class Bridge:
                     manifest=manifest,
                     lifecycle=tab_lifecycle,
                 )
-            if not use_prepared_target and self.capture_pre_send_tabs:
+            if not prepared_target_id and self.capture_pre_send_tabs:
                 pre_send_tabs, pre_send_tabs_evidence = self._recovery_tabs(
                     run_dir=state_file.parent,
                     name="pre-send-tabs",
@@ -6362,13 +6541,30 @@ class Bridge:
             if record.get("phase") in {"URL_BOUND", "RECOVERING"}:
                 record = self.store.transition(run_dir, "RESPONSE_IN_PROGRESS")
             if time.monotonic() >= deadline:
+                diagnostic = self._exact_url_timeout_diagnostic(run_dir)
+                long_running_app_work = bool(
+                    diagnostic.get("ok") is True
+                    and diagnostic.get("streaming") is True
+                    and diagnostic.get("app_policy") == "required"
+                    and diagnostic.get("stop_control_present") is True
+                )
                 return self.store.transition(
                     run_dir,
                     "RECOVERY_REQUIRED",
                     recovery_event={
-                        "kind": "exact-url-read-only-wait-timeout",
+                        "kind": (
+                            "exact-url-provider-long-running-app-work"
+                            if long_running_app_work
+                            else "exact-url-read-only-wait-timeout"
+                        ),
                         "conversation_url": saved_url,
                         "target_id": target_id,
+                        "diagnostic": sanitize_evidence(diagnostic),
+                        "next_action": (
+                            "preserve this exact target; do not resubmit or stop; re-observe the exact URL later; get-answer-now remains optional and requires explicit user authorization"
+                            if long_running_app_work
+                            else "preserve this exact target and retry only exact-URL observation"
+                        ),
                     },
                 )
             time.sleep(min(3.0, max(0.1, deadline - time.monotonic())))
@@ -6380,6 +6576,12 @@ class Bridge:
     def _recover_locked(self, run_dir: str) -> dict[str, Any]:
         state_file, record = self.store.load(run_dir)
         self.store.verify_manifest(record)
+        if record["phase"] == "COMPLETE" and bool(record.get("cleanup_pending")):
+            # The provider result is already durable.  This is not response
+            # recovery: retry only the exact owned-tab cleanup that previously
+            # failed, using the normal completed-run ownership safeguards.
+            self.cleanup_completed(run_dir, explicit_user_request=False)
+            return self.store.load(run_dir)[1]
         if record["phase"] in {
             "SEND_STARTED",
             "RECOVERY_REQUIRED",
@@ -6439,6 +6641,28 @@ class Bridge:
         )
         if direct.get("phase") in {"COMPLETE", "PROVIDER_FAILED_TERMINAL", "BLOCKED_TARGET_AMBIGUOUS"}:
             return direct
+        if (
+            self.exact_url_only_poll
+            and STATE.CANONICAL_CHAT_RE.fullmatch(str(direct.get("conversation_url") or ""))
+        ):
+            diagnostic = self._exact_url_timeout_diagnostic(run_dir)
+            if (
+                diagnostic.get("ok") is True
+                and diagnostic.get("streaming") is True
+                and diagnostic.get("app_policy") == "required"
+                and diagnostic.get("stop_control_present") is True
+            ):
+                return self.store.transition(
+                    run_dir,
+                    "RECOVERY_REQUIRED",
+                    recovery_event={
+                        "kind": "exact-url-provider-long-running-app-work",
+                        "conversation_url": direct.get("conversation_url"),
+                        "target_id": direct.get("current_target_id"),
+                        "diagnostic": sanitize_evidence(diagnostic),
+                        "next_action": "preserve this exact target; do not resubmit or stop; re-observe the exact URL later; get-answer-now remains optional and requires explicit user authorization",
+                    },
+                )
         # Once an exact conversation URL exists, stale agbrowse session URLs
         # are never allowed to navigate that target.  A later invocation will
         # observe the same exact URL again; doctor/history are only identity

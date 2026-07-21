@@ -30,6 +30,9 @@ class UI:
         self.calls.append(("new-tab", url))
         return {"targetId": "T-RUN"}
 
+    def open_composer_target(self, url):
+        return {**self.new_tab(url), "newTargetProven": True}
+
     def activate_target(self, target_id):
         self.command_count += 1
         self.calls.append(("active-tab", target_id))
@@ -85,6 +88,21 @@ def test_exact_rate_limit_ack_is_clicked_once_on_run_owned_target() -> None:
     assert result["textbox_ambiguity_counts"] == [0, 1]
     assert [call[0] for call in ui.calls].count("click") == 1
     assert [call[0] for call in ui.calls].count("type") == 1
+
+
+def test_plain_composer_proves_and_activates_one_new_target() -> None:
+    ui = UI([])
+
+    result = APP.AppConnector(ui).prepare_plain_composer()
+
+    assert result == {
+        "ok": True,
+        "state": "plain-composer-ready",
+        "target_id": "T-RUN",
+        "url": "https://chatgpt.com/",
+        "new_target_proven": True,
+    }
+    assert ui.calls == [("new-tab", "https://chatgpt.com/"), ("active-tab", "T-RUN")]
 
 
 def test_ambiguous_composer_is_bounded_to_three_fresh_snapshots() -> None:
