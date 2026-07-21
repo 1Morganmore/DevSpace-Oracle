@@ -245,8 +245,10 @@ def test_exact_url_timeout_records_long_running_app_work_instead_of_generic_reco
 ) -> None:
     module = load_bridge("exact_job_provider_interaction_timeout_test")
     commands: list[list[str]] = []
+    global_lock = tmp_path / "global.lock"
 
     def runner(command, env, timeout):
+        assert global_lock.is_file(), "timeout diagnostic must retain exact-target browser ownership"
         commands.append(command)
         if command[1:] == ["active-tab", "--json"]:
             payload = {"targetId": "T-1", "url": "https://chatgpt.com/c/exact-job"}
@@ -290,7 +292,7 @@ def test_exact_url_timeout_records_long_running_app_work_instead_of_generic_reco
         [{"targetId": "T-1", "url": "https://chatgpt.com/c/exact-job"}],
         {"kind": "tabs"},
     )
-    monkeypatch.setattr(module, "GLOBAL_BROWSER_MUTATION_LOCK", tmp_path / "global.lock")
+    monkeypatch.setattr(module, "GLOBAL_BROWSER_MUTATION_LOCK", global_lock)
     ticks = iter((0.0, 0.0, 2.0))
     monkeypatch.setattr(module.time, "monotonic", lambda: next(ticks, 2.0))
     monkeypatch.setattr(module.time, "sleep", lambda _: None)

@@ -6758,7 +6758,13 @@ class Bridge:
             if record.get("phase") in {"URL_BOUND", "RECOVERING"}:
                 record = self.store.transition(run_dir, "RESPONSE_IN_PROGRESS")
             if time.monotonic() >= deadline:
-                diagnostic = self._exact_url_timeout_diagnostic(run_dir)
+                # Status/snapshot/text are active-target scoped in agbrowse
+                # 0.1.18 even when --url is supplied. Keep the full diagnostic
+                # sequence under the same cross-process browser lock as exact
+                # target selection so another project cannot switch the active
+                # tab between those read-only commands.
+                with exclusive_composer_lock(GLOBAL_BROWSER_MUTATION_LOCK):
+                    diagnostic = self._exact_url_timeout_diagnostic(run_dir)
                 long_running_app_work = bool(
                     diagnostic.get("ok") is True
                     and diagnostic.get("streaming") is True
