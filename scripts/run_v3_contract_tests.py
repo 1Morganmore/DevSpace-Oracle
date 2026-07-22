@@ -191,10 +191,9 @@ def run_git(root: Path) -> None:
 def run_compatibility() -> None:
     assert BRIDGE._mode_args({"mode_label": "GPT-5.6", "mode_variant": "High"})[-1] == "high"
     assert BRIDGE._mode_args({"mode_label": "GPT-5.6", "mode_variant": "Very High"})[-1] == "xhigh"
-    expect_code(
-        lambda: BRIDGE._mode_args({"mode_label": "Deep Research", "mode_variant": "Very High"}),
-        "MODE_VARIANT_UNSUPPORTED",
-    )
+    deep = BRIDGE._mode_args({"mode_label": "Deep Research", "mode_variant": "Very High"})
+    assert deep[deep.index("--effort") + 1] == "xhigh"
+    assert deep[deep.index("--research") + 1] == "deep"
     assert BRIDGE.app_decision_scope_matches(Path("C:/unit"), Path("C:/unit"), "parallel-exact-unit")
     assert not BRIDGE.app_decision_scope_matches(Path("C:/unit"), Path("C:/"), "parallel-exact-unit")
 
