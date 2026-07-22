@@ -129,4 +129,4 @@ finalize --parent-run-dir <run>
 
 ## Compatibility
 
-Serial v1/v2, High mode, Deep Research, and Web Multi-GPT advisory behavior retain their existing schemas and state transitions. Regular GPT supports explicit `High` and `Very High`; Deep Research remains High-only. The fixed prompt-file handoff wording is preserved, and stage manifests persist `mode_variant`, including `null` for Pro stages. No v3 field is inferred into a v1/v2 run.
+Serial v1/v2, Deep Research, and Web Multi-GPT advisory behavior retain their existing schemas and state transitions. New non-Pro stages select the strongest declared regular-web level (`Very High` before `High`), while explicit `High` remains valid for frozen comparison arms. The fixed prompt-file handoff wording is preserved, and stage manifests persist `mode_variant`, including `null` for Pro stages. No v3 field is inferred into a v1/v2 run.

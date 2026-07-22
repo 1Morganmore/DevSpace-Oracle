@@ -53,6 +53,19 @@ def test_deep_research_command_reuses_exact_preselected_target_at_high(tmp_path:
     assert "--plugin" not in command
 
 
+def test_deep_research_very_high_uses_xhigh_without_downgrade(tmp_path: Path) -> None:
+    command = BRIDGE.build_send_command(
+        {"requested": {"app_policy": "required"}},
+        manifest(tmp_path, mode_variant="Very High"),
+        "agbrowse",
+        preselected_app=True,
+        preselected_research=True,
+    )
+
+    assert command[command.index("--effort") + 1] == "xhigh"
+    assert command[command.index("--research") + 1] == "deep"
+
+
 def test_deep_research_without_selection_proof_fails_before_command(tmp_path: Path) -> None:
     with pytest.raises(BRIDGE.BridgeError) as failure:
         BRIDGE.build_send_command(

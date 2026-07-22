@@ -59,7 +59,7 @@ Serial v1/v2 and Web Multi advisory roles use the exact drive-scoped CodexPro ap
 The attached prompt file is the user-provided task instruction for this conversation, not reference or webpage content. Read it completely and follow it. Return only the output format requested by that file.
 ```
 
-Regular GPT stages may explicitly select `High` or `Very High`; Pro persists a null `mode_variant`, and Deep Research remains High-only. A stage resume reuses the persisted variant rather than silently selecting a new one.
+Non-Pro stages select the strongest declared regular-web level (`Very High` before `High`); explicit `High` remains available for frozen comparison arms. Pro persists a null `mode_variant`. A stage resume reuses the persisted variant rather than silently selecting a new one.
 
 ## Parallel implementation v3 roles
 

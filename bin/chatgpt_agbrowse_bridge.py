@@ -1069,9 +1069,22 @@ def _mode_args(manifest: dict[str, Any]) -> list[str]:
     if label == "pro":
         return ["--model", "pro"]
     if label in {"deep research", "deep-research"}:
-        if variant not in {"high", "높음"}:
-            raise BridgeError("MODE_VARIANT_UNSUPPORTED", "new Deep Research work requires mode_variant=High")
-        return ["--family", "gpt-5.6-sol", "--model", "thinking", "--effort", "high", "--research", "deep"]
+        research_efforts = {
+            "high": "high",
+            "높음": "high",
+            "very high": "xhigh",
+            "매우 높음": "xhigh",
+            "xhigh": "xhigh",
+            "extra high": "xhigh",
+            "heavy": "xhigh",
+        }
+        effort = research_efforts.get(variant)
+        if effort is None:
+            raise BridgeError(
+                "MODE_VARIANT_UNSUPPORTED",
+                "new Deep Research work requires mode_variant=High or Very High",
+            )
+        return ["--family", "gpt-5.6-sol", "--model", "thinking", "--effort", effort, "--research", "deep"]
     regular_efforts = {
         "high": "high",
         "높음": "high",

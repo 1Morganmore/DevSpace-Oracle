@@ -203,7 +203,7 @@ def test_v2_accepts_very_high_mode(tmp_path: Path) -> None:
     assert runtime.manifest["mode_variant"] == "Very High"
 
 
-def test_v2_missing_mode_variant_defaults_to_exact_high(tmp_path: Path) -> None:
+def test_v2_missing_mode_variant_selects_highest_available_regular_level(tmp_path: Path) -> None:
     manifest = make_v2_manifest(tmp_path)
     value = json.loads(manifest.read_text(encoding="utf-8"))
     value.pop("mode_variant")
@@ -211,7 +211,7 @@ def test_v2_missing_mode_variant_defaults_to_exact_high(tmp_path: Path) -> None:
 
     runtime = RUNTIME.WebMultiRuntime(manifest, state_root=tmp_path / "state")
 
-    assert runtime.manifest["mode_variant"] == "High"
+    assert runtime.manifest["mode_variant"] == "Very High"
     assert not (tmp_path / "output").exists()
 
 

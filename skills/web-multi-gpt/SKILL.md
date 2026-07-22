@@ -55,13 +55,13 @@ The default compatibility manifest schema remains `codex.chatgpt.web-multi/v1`. 
 - `max_iterations` in `1..5` (default `2`)
 - `provider_failure_retry_limit` in `0..2` (default `1`)
 
-V1 retains `mode_variant: Very High` by default; `High` remains available for its frozen comparison arm. V2 upstream-parity manifests accept the exact values `High` and `Very High`, with `High` retained as the default when omitted. Any other value is rejected before any output, state, app, or browser side effect.
+V1 retains `mode_variant: Very High` by default; `High` remains available for its frozen comparison arm. V2 upstream-parity manifests accept the exact values `High` and `Very High`; when omitted, the strongest declared regular-web capability is selected (`Very High` before `High`). Any other value is rejected before any output, state, app, or browser side effect.
 
 For an opt-in dynamic upstream-parity run, use schema `codex.chatgpt.web-multi/v2` with the same common required fields plus:
 
 - `semantics_version: upstream-parity-v1`
 - `planner_policy: upstream-nonempty-prefix10` for literal nonempty-prefix-10 acceptance, or `strict-6-10` for the operating policy that requires 6 through 10 approaches
-- exact `mode_variant: High` or `mode_variant: Very High` (default `High` when omitted)
+- exact `mode_variant: High` or `mode_variant: Very High` (strongest declared level when omitted)
 - optional `agbrowse_contract_sha256`, exactly 64 lowercase hexadecimal characters matching the SHA-256 of the resolved `agbrowse_contract` file; when omitted, the existing contract-resolution compatibility path remains supported
 - no `solver_count` key at all, including `null`
 

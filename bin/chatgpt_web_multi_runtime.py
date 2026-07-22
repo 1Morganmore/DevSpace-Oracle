@@ -765,9 +765,15 @@ def validate_manifest(value: Mapping[str, Any], manifest_path: Path) -> dict[str
             "PROVIDER_FAILURE_RETRY_LIMIT_UNSUPPORTED",
             "provider_failure_retry_limit must be 0..2",
         )
-    # V2 keeps High as the compatibility default while permitting explicit
-    # Very High. V1 keeps its frozen historical Very High default.
-    mode_variant = str(value.get("mode_variant") or ("High" if schema == V2_SCHEMA else "Very High"))
+    # New v2 work selects the strongest regular-web level declared available;
+    # explicit High remains valid for frozen comparison arms. V1 keeps its
+    # historical Very High default for recovery compatibility.
+    default_mode_variant = (
+        str(PROMPTS.resolve_regular_mode_selection()["selected_mode_variant"])
+        if schema == V2_SCHEMA
+        else "Very High"
+    )
+    mode_variant = str(value.get("mode_variant") or default_mode_variant)
     if schema == V2_SCHEMA and mode_variant not in {"High", "Very High"}:
         raise WebMultiError(
             "MANIFEST_V2_MODE_VARIANT_INVALID",
