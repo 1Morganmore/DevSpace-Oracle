@@ -24,6 +24,25 @@ def load_state(name: str):
     return module
 
 
+def test_read_json_retries_transient_atomic_replace_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state = load_state("state_read_retry")
+    path = tmp_path / "active.lock"
+    path.write_text(json.dumps({"run_id": "run-1"}), encoding="utf-8")
+    original = state.Path.read_text
+    attempts = {"count": 0}
+
+    def flaky_read_text(self, *args, **kwargs):
+        if self == path and attempts["count"] < 2:
+            attempts["count"] += 1
+            raise FileNotFoundError("replace in progress")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(state.Path, "read_text", flaky_read_text)
+
+    assert state.read_json(path) == {"run_id": "run-1"}
+    assert attempts["count"] == 2
+
+
 def make_manifest(path: Path, question: str = "first") -> Path:
     path.write_text(
         json.dumps(

@@ -463,13 +463,32 @@ def exclusive_state_lock(path: Path, timeout_seconds: int = 120):
 
 
 def read_json(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
-    except Exception as exc:
-        raise StateError("STATE_UNREADABLE", f"cannot read JSON state: {path}", {"detail": str(exc)}) from exc
-    if not isinstance(value, dict):
-        raise StateError("STATE_INVALID", f"JSON object required: {path}")
-    return value
+    """Read an atomically published state file, tolerating a Windows replace race.
+
+    ``write_json_atomic`` publishes through ``os.replace``.  Antivirus/indexing
+    hooks and concurrent readers can nevertheless observe a short missing or
+    partially available window on Windows.  Retry only those transient read or
+    JSON-decode failures; a persistently malformed state still fails closed.
+    """
+    last_error: Exception | None = None
+    for attempt in range(6):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8-sig"))
+            if not isinstance(value, dict):
+                raise StateError("STATE_INVALID", f"JSON object required: {path}")
+            return value
+        except StateError:
+            raise
+        except (FileNotFoundError, PermissionError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+            last_error = exc
+            if attempt < 5:
+                time.sleep(0.02 * (attempt + 1))
+                continue
+            break
+        except Exception as exc:
+            last_error = exc
+            break
+    raise StateError("STATE_UNREADABLE", f"cannot read JSON state: {path}", {"detail": str(last_error)}) from last_error
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
