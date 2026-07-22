@@ -237,7 +237,9 @@ def test_fixed_registry_port_mismatch_blocks_without_dynamic_fallback(tmp_path: 
     )
 
     assert completed.returncode != 0
-    assert "FIXED_NGROK_CONTRACT_INVALID: fixed-port-registry-mismatch" in completed.stderr
+    # PowerShell may wrap a long Write-Error record at the host width.  The
+    # contract token, rather than physical line layout, is the assertion.
+    assert "FIXED_NGROK_CONTRACT_INVALID:fixed-port-registry-mismatch" in "".join(completed.stderr.split())
 
 
 def test_same_drive_project_reuses_drive_root_fixed_registry_entry(tmp_path: Path) -> None:
