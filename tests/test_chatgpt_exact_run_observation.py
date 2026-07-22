@@ -194,3 +194,27 @@ def test_live_exact_target_outweighs_temporary_session_web_url(monkeypatch, tmp_
     assert result["identity_mismatches"] == []
     assert result["observed"]["session_url_temporary"] is True
     assert result["observed"]["effective_canonical_url"] == record["conversation_url"]
+
+
+def test_retry_completed_cleanup_command_retries_only_pending_exact_cleanup(monkeypatch, tmp_path: Path, capsys) -> None:
+    _, record = _record(tmp_path)
+    record.update({"phase": "COMPLETE", "cleanup_pending": True})
+
+    class CleanupBridge(Bridge):
+        def __init__(self):
+            super().__init__(Store(tmp_path / "run.json", record))
+            self.cleaned = False
+
+        def cleanup_completed(self, run_dir: str, *, explicit_user_request: bool = False):
+            assert run_dir == str(tmp_path)
+            assert explicit_user_request is False
+            self.cleaned = True
+            self.store.record["cleanup_pending"] = False
+            return {"ok": True, "state": "closed-and-absent"}
+
+    bridge = CleanupBridge()
+    monkeypatch.setattr(RUN.BRIDGE, "Bridge", lambda state_root=None: bridge)
+
+    assert RUN.main(["--retry-completed-cleanup", str(tmp_path)]) == 0
+    assert bridge.cleaned is True
+    assert json.loads(capsys.readouterr().out)["result"]["cleanup_pending"] is False

@@ -356,6 +356,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--prepare-session", action="store_true")
     parser.add_argument("--recover-run")
+    parser.add_argument("--retry-completed-cleanup")
     parser.add_argument("--poll-run")
     parser.add_argument("--show-run")
     parser.add_argument("--observe-run")
@@ -399,12 +400,18 @@ def main(argv: Iterable[str] | None = None) -> int:
             result = {"ok": record.get("phase") == "ABANDONED_UNCERTAIN", "result": record}
         elif args.observe_run:
             result = {"ok": True, "result": observe_exact_run(args.observe_run, args.state_root)}
-        elif args.recover_run or args.poll_run or args.show_run:
+        elif args.recover_run or args.poll_run or args.show_run or args.retry_completed_cleanup:
             bridge = BRIDGE.Bridge(state_root=args.state_root)
             if args.recover_run:
                 record = bridge.recover(args.recover_run)
             elif args.poll_run:
                 record = bridge.poll(args.poll_run)
+            elif args.retry_completed_cleanup:
+                _, existing = bridge.store.load(args.retry_completed_cleanup)
+                if existing.get("phase") != "COMPLETE" or not bool(existing.get("cleanup_pending")):
+                    raise RuntimeError("--retry-completed-cleanup requires COMPLETE with cleanup_pending=true")
+                bridge.cleanup_completed(args.retry_completed_cleanup, explicit_user_request=False)
+                _, record = bridge.store.load(args.retry_completed_cleanup)
             else:
                 _, record = bridge.store.load(args.show_run)
             result = {"ok": True, "result": record}

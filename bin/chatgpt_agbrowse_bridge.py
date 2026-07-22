@@ -12,7 +12,7 @@ import sys
 import time
 import uuid
 from contextlib import contextmanager, nullcontext
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import urlsplit, urlunsplit
@@ -570,6 +570,91 @@ def _streaming_state(status: dict[str, Any]) -> bool | None:
         value = evidence.get("streaming") if isinstance(evidence, dict) else None
         return value if isinstance(value, bool) else None
     return None
+
+
+def classify_web_trace_activity(
+    session: Mapping[str, Any],
+    *,
+    now: datetime | None = None,
+    heartbeat_max_age_seconds: int = 90,
+) -> dict[str, Any]:
+    """Classify a persisted app trace without treating a stale trace as work.
+
+    A provider can continue streaming after the app-side request trace has
+    ended.  That is explicitly *not* authority to stop, close, or resubmit
+    the exact run.  Conversely, an unmatched request start or a live
+    heartbeat is positive work evidence even if a coarse session status is
+    stale.  Keep the evidence fields small and deterministic so callers can
+    persist this classification in a recovery event.
+    """
+    trace = session.get("trace") if isinstance(session.get("trace"), list) else []
+    now = now or datetime.now(timezone.utc)
+    freshness_cutoff = now - timedelta(seconds=max(1, heartbeat_max_age_seconds))
+    starts: dict[str, datetime] = {}
+    ends: set[str] = set()
+    heartbeats: dict[str, datetime] = {}
+    http: list[str] = []
+    active_markers: list[str] = []
+    for item in trace:
+        if not isinstance(item, Mapping):
+            continue
+        marker = str(item.get("intentId") or item.get("requestId") or item.get("id") or "trace")
+        status = str(item.get("status") or item.get("state") or "").casefold()
+        start = item.get("requestStartAt") or item.get("startedAt") or item.get("startAt")
+        end = item.get("requestEndAt") or item.get("endedAt") or item.get("endAt")
+        heartbeat = item.get("heartbeatAt") or item.get("lastHeartbeatAt")
+        response = item.get("httpStatus") or item.get("statusCode")
+        def parse_time(value: Any) -> datetime | None:
+            if not isinstance(value, str) or not value.strip():
+                return None
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+        parsed_start = parse_time(start)
+        parsed_heartbeat = parse_time(heartbeat)
+        if parsed_start:
+            starts[marker] = max(starts.get(marker, parsed_start), parsed_start)
+        if end:
+            ends.add(marker)
+        if parsed_heartbeat:
+            heartbeats[marker] = max(heartbeats.get(marker, parsed_heartbeat), parsed_heartbeat)
+        if response is not None:
+            http.append(marker)
+        if status in {"active", "running", "pending", "streaming", "in_progress"}:
+            active_markers.append(marker)
+    unmatched_starts = sorted(marker for marker in starts if marker not in ends)
+    fresh_unmatched_starts = sorted(marker for marker in unmatched_starts if starts[marker] >= freshness_cutoff)
+    fresh_heartbeats = sorted(marker for marker, value in heartbeats.items() if value >= freshness_cutoff)
+    # A stale ``active`` marker or heartbeat is historical evidence only. An
+    # unmatched start is live work only inside the bounded freshness window.
+    work_active = bool(fresh_unmatched_starts or fresh_heartbeats)
+    streaming = session.get("streaming")
+    if not isinstance(streaming, bool):
+        streaming = str(session.get("status") or "").casefold() in {"streaming", "response_in_progress"}
+    state = (
+        "work-active"
+        if work_active
+        else "provider_streaming_app_trace_quiescent"
+        if streaming
+        else "trace-quiescent"
+    )
+    return {
+        "state": state,
+        "work_active": work_active,
+        "provider_streaming": bool(streaming),
+        "request_starts": sorted(starts),
+        "request_ends": sorted(ends),
+        "heartbeats": sorted(heartbeats),
+        "http_responses": sorted(set(http)),
+        "unmatched_request_starts": unmatched_starts,
+        "fresh_unmatched_request_starts": fresh_unmatched_starts,
+        "fresh_heartbeats": fresh_heartbeats,
+        "heartbeat_max_age_seconds": max(1, heartbeat_max_age_seconds),
+        "active_markers": sorted(set(active_markers)),
+    }
 
 
 def _snapshot_role_name_refs(snapshot: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -3885,6 +3970,11 @@ class Bridge:
         """Observe only the send-returned target until it binds or settles."""
         evidence: list[dict[str, Any]] = []
         observation: dict[str, Any] = {"state": "absent", "match_count": 0}
+        started_at = datetime.now(timezone.utc)
+        # This metadata is persisted in the immutable submission receipt.  A
+        # later recovery can therefore distinguish a temporary WEB locator
+        # that exhausted its bounded promotion window from a fresh send.
+        promotion_deadline = started_at + timedelta(seconds=max(1, attempts))
         for index in range(max(1, attempts)):
             tabs, tabs_evidence = self._recovery_tabs(
                 run_dir=run_dir,
@@ -3895,9 +3985,19 @@ class Bridge:
             evidence.append(tabs_evidence)
             observation = exact_target_observation(tabs, target_id)
             if observation.get("state") in {"canonical", "ambiguous", "drifted"}:
+                observation["temporary_promotion"] = {
+                    "attempts": index + 1,
+                    "deadline_at": promotion_deadline.isoformat().replace("+00:00", "Z"),
+                    "deadline_exhausted": False,
+                }
                 return observation, evidence
             if index + 1 < attempts:
                 time.sleep(0.25)
+        observation["temporary_promotion"] = {
+            "attempts": max(1, attempts),
+            "deadline_at": promotion_deadline.isoformat().replace("+00:00", "Z"),
+            "deadline_exhausted": observation.get("state") == "temporary",
+        }
         return observation, evidence
 
     def _recover_session_identity_from_store(
@@ -4502,6 +4602,14 @@ class Bridge:
         completed: dict[str, subprocess.CompletedProcess[str]] = {}
         specs = {
             "active": [executable, "active-tab", "--json"],
+            "session": [
+                executable,
+                "web-ai",
+                "sessions",
+                "show",
+                str(record.get("session_id") or ""),
+                "--json",
+            ],
             "status": [
                 executable,
                 "web-ai",
@@ -4542,6 +4650,7 @@ class Bridge:
 
         try:
             active_payload = _json_output(completed["active"].stdout)
+            session_payload = _json_output(completed["session"].stdout)
             status_payload = _json_output(completed["status"].stdout)
             snapshot_payload = _json_output(completed["snapshot"].stdout)
         except BridgeError as exc:
@@ -4579,6 +4688,32 @@ class Bridge:
                 "evidence": sanitize_evidence(commands),
             }
 
+        session = (
+            session_payload.get("session")
+            if isinstance(session_payload, dict) and isinstance(session_payload.get("session"), dict)
+            else session_payload
+        )
+        session = session if isinstance(session, Mapping) else {}
+        session_id = str(session.get("sessionId") or session.get("session_id") or "")
+        session_target = str(session.get("targetId") or session.get("target_id") or session.get("tabId") or "")
+        session_url = str(session.get("conversationUrl") or session.get("conversation_url") or "")
+        if (
+            session_id != str(record.get("session_id") or "")
+            or session_target != target_id
+            or session_url != conversation_url
+        ):
+            return {
+                "ok": False,
+                "reason": "diagnostic-exact-session-mismatch",
+                "expected_session_id": record.get("session_id"),
+                "expected_target_id": target_id,
+                "expected_url": conversation_url,
+                "session_id": session_id or None,
+                "session_target_id": session_target or None,
+                "session_url": session_url or None,
+                "evidence": sanitize_evidence(commands),
+            }
+
         snapshot_text = str(snapshot_payload.get("text") or "")
         page_text = str(completed["text"].stdout or "")
         visible = f"{snapshot_text}\n{page_text}"
@@ -4590,11 +4725,15 @@ class Bridge:
             label in visible
             for label in ("답변 중지", "Stop generating", "Stop response")
         )
+        trace_session = dict(session)
+        trace_session["streaming"] = _streaming_state(status_payload)
+        trace_activity = classify_web_trace_activity(trace_session)
         return {
             "ok": True,
             "target_id": target_id,
             "conversation_url": conversation_url,
             "streaming": _streaming_state(status_payload),
+            "trace_activity": trace_activity,
             "app_policy": str(manifest.get("app_policy") or ""),
             "get_answer_now_available": get_answer_now,
             "stop_control_present": stop_control,
@@ -6771,12 +6910,18 @@ class Bridge:
                     and diagnostic.get("app_policy") == "required"
                     and diagnostic.get("stop_control_present") is True
                 )
+                trace_quiescent = bool(
+                    isinstance(diagnostic.get("trace_activity"), Mapping)
+                    and diagnostic["trace_activity"].get("state") == "provider_streaming_app_trace_quiescent"
+                )
                 return self.store.transition(
                     run_dir,
                     "RECOVERY_REQUIRED",
                     recovery_event={
                         "kind": (
-                            "exact-url-provider-long-running-app-work"
+                            "exact-url-provider-streaming-app-trace-quiescent"
+                            if long_running_app_work and trace_quiescent
+                            else "exact-url-provider-long-running-app-work"
                             if long_running_app_work
                             else "exact-url-read-only-wait-timeout"
                         ),
@@ -6784,7 +6929,9 @@ class Bridge:
                         "target_id": target_id,
                         "diagnostic": sanitize_evidence(diagnostic),
                         "next_action": (
-                            "preserve this exact target; do not resubmit or stop; re-observe the exact URL later; get-answer-now remains optional and requires explicit user authorization"
+                            "preserve this exact target; provider streaming continues but the exact app trace is quiescent; do not stop, close, or resubmit; re-observe this same run later"
+                            if long_running_app_work and trace_quiescent
+                            else "preserve this exact target; do not resubmit or stop; re-observe the exact URL later; get-answer-now remains optional and requires explicit user authorization"
                             if long_running_app_work
                             else "preserve this exact target and retry only exact-URL observation"
                         ),
@@ -6875,15 +7022,26 @@ class Bridge:
                 and diagnostic.get("app_policy") == "required"
                 and diagnostic.get("stop_control_present") is True
             ):
+                trace_quiescent = bool(
+                    isinstance(diagnostic.get("trace_activity"), Mapping)
+                    and diagnostic["trace_activity"].get("state") == "provider_streaming_app_trace_quiescent"
+                )
                 return self.store.transition(
                     run_dir,
                     "RECOVERY_REQUIRED",
                     recovery_event={
-                        "kind": "exact-url-provider-long-running-app-work",
+                        "kind": (
+                            "exact-url-provider-streaming-app-trace-quiescent"
+                            if trace_quiescent else "exact-url-provider-long-running-app-work"
+                        ),
                         "conversation_url": direct.get("conversation_url"),
                         "target_id": direct.get("current_target_id"),
                         "diagnostic": sanitize_evidence(diagnostic),
-                        "next_action": "preserve this exact target; do not resubmit or stop; re-observe the exact URL later; get-answer-now remains optional and requires explicit user authorization",
+                        "next_action": (
+                            "preserve this exact target; provider streaming continues but the exact app trace is quiescent; do not stop, close, or resubmit; re-observe this same run later"
+                            if trace_quiescent
+                            else "preserve this exact target; do not resubmit or stop; re-observe the exact URL later; get-answer-now remains optional and requires explicit user authorization"
+                        ),
                     },
                 )
         # Once an exact conversation URL exists, stale agbrowse session URLs
