@@ -16,7 +16,7 @@ import os
 import re
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -459,7 +459,13 @@ def dispatch_ready(parent_run_dir: Path, manifest: Mapping[str, Any], capacity_r
     return dispatched
 
 
-def prepare(manifest_path: Path, graph_path: Path) -> dict[str, Any]:
+def prepare(
+    manifest_path: Path,
+    graph_path: Path,
+    *,
+    initial_capacity_receipt: Mapping[str, Any] | None = None,
+    initial_capacity_receipt_provider: Callable[[Mapping[str, Any]], Mapping[str, Any] | None] | None = None,
+) -> dict[str, Any]:
     manifest, project_root, output_dir = manifest_paths(manifest_path)
     graph_result = read_json(graph_path)
     validate_graph_against_manifest(graph_result, manifest)
@@ -512,7 +518,14 @@ def prepare(manifest_path: Path, graph_path: Path) -> dict[str, Any]:
         write_json(files["bound_graph"], bound)
         write_json(files["runtime_state"], runtime_state)
         write_json(files["control"], control)
-        dispatched = dispatch_ready(parent_run_dir, manifest)
+        if initial_capacity_receipt is not None and initial_capacity_receipt_provider is not None:
+            raise DriverError("INITIAL_CAPACITY_RECEIPT_AMBIGUOUS", "only one initial capacity source is allowed")
+        initial_receipt = (
+            initial_capacity_receipt_provider(control)
+            if initial_capacity_receipt_provider is not None
+            else initial_capacity_receipt
+        )
+        dispatched = dispatch_ready(parent_run_dir, manifest, initial_receipt)
         output_dir.mkdir(parents=True, exist_ok=True)
         pointer = {
             "schema": "codex.chatgpt.parallel-implementation-pointer/v1",
@@ -696,20 +709,93 @@ def _default_child_executor(dispatch: Mapping[str, Any], control: Mapping[str, A
 def run_dispatch_wave(
     dispatches: list[Mapping[str, Any]], control: Mapping[str, Any],
     *, executor: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] = _default_child_executor,
+    on_completion: Callable[[Mapping[str, Any], Mapping[str, Any] | None, Exception | None], None] | None = None,
+    raise_on_error: bool = True,
 ) -> list[Mapping[str, Any]]:
-    """Launch a bounded wave concurrently and return results in dispatch order.
+    """Launch a bounded wave and durably observe each child as it completes.
 
     A separate executor is injected in tests; production uses the exact thinking
-    runner with one process/session per already-isolated unit workspace.
+    runner with one process/session per already-isolated unit workspace.  The
+    completion callback runs once per completed future, before waiting for any
+    slower sibling.  ``execute`` uses it to durably record each exact child
+    result, so a later sibling failure cannot cause an already completed child
+    to be submitted again.
     """
     if not dispatches:
         return []
     roots = [str(item.get("unit_workspace_root") or "") for item in dispatches]
     if any(not root for root in roots) or len(roots) != len(set(roots)):
         raise DriverError("CHILD_WAVE_WORKSPACE_NOT_DISTINCT", "each concurrently launched child requires one distinct exact unit workspace")
+    results: list[Mapping[str, Any] | None] = [None] * len(dispatches)
+    failures: list[tuple[Mapping[str, Any], Exception]] = []
     with ThreadPoolExecutor(max_workers=len(dispatches), thread_name_prefix="parallel-implementation") as pool:
-        futures = [pool.submit(executor, dispatch, control) for dispatch in dispatches]
-        return [future.result() for future in futures]
+        future_dispatches = {
+            pool.submit(executor, dispatch, control): (index, dispatch)
+            for index, dispatch in enumerate(dispatches)
+        }
+        for future in as_completed(future_dispatches):
+            index, dispatch = future_dispatches[future]
+            try:
+                execution = future.result()
+            except Exception as exc:
+                failures.append((dispatch, exc))
+                if on_completion is not None:
+                    on_completion(dispatch, None, exc)
+                continue
+            results[index] = execution
+            if on_completion is not None:
+                on_completion(dispatch, execution, None)
+    if failures and raise_on_error:
+        dispatch, exc = failures[0]
+        raise DriverError(
+            "CHILD_WAVE_EXECUTION_FAILED",
+            "one or more exact child runners failed after completed siblings were observed",
+            {"unit_id": dispatch.get("unit_id"), "failure_count": len(failures)},
+        ) from exc
+    return [item for item in results if item is not None]
+
+
+def _record_child_recovery(
+    parent_run_dir: Path,
+    dispatch_identity: Mapping[str, Any],
+    error: Exception,
+) -> dict[str, Any]:
+    """Durably hold only the failed exact child for recovery.
+
+    A worker exception is post-send ambiguous by default: the child may have
+    submitted work before its local process failed.  Do not redispatch it here.
+    Its siblings are independently persisted by the completion callback.
+    """
+    control, files, state, _ = load_control(parent_run_dir)
+    unit_id = str(dispatch_identity.get("unit_id") or "")
+    attempt_id = str(dispatch_identity.get("attempt_id") or "")
+    dispatch = next(
+        (
+            item for item in control.get("dispatches") or []
+            if item.get("unit_id") == unit_id and item.get("attempt_id") == attempt_id
+        ),
+        None,
+    )
+    unit = state.get("units", {}).get(unit_id)
+    if not isinstance(dispatch, dict) or not isinstance(unit, dict):
+        raise DriverError("CHILD_RECOVERY_IDENTITY_MISSING", "completed child callback has no exact active dispatch identity")
+    if unit.get("state") not in {"ACTIVE", "RECOVERY_REQUIRED"}:
+        return {"status": "ALREADY_SETTLED", "unit_id": unit_id, "attempt_id": attempt_id}
+    error_code = str(getattr(error, "code", type(error).__name__))
+    RUNTIME.fail_unit(state, unit_id=unit_id, code="CHILD_EXECUTION_UNCERTAIN", uncertain=True)
+    dispatch["state"] = "RECOVERY_REQUIRED"
+    receipt = {
+        "unit_id": unit_id,
+        "attempt_id": attempt_id,
+        "status": "RECOVERY_REQUIRED",
+        "error_code": error_code,
+        "error_message": str(error),
+    }
+    control.setdefault("unit_receipts", []).append(receipt)
+    control["staging_common_metadata"] = GITISO.common_metadata_identity(files["staging"])
+    write_json(files["runtime_state"], state)
+    write_json(files["control"], control)
+    return {"status": "RECOVERY_REQUIRED", "receipt": receipt}
 
 
 def _find_answer_path(value: Any) -> Path | None:
@@ -766,21 +852,50 @@ def execute(
     while True:
         control, _, state, _ = load_control(parent_run_dir)
         manifest = read_json(Path(control["manifest_path"]))
-        supplied = capacity_receipt_provider(control, state, wave) if capacity_receipt_provider else None
-        dispatches = dispatch_ready(parent_run_dir, manifest, supplied)
+        # `prepare` has already materialized the first bounded wave.  Execute
+        # those exact owned child manifests before considering any new slot;
+        # otherwise an ACTIVE unit would be mistaken for an external runner.
+        dispatches = [
+            dict(item)
+            for item in control.get("dispatches") or []
+            if item.get("state") == "AWAITING_PROVIDER_RESULT"
+        ]
+        if not dispatches:
+            supplied = capacity_receipt_provider(control, state, wave) if capacity_receipt_provider else None
+            dispatches = dispatch_ready(parent_run_dir, manifest, supplied)
         control, files, state, _ = load_control(parent_run_dir)
         if not dispatches:
             if any(unit.get("state") == "ACTIVE" for unit in state["units"].values()):
                 raise DriverError("CHILD_WAVE_ACTIVE_EXTERNALLY", "cannot supervise a wave while an exact child is already active")
             break
         receipts.append(str(control.get("capacity_receipt", {}).get("capacity_receipt_sha256") or ""))
-        executions = run_dispatch_wave(dispatches, control, executor=executor)
-        for dispatch, execution in zip(dispatches, executions):
-            result = _unit_result_from_execution(execution)
-            result_path = files["results"] / str(dispatch["unit_id"]) / str(dispatch["attempt_id"]) / "provider-result.json"
-            write_json(result_path, result)
-            outcome = record_unit(parent_run_dir, result_path, dispatch_next=False)
-            unit_outcomes.append(outcome)
+        def persist_completion(
+            dispatch: Mapping[str, Any],
+            execution: Mapping[str, Any] | None,
+            error: Exception | None,
+        ) -> None:
+            if error is not None:
+                unit_outcomes.append(_record_child_recovery(parent_run_dir, dispatch, error))
+                return
+            assert execution is not None
+            try:
+                result = _unit_result_from_execution(execution)
+                result_path = files["results"] / str(dispatch["unit_id"]) / str(dispatch["attempt_id"]) / "provider-result.json"
+                write_json(result_path, result)
+                unit_outcomes.append(record_unit(parent_run_dir, result_path, dispatch_next=False))
+            except Exception as exc:
+                # A response which cannot be safely captured/validated is also
+                # post-send ambiguous.  Keep that exact child for recovery;
+                # do not discard already durable sibling outcomes.
+                unit_outcomes.append(_record_child_recovery(parent_run_dir, dispatch, exc))
+
+        run_dispatch_wave(
+            dispatches,
+            control,
+            executor=executor,
+            on_completion=persist_completion,
+            raise_on_error=False,
+        )
         wave += 1
     _, _, state, _ = load_control(parent_run_dir)
     final = finalize(parent_run_dir) if finalize_when_ready and RUNTIME.apply_ready(state) else None
@@ -793,6 +908,7 @@ def main() -> int:
     prepare_parser = sub.add_parser("prepare")
     prepare_parser.add_argument("--manifest", required=True)
     prepare_parser.add_argument("--graph", required=True)
+    prepare_parser.add_argument("--capacity-receipt")
     record_parser = sub.add_parser("record-unit")
     record_parser.add_argument("--parent-run-dir", required=True)
     record_parser.add_argument("--result", required=True)
@@ -809,7 +925,12 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command == "prepare":
-            value = prepare(Path(args.manifest).resolve(strict=True), Path(args.graph).resolve(strict=True))
+            initial_receipt = read_json(Path(args.capacity_receipt).resolve(strict=True)) if args.capacity_receipt else None
+            value = prepare(
+                Path(args.manifest).resolve(strict=True),
+                Path(args.graph).resolve(strict=True),
+                initial_capacity_receipt=initial_receipt,
+            )
         elif args.command == "record-unit":
             value = record_unit(Path(args.parent_run_dir).resolve(strict=True), Path(args.result).resolve(strict=True))
         elif args.command == "finalize":

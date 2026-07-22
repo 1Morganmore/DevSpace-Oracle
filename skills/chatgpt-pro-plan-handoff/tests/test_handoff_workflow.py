@@ -137,6 +137,65 @@ def add_selected_contract(manifest_path: Path, contract_path: Path) -> None:
     manifest_path.write_text(json.dumps(value), encoding="utf-8")
 
 
+def add_parallel_execution(manifest_path: Path, *, with_capacity: bool = True) -> tuple[Path, Path, Path | None]:
+    value = json.loads(manifest_path.read_text(encoding="utf-8"))
+    root = Path(value["workspace"]["root"])
+    v3 = manifest_path.parent / "parallel-v3.json"
+    graph = manifest_path.parent / "implementation-graph.json"
+    receipt = manifest_path.parent / "capacity-receipt.json"
+    v3.write_text(
+        json.dumps(
+            {
+                "schema": "codex.chatgpt.comprehensive-workflow/v3",
+                "workflow_id": "parallel-test",
+                "project_root": str(root),
+                "question": value["question"],
+                "output_dir": str(manifest_path.parent / "parallel-output"),
+                "chatgpt_app_name": value["workspace"]["chatgpt_app_name"],
+                "features": {"parallel_implementation_v1": True},
+                "parallel_implementation": {
+                    "enabled": True,
+                    "max_units": 2,
+                    "test_registry": {"unit": {"argv": ["python", "-V"], "timeout_seconds": 10}},
+                    "full_test_ids": ["unit"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    graph.write_text(
+        json.dumps(
+            {
+                "schema": "codex.chatgpt.implementation-graph-result/v1",
+                "units": [{
+                    "unit_id": "unit-a", "required": True, "mission": "implement the approved change",
+                    "claimed_paths": ["src.py"], "depends_on": [], "test_ids": ["unit"],
+                }],
+            }
+        ),
+        encoding="utf-8",
+    )
+    if with_capacity:
+        receipt.write_text(
+            json.dumps(
+                {
+                    "available_child_sessions": 2,
+                    "observed_at": "2026-07-22T00:00:00Z",
+                    "source": "test-capacity-observer",
+                }
+            ),
+            encoding="utf-8",
+        )
+    value["parallel_execution"] = {
+        "enabled": True,
+        "workflow_v3_manifest": str(v3),
+        "implementation_graph": str(graph),
+        **({"capacity_receipt": str(receipt)} if with_capacity else {}),
+    }
+    manifest_path.write_text(json.dumps(value), encoding="utf-8")
+    return v3, graph, receipt if with_capacity else None
+
+
 def test_published_schemas_accept_gpt_comprehensive_plan_contract(tmp_path: Path) -> None:
     manifest_path = make_manifest(tmp_path, "gpt-comprehensive")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -260,6 +319,8 @@ class ScriptedRuntime:
                 advisory_paths = [Path(item) for item in manifest["read_only_paths"][1:] if Path(item).name.startswith("advisory-")]
                 if advisory_paths:
                     envelope["input_advisory_sha256"] = file_sha256(advisory_paths[0])
+        elif stage == "pro-advisory":
+            envelope = {"schema": "codex.chatgpt.pro-advisory-test/v1", **common, "status": "complete"}
         else:
             mission_path = next(Path(p) for p in manifest["read_only_paths"] if Path(p).name == "execution-mission.json")
             mission = json.loads(mission_path.read_text(encoding="utf-8"))
@@ -289,6 +350,7 @@ class ScriptedRuntime:
             "final_text_captured": True,
             "effective_mode_label": manifest["mode_label"],
             "effective_mode_variant": manifest.get("mode_variant"),
+            "regular_mode_selection": manifest.get("regular_mode_selection"),
             "fallback_reason": None,
             "conversation_url": f"https://chatgpt.com/c/{url_id}",
             "workflow_correlation": corr,
@@ -394,7 +456,7 @@ class FakeWebMultiRuntime:
                     "manifest_schema": "codex.chatgpt.web-multi/v2",
                     "semantics_version": "upstream-parity-v1",
                     "planner_policy": "upstream-nonempty-prefix10",
-                    "mode_variant": "High",
+                    "mode_variant": "Very High",
                     "role_session_target_url_provenance": [
                         {
                             "stage_id": "planner",
@@ -407,6 +469,18 @@ class FakeWebMultiRuntime:
                 }
             )
         return result
+
+
+class FakeParallelImplementationRuntime:
+    def __init__(self) -> None:
+        self.calls: list[tuple[Path, Path, Path]] = []
+
+    def execute(self, workflow_manifest_path: Path, graph_path: Path, capacity_receipt_path: Path):
+        self.calls.append((workflow_manifest_path, graph_path, capacity_receipt_path))
+        return {
+            "prepared": {"status": "PREPARED", "parent_run_dir": "C:/parallel-parent"},
+            "execution": {"status": "FINALIZED", "final": {"status": "IMPLEMENTED"}},
+        }
 
 
 def test_manifest_rejects_backend_and_runtime_override(tmp_path):
@@ -478,46 +552,83 @@ def test_comprehensive_plan_uses_regular_gpt_and_app(tmp_path):
     binding = driver._binding(state, "gpt-plan", 1)
     manifest = driver._manifest(state, binding, "plan")
     assert manifest["mode_label"] == "GPT-5.6"
-    assert manifest["mode_variant"] == "High"
+    assert manifest["mode_variant"] == "Very High"
+    assert manifest["regular_mode_selection"]["selected_mode_variant"] == "Very High"
     assert manifest["app_policy"] == "required"
     assert manifest["files"] == [manifest["prompt_file"]]
 
 
-def test_comprehensive_inserts_app_only_multi_gpt_before_advisory_bound_review(tmp_path):
+def test_comprehensive_selected_advisory_uses_attachment_only_pro_before_review(tmp_path):
     events = []
     runtime = ScriptedRuntime(["PASS"], events=events)
-    web_multi = FakeWebMultiRuntime(events=events)
-
     result = ProPlanHandoffDriver(
         make_v2_manifest(tmp_path, advisory_policy="require"),
         runtime=runtime,
-        web_multi_runtime=web_multi,
     ).run()
 
-    assert events == ["gpt-plan", "web-multi", "gpt-review", "gpt-orchestrator"]
+    assert events == ["gpt-plan", "pro-advisory", "gpt-review", "gpt-orchestrator"]
     assert result["advisory_sha256"] == file_sha256(Path(result["advisory_path"]))
-    assert web_multi.manifests[0]["chatgpt_app_name"] == "CodexPro-Test"
-    assert web_multi.manifests[0]["mode_variant"] == "High"
-    assert "solver_count" not in web_multi.manifests[0]
+    manifest = runtime.manifests[1]
+    assert manifest["mode_label"] == "Pro"
+    assert manifest["app_policy"] == "forbidden"
+    assert manifest["chatgpt_app_name"] is None
+
+
+def test_comprehensive_pass_invokes_parallel_v3_children_when_capacity_is_attested(tmp_path: Path) -> None:
+    manifest_path = make_v2_manifest(tmp_path)
+    v3, graph, receipt = add_parallel_execution(manifest_path)
+    assert receipt is not None
+    events: list[str] = []
+    runtime = ScriptedRuntime(["PASS"], events=events)
+    parallel = FakeParallelImplementationRuntime()
+
+    result = ProPlanHandoffDriver(
+        manifest_path,
+        runtime=runtime,
+        parallel_implementation_runtime=parallel,
+    ).run()
+
+    assert events == ["gpt-plan", "gpt-review"]
+    assert parallel.calls == [(v3.resolve(), graph.resolve(), receipt.resolve())]
+    assert result["implementation_route"]["selected"] is True
+    assert result["parallel_implementation_result"]["execution"]["status"] == "FINALIZED"
+    mission = json.loads(Path(result["execution_mission_path"]).read_text(encoding="utf-8"))
+    assert mission["execution_parallelism"]["owner"] == "parallel-v3-web-gpt-implementers"
+    assert mission["execution_parallelism"]["same_project_web_submissions"] == "capacity-bound exact child sessions"
+
+
+def test_comprehensive_parallel_without_capacity_falls_back_to_single_command(tmp_path: Path) -> None:
+    manifest_path = make_v2_manifest(tmp_path)
+    add_parallel_execution(manifest_path, with_capacity=False)
+    events: list[str] = []
+    runtime = ScriptedRuntime(["PASS"], events=events)
+    parallel = FakeParallelImplementationRuntime()
+
+    result = ProPlanHandoffDriver(
+        manifest_path,
+        runtime=runtime,
+        parallel_implementation_runtime=parallel,
+    ).run()
+
+    assert events == ["gpt-plan", "gpt-review", "gpt-orchestrator"]
+    assert parallel.calls == []
+    assert result["implementation_route"]["reason"] == "capacity-receipt-absent"
+    assert result["orchestrator_envelope"]["status"] == "complete"
 
 
 def test_comprehensive_revise_repeats_fresh_plan_advisory_review_sequence(tmp_path):
     events = []
     runtime = ScriptedRuntime(["REVISE", "PASS"], events=events)
-    web_multi = FakeWebMultiRuntime(events=events)
-
     result = ProPlanHandoffDriver(
         make_v2_manifest(tmp_path, advisory_policy="require"),
         runtime=runtime,
-        web_multi_runtime=web_multi,
     ).run()
 
     assert events == [
-        "gpt-plan", "web-multi", "gpt-review",
-        "gpt-plan", "web-multi", "gpt-review",
+        "gpt-plan", "pro-advisory", "gpt-review",
+        "gpt-plan", "pro-advisory", "gpt-review",
         "gpt-orchestrator",
     ]
-    assert len(web_multi.manifests) == 2
     assert Path(result["advisory_path"]).name == "advisory-2.json"
 
 
@@ -556,6 +667,19 @@ def test_v2_published_workflow_schema_accepts_explicit_decision_inputs(tmp_path:
     assert validate_manifest(value)["schema"] == "codex.chatgpt.comprehensive-workflow/v2"
 
 
+def test_v2_schema_accepts_strict_optional_parallel_execution_reference(tmp_path: Path) -> None:
+    manifest_path = make_v2_manifest(tmp_path)
+    add_parallel_execution(manifest_path)
+    value = json.loads(manifest_path.read_text(encoding="utf-8"))
+    schema = json.loads(
+        (Path(__file__).resolve().parents[1] / "schemas" / "workflow-v2.schema.json").read_text(encoding="utf-8")
+    )
+    validate_json_schema(value, schema)
+    value["parallel_execution"] = {"enabled": False, "capacity_receipt": "must-not-exist.json"}
+    with pytest.raises(ValidationError):
+        validate_json_schema(value, schema)
+
+
 def test_v2_selected_contract_is_exactly_propagated_and_identity_bound(tmp_path: Path) -> None:
     contract = tmp_path / "captured-agbrowse-0.2.0.json"
     contract.write_text(DEFAULT_CONTRACT_PATH.read_text(encoding="utf-8"), encoding="utf-8")
@@ -566,10 +690,8 @@ def test_v2_selected_contract_is_exactly_propagated_and_identity_bound(tmp_path:
     )
     add_selected_contract(manifest_path, contract)
     runtime = ScriptedRuntime(["PASS"])
-    web_multi = FakeWebMultiRuntime()
-
     result = ProPlanHandoffDriver(
-        manifest_path, runtime=runtime, web_multi_runtime=web_multi
+        manifest_path, runtime=runtime
     ).run()
 
     expected_path = str(contract)
@@ -578,8 +700,9 @@ def test_v2_selected_contract_is_exactly_propagated_and_identity_bound(tmp_path:
     assert result["agbrowse_contract_sha256"] == expected_hash
     assert all(item["agbrowse_contract"] == expected_path for item in runtime.manifests)
     assert all(item["agbrowse_contract_sha256"] == expected_hash for item in runtime.manifests)
-    assert web_multi.manifests[0]["agbrowse_contract"] == expected_path
-    assert web_multi.manifests[0]["agbrowse_contract_sha256"] == expected_hash
+    advisory_manifest = next(item for item in runtime.manifests if item["workflow_route"] == "attachment-only-pro" and item["mode_label"] == "Pro")
+    assert advisory_manifest["agbrowse_contract"] == expected_path
+    assert advisory_manifest["agbrowse_contract_sha256"] == expected_hash
 
 
 def test_v2_relative_contract_is_canonicalized_once_for_all_children(tmp_path: Path, monkeypatch) -> None:
@@ -654,6 +777,7 @@ def test_v2_auto_skips_optional_stages_and_binds_skip_descriptors(tmp_path: Path
     assert "no delegated strategy search" in parallelism["local_codex"]
     assert "internal lanes or parallel tool calls" in prompt
     assert "do not return strategy search or implementation to local codex" in prompt.casefold()
+    assert orchestrator_manifest["workflow_route"] == "command"
 
 
 def test_v2_research_trigger_runs_app_backed_deep_stage_at_high(tmp_path: Path) -> None:
@@ -674,7 +798,7 @@ def test_v2_research_trigger_runs_app_backed_deep_stage_at_high(tmp_path: Path) 
     stage_manifest = json.loads(
         (driver.stages_dir / "deep-research-attempt-1" / "stage.manifest.json").read_text(encoding="utf-8")
     )
-    assert stage_manifest["mode_variant"] == "High"
+    assert stage_manifest["mode_variant"] == "Very High"
     assert stage_manifest["app_policy"] == "required"
     assert stage_manifest["chatgpt_app_name"] == "CodexPro-Test"
     assert stage_manifest["research_selection_transport"] == "preselected-research"
@@ -688,26 +812,33 @@ def test_v2_research_trigger_runs_app_backed_deep_stage_at_high(tmp_path: Path) 
         {"cross_component_interfaces": 2},
     ],
 )
-def test_v2_advisory_risk_gate_runs_dynamic_high_web_multi(tmp_path: Path, kwargs: dict) -> None:
+def test_v2_advisory_risk_gate_runs_attachment_only_pro_advisory(tmp_path: Path, kwargs: dict) -> None:
     events: list[str] = []
-    web_multi = FakeWebMultiRuntime(events=events)
-
+    runtime = ScriptedRuntime(["PASS"], events=events)
     result = ProPlanHandoffDriver(
         make_v2_manifest(tmp_path, **kwargs),
-        runtime=ScriptedRuntime(["PASS"], events=events),
-        web_multi_runtime=web_multi,
+        runtime=runtime,
     ).run()
 
-    assert events == ["gpt-plan", "web-multi", "gpt-review", "gpt-orchestrator"]
-    assert len(web_multi.manifests) == 1
-    manifest = web_multi.manifests[0]
-    assert manifest["schema"] == "codex.chatgpt.web-multi/v2"
-    assert manifest["mode_variant"] == "High"
-    assert manifest["planner_policy"] == "upstream-nonempty-prefix10"
-    assert manifest["semantics_version"] == "upstream-parity-v1"
-    assert "solver_count" not in manifest
+    assert events == ["gpt-plan", "pro-advisory", "gpt-review", "gpt-orchestrator"]
+    advisory_manifest = runtime.manifests[1]
+    assert advisory_manifest["workflow_route"] == "attachment-only-pro"
+    assert advisory_manifest["app_policy"] == "forbidden"
     descriptor = json.loads(Path(result["advisory_descriptor_path"]).read_text(encoding="utf-8"))
     assert descriptor["decision"] == "run"
+
+
+def test_non_pro_selection_is_immutable_and_rejects_downgrade(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", "Very High,High")
+    driver = ProPlanHandoffDriver(make_v2_manifest(tmp_path), runtime=ScriptedRuntime())
+    state = driver.prepare()
+    manifest = driver._manifest(state, driver._binding(state, "gpt-plan", 1), "plan")
+    assert manifest["mode_variant"] == "Very High"
+    assert manifest["regular_mode_selection"]["selection_rule"] == "highest-supported:Very High>High"
+
+    monkeypatch.setenv("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", "High")
+    with pytest.raises(WorkflowError, match="REGULAR_MODE_SELECTION_IDENTITY_CONFLICT"):
+        ProPlanHandoffDriver(driver.manifest_path, runtime=ScriptedRuntime()).prepare()
 
 
 def test_v2_contradiction_evidence_hash_is_verified_before_runtime(tmp_path: Path) -> None:

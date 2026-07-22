@@ -67,3 +67,14 @@ def test_orchestrator_profile_owns_adaptation_without_release_authority() -> Non
     assert "internal lanes or parallel tool calls inside this single ExecutionMission" in prompt
     assert "Same-project web submissions remain serialized" in prompt
     assert "Never return delegated implementation to local Codex" in prompt
+
+
+def test_regular_reasoning_selection_chooses_strongest_and_fails_closed(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", "High,Very High")
+    selection = PROFILES.resolve_regular_mode_selection()
+    assert selection["selected_mode_variant"] == "Very High"
+    assert selection["available_regular_reasoning"] == ["Very High", "High"]
+
+    monkeypatch.setenv("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", "")
+    with pytest.raises(PROFILES.PromptProfileError, match="REGULAR_MODE_UNAVAILABLE"):
+        PROFILES.resolve_regular_mode_selection()

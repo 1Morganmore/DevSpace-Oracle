@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import os
 from typing import Mapping
 
 
@@ -9,6 +10,38 @@ PROMPT_ARCHITECTURE_VERSION = "codex.chatgpt.prompt-architecture/v3"
 
 class PromptProfileError(ValueError):
     pass
+
+
+REGULAR_REASONING_ORDER = ("Very High", "High")
+REGULAR_CAPABILITY_RECEIPT_SCHEMA = "codex.chatgpt.capability-selection/v1"
+
+
+def resolve_regular_mode_selection() -> dict[str, object]:
+    """Select the strongest regular-GPT reasoning mode from an explicit capability set.
+
+    The environment is deliberately a capability *receipt*, not a preference:
+    requesting a lower mode when a stronger available mode exists is rejected.
+    This keeps a transient UI downgrade from becoming a silent workflow change.
+    """
+    raw = os.environ.get("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", "Very High,High")
+    available = tuple(item.strip() for item in raw.split(",") if item.strip())
+    unsupported = sorted(set(available) - set(REGULAR_REASONING_ORDER))
+    supported = tuple(mode for mode in REGULAR_REASONING_ORDER if mode in available)
+    if unsupported:
+        raise PromptProfileError(f"REGULAR_CAPABILITY_UNSUPPORTED: {','.join(unsupported)}")
+    if not supported:
+        raise PromptProfileError("REGULAR_MODE_UNAVAILABLE")
+    selected = supported[0]
+    requested = os.environ.get("CODEX_CHATGPT_REGULAR_MODE_VARIANT", "").strip()
+    if requested and requested != selected:
+        raise PromptProfileError(f"MODE_VARIANT_DOWNGRADE_REJECTED: {requested}->{selected}")
+    return {
+        "schema": REGULAR_CAPABILITY_RECEIPT_SCHEMA,
+        "available_regular_reasoning": list(supported),
+        "selected_mode_variant": selected,
+        "selection_rule": "highest-supported:Very High>High",
+        "capability_source": "CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES",
+    }
 
 
 @dataclass(frozen=True)

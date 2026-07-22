@@ -49,6 +49,10 @@ STATE_SCHEMA = "codex.chatgpt.agbrowse-handoff-state/v1"
 BRIDGE_PATH = Path.home() / ".codex" / "bin" / "chatgpt_agbrowse_bridge.py"
 DEFAULT_CONTRACT_PATH = Path.home() / ".codex" / "contracts" / "agbrowse-0.1.18.json"
 WEB_MULTI_RUNTIME_PATH = Path.home() / ".codex" / "bin" / "chatgpt_web_multi_runtime.py"
+PARALLEL_IMPLEMENTATION_RUNTIME_CANDIDATES = (
+    Path(__file__).resolve().parents[3] / "skills" / "chatgpt-pro-plan-handoff" / "scripts" / "run_parallel_implementation.py",
+    Path.home() / ".codex" / "skills" / "chatgpt-pro-plan-handoff" / "scripts" / "run_parallel_implementation.py",
+)
 PROMPT_PROFILE_CANDIDATES = (
     Path(__file__).resolve().parents[3] / "bin" / "chatgpt_prompt_profiles.py",
     Path.home() / ".codex" / "bin" / "chatgpt_prompt_profiles.py",
@@ -62,10 +66,10 @@ REGULAR_MODE_VARIANTS = {"High", "Very High"}
 
 
 def preferred_regular_mode_variant() -> str:
-    value = os.environ.get("CODEX_CHATGPT_REGULAR_MODE_VARIANT", "High").strip()
-    if value not in REGULAR_MODE_VARIANTS:
-        raise WorkflowError("MODE_VARIANT_INVALID", value)
-    return value
+    try:
+        return str(PROMPTS.resolve_regular_mode_selection()["selected_mode_variant"])
+    except Exception as exc:
+        raise WorkflowError("REGULAR_MODE_SELECTION_FAILED", str(exc)) from exc
 
 
 def _load_prompt_profiles():
@@ -89,6 +93,15 @@ STAGE_PROMPT_PROFILES = {
     "deep-research": "research",
     "gpt-review": "review",
     "gpt-orchestrator": "orchestrator",
+    "pro-advisory": "synthesis",
+}
+STAGE_WORKFLOW_ROUTES = {
+    "pro-plan": "attachment-only-pro",
+    "pro-advisory": "attachment-only-pro",
+    "gpt-plan": "regular-gpt",
+    "deep-research": "regular-gpt",
+    "gpt-review": "regular-gpt",
+    "gpt-orchestrator": "command",
 }
 
 
@@ -111,6 +124,15 @@ class WebMultiRuntimeProtocol(Protocol):
     def run(self, manifest_path: Path) -> Mapping[str, Any]: ...
 
 
+class ParallelImplementationRuntimeProtocol(Protocol):
+    def execute(
+        self,
+        workflow_manifest_path: Path,
+        graph_path: Path,
+        capacity_receipt_path: Path,
+    ) -> Mapping[str, Any]: ...
+
+
 class LocalWebMultiRuntime:
     def __init__(self, runtime_path: Path = WEB_MULTI_RUNTIME_PATH):
         spec = importlib.util.spec_from_file_location("chatgpt_web_multi_handoff", runtime_path)
@@ -123,6 +145,68 @@ class LocalWebMultiRuntime:
 
     def run(self, manifest_path: Path) -> Mapping[str, Any]:
         return self.module.WebMultiRuntime(manifest_path).run()
+
+
+class LocalParallelImplementationRuntime:
+    """Bridge a passed v2 plan/review gate to the exact v3 child supervisor."""
+
+    def __init__(self, runtime_path: Path | None = None):
+        selected = runtime_path or next(
+            (path for path in PARALLEL_IMPLEMENTATION_RUNTIME_CANDIDATES if path.is_file()),
+            None,
+        )
+        if selected is None:
+            raise WorkflowError("PARALLEL_IMPLEMENTATION_RUNTIME_IMPORT_FAILED")
+        spec = importlib.util.spec_from_file_location("chatgpt_parallel_implementation_handoff", selected)
+        if spec is None or spec.loader is None:
+            raise WorkflowError("PARALLEL_IMPLEMENTATION_RUNTIME_IMPORT_FAILED", str(selected))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        self.module = module
+
+    def execute(
+        self,
+        workflow_manifest_path: Path,
+        graph_path: Path,
+        capacity_receipt_path: Path,
+    ) -> Mapping[str, Any]:
+        def capacity_receipt(control: Mapping[str, Any], _state: Mapping[str, Any] | None = None, _wave: int | None = None) -> Mapping[str, Any]:
+            """Bind a fresh observer reading to the newly-created parent identity."""
+            observation = load_mapping(capacity_receipt_path)
+            if "parent_run_id" in observation or "canonical_baseline_identity_sha256" in observation:
+                return observation
+            allowed = {"available_child_sessions", "observed_at", "source"}
+            if set(observation) != allowed:
+                raise WorkflowError("PARALLEL_CAPACITY_OBSERVATION_INVALID")
+            available = observation.get("available_child_sessions")
+            if not isinstance(available, int) or isinstance(available, bool) or not 1 <= available <= 64:
+                raise WorkflowError("PARALLEL_CAPACITY_OBSERVATION_INVALID")
+            source = observation.get("source")
+            observed_at = observation.get("observed_at")
+            if not isinstance(source, str) or not source or not isinstance(observed_at, str) or not observed_at:
+                raise WorkflowError("PARALLEL_CAPACITY_OBSERVATION_INVALID")
+            return {
+                "schema": "codex.chatgpt.parallel-implementation-capacity/v1",
+                "parent_run_id": str(control["parent_run_id"]),
+                "canonical_baseline_identity_sha256": str(control["canonical_baseline_identity_sha256"]),
+                "available_child_sessions": available,
+                "observed_at": observed_at,
+                "source": source,
+            }
+        prepared = self.module.prepare(
+            workflow_manifest_path,
+            graph_path,
+            initial_capacity_receipt_provider=lambda control: capacity_receipt(control),
+        )
+        parent_run_dir = Path(str(prepared.get("parent_run_dir") or ""))
+        if not parent_run_dir.is_dir():
+            raise WorkflowError("PARALLEL_IMPLEMENTATION_PARENT_RUN_MISSING")
+        execution = self.module.execute(
+            parent_run_dir,
+            capacity_receipt_provider=capacity_receipt,
+        )
+        return {"prepared": prepared, "execution": execution}
 
 
 def load_mapping(path: Path) -> dict[str, Any]:
@@ -342,6 +426,7 @@ class AgbrowseRuntime:
             "final_text_captured": True,
             "effective_mode_label": mode,
             "effective_mode_variant": None if mode == "Pro" else manifest.get("mode_variant"),
+            "regular_mode_selection": None if mode == "Pro" else manifest.get("regular_mode_selection"),
             "fallback_reason": None,
             "conversation_url": record.get("conversation_url"),
             "workflow_correlation": manifest.get("workflow_correlation") or {},
@@ -436,6 +521,7 @@ class ProPlanHandoffDriver:
         manifest_path: Path,
         runtime: RuntimeProtocol | None = None,
         web_multi_runtime: WebMultiRuntimeProtocol | None = None,
+        parallel_implementation_runtime: ParallelImplementationRuntimeProtocol | None = None,
     ):
         self.manifest_path = manifest_path.resolve()
         raw_manifest = load_mapping(self.manifest_path)
@@ -446,19 +532,91 @@ class ProPlanHandoffDriver:
         self.agbrowse_contract_path, self.agbrowse_contract_sha256 = resolve_agbrowse_contract(self.manifest)
         self.runtime = runtime or AgbrowseRuntime()
         self.web_multi_runtime = web_multi_runtime or (LocalWebMultiRuntime() if self.manifest["workflow_mode"] == "gpt-comprehensive" else None)
+        self.parallel_implementation_runtime = parallel_implementation_runtime
         self.workflow_id = str(self.manifest["workflow_id"])
         self.question = str(self.manifest["question"])
         self.question_sha256 = sha256_text(self.question)
         self.workspace = dict(self.manifest["workspace"])
         self.workspace_root = Path(str(self.workspace["root"])).resolve(strict=True)
+        self.parallel_execution = self._parallel_execution_selection()
         self.comprehensive = self.manifest["workflow_mode"] == "gpt-comprehensive"
         self.v2 = self.manifest.get("schema") == WORKFLOW_V2_SCHEMA
+        try:
+            self.regular_mode_selection = dict(PROMPTS.resolve_regular_mode_selection())
+        except Exception as exc:
+            raise WorkflowError("REGULAR_MODE_SELECTION_FAILED", str(exc)) from exc
         output = Path(str(self.manifest.get("output_dir") or self.workspace.get("handoff_root") or self.manifest_path.parent / ".handoff"))
         self.workflow_dir = output.resolve() / self.workflow_id
         self.handoff_dir = self.workflow_dir / "handoff"
         self.stages_dir = self.workflow_dir / "stages"
         self.state_path = self.workflow_dir / "state.json"
         self.lock_path = self.workflow_dir / ".workflow.lock"
+
+    def _resolve_manifest_file(self, value: Any, field: str) -> Path:
+        if not isinstance(value, str) or not value.strip():
+            raise WorkflowError("PARALLEL_IMPLEMENTATION_CONFIG_INVALID", field)
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = self.manifest_path.parent / path
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise WorkflowError("PARALLEL_IMPLEMENTATION_FILE_MISSING", field) from exc
+        if not resolved.is_file() or resolved.is_symlink():
+            raise WorkflowError("PARALLEL_IMPLEMENTATION_FILE_MISSING", field)
+        return resolved
+
+    def _parallel_execution_selection(self) -> dict[str, Any]:
+        """Validate an explicitly supplied v3 implementation handoff.
+
+        A missing capacity receipt deliberately returns the legacy command path:
+        no parallel parent, child workspace, app, or browser side effect exists.
+        """
+        raw = self.manifest.get("parallel_execution")
+        if raw is None:
+            return {"selected": False, "reason": "parallel-not-enabled"}
+        if not isinstance(raw, Mapping) or set(raw) - {
+            "enabled", "workflow_v3_manifest", "implementation_graph", "capacity_receipt"
+        } or "enabled" not in raw or not isinstance(raw.get("enabled"), bool):
+            raise WorkflowError("PARALLEL_IMPLEMENTATION_CONFIG_INVALID")
+        if raw["enabled"] is False:
+            if len(raw) != 1:
+                raise WorkflowError("PARALLEL_IMPLEMENTATION_CONFIG_INVALID", "disabled config must not carry execution inputs")
+            return {"selected": False, "reason": "parallel-disabled"}
+        required = {"enabled", "workflow_v3_manifest", "implementation_graph"}
+        if not required.issubset(raw):
+            raise WorkflowError("PARALLEL_IMPLEMENTATION_CONFIG_INVALID", "enabled config is incomplete")
+        workflow_path = self._resolve_manifest_file(raw["workflow_v3_manifest"], "workflow_v3_manifest")
+        graph_path = self._resolve_manifest_file(raw["implementation_graph"], "implementation_graph")
+        workflow = load_mapping(workflow_path)
+        if workflow.get("schema") != "codex.chatgpt.comprehensive-workflow/v3":
+            raise WorkflowError("PARALLEL_IMPLEMENTATION_WORKFLOW_SCHEMA_INVALID")
+        try:
+            workflow_root = Path(str(workflow.get("project_root") or "")).resolve(strict=True)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise WorkflowError("PARALLEL_IMPLEMENTATION_WORKSPACE_INVALID") from exc
+        if workflow_root != self.workspace_root:
+            raise WorkflowError("PARALLEL_IMPLEMENTATION_WORKSPACE_MISMATCH")
+        if sha256_text(str(workflow.get("question") or "")) != self.question_sha256:
+            raise WorkflowError("PARALLEL_IMPLEMENTATION_QUESTION_MISMATCH")
+        if workflow.get("chatgpt_app_name") != self.workspace.get("chatgpt_app_name"):
+            raise WorkflowError("PARALLEL_IMPLEMENTATION_APP_MISMATCH")
+        capacity = raw.get("capacity_receipt")
+        if capacity is None:
+            return {
+                "selected": False,
+                "reason": "capacity-receipt-absent",
+                "workflow_v3_manifest": str(workflow_path),
+                "implementation_graph": str(graph_path),
+            }
+        capacity_path = self._resolve_manifest_file(capacity, "capacity_receipt")
+        return {
+            "selected": True,
+            "reason": "explicit-v3-capacity-receipt",
+            "workflow_v3_manifest": str(workflow_path),
+            "implementation_graph": str(graph_path),
+            "capacity_receipt": str(capacity_path),
+        }
 
     def _legacy_comprehensive_recovery_exists(self, manifest: Mapping[str, Any]) -> bool:
         """Allow v1 comprehensive manifests only when immutable legacy state already exists.
@@ -613,6 +771,9 @@ class ProPlanHandoffDriver:
                 or recorded_hash != self.agbrowse_contract_sha256
             ):
                 raise WorkflowError("AGBROWSE_CONTRACT_IDENTITY_CONFLICT")
+            recorded_selection = state.get("regular_mode_selection")
+            if recorded_selection is not None and recorded_selection != self.regular_mode_selection:
+                raise WorkflowError("REGULAR_MODE_SELECTION_IDENTITY_CONFLICT")
             return state
         snapshot = self._source_snapshot()
         snapshot_path = self.handoff_dir / "source-snapshot.json"
@@ -632,6 +793,7 @@ class ProPlanHandoffDriver:
             "source_snapshot_path": str(snapshot_path),
             "source_snapshot_sha256": snapshot["snapshot_sha256"],
             "source_archive": archive,
+            "regular_mode_selection": self.regular_mode_selection,
             "stages": {},
         }
         atomic_write_json(self.state_path, state)
@@ -723,11 +885,14 @@ class ProPlanHandoffDriver:
         return correlation
 
     def _manifest(self, state: Mapping[str, Any], binding: ExpectedBinding, prompt: str, *, files=(), read_only_paths=()) -> dict[str, Any]:
-        pro = binding.stage == "pro-plan"
+        pro = binding.stage in {"pro-plan", "pro-advisory"}
         research = binding.stage == "deep-research"
         profile_name = STAGE_PROMPT_PROFILES.get(binding.stage)
         if profile_name is None:
             raise WorkflowError("PROMPT_PROFILE_STAGE_UNKNOWN", binding.stage)
+        workflow_route = STAGE_WORKFLOW_ROUTES.get(binding.stage)
+        if workflow_route is None:
+            raise WorkflowError("WORKFLOW_ROUTE_STAGE_UNKNOWN", binding.stage)
         profile = PROMPTS.resolve_profile(profile_name)
         stage_dir = self.stages_dir / f"{binding.stage}-attempt-{binding.attempt_index}"
         stage_dir.mkdir(parents=True, exist_ok=True)
@@ -736,13 +901,19 @@ class ProPlanHandoffDriver:
         prompt_sha256 = file_sha256(prompt_file)
         stage_manifest_path = stage_dir / "stage.manifest.json"
         regular_mode_variant = None
+        regular_mode_selection = None
         if not pro:
             if stage_manifest_path.is_file():
-                regular_mode_variant = str(load_mapping(stage_manifest_path).get("mode_variant") or "")
+                existing_stage = load_mapping(stage_manifest_path)
+                regular_mode_variant = str(existing_stage.get("mode_variant") or "")
                 if regular_mode_variant not in REGULAR_MODE_VARIANTS:
                     raise WorkflowError("MODE_VARIANT_INVALID", regular_mode_variant)
+                regular_mode_selection = existing_stage.get("regular_mode_selection")
+                if not isinstance(regular_mode_selection, dict):
+                    raise WorkflowError("REGULAR_MODE_SELECTION_RECEIPT_MISSING")
             else:
-                regular_mode_variant = preferred_regular_mode_variant()
+                regular_mode_selection = dict(self.regular_mode_selection or PROMPTS.resolve_regular_mode_selection())
+                regular_mode_variant = str(regular_mode_selection["selected_mode_variant"])
         manifest = {
             "project_root": str(self.workspace_root),
             "question": PROMPT_FILE_HANDOFF,
@@ -751,6 +922,7 @@ class ProPlanHandoffDriver:
             "prompt_file_sha256": prompt_sha256,
             "mode_label": "Pro" if pro else ("Deep Research" if research else "GPT-5.6"),
             "mode_variant": None if pro else regular_mode_variant,
+            "regular_mode_selection": regular_mode_selection,
             "app_policy": "forbidden" if pro else "required",
             "chatgpt_app_name": None if pro else self.workspace["chatgpt_app_name"],
             "files": [str(prompt_file), *[str(item) for item in files]],
@@ -759,6 +931,7 @@ class ProPlanHandoffDriver:
             "prompt_profile": profile.name,
             "prompt_profile_receipt": profile.receipt(),
             "workflow_correlation": self._correlation(binding),
+            "workflow_route": workflow_route,
             "write_mode": "none" if binding.stage != "gpt-orchestrator" else "app-owned",
             "allowed_paths": [] if binding.stage != "gpt-orchestrator" else list(self.workspace.get("allowed_write_paths") or []),
             "browser_backend": "agbrowse",
@@ -821,8 +994,10 @@ class ProPlanHandoffDriver:
         expected_mode = manifest["mode_label"]
         if result.get("effective_mode_label") != expected_mode or result.get("fallback_reason"):
             raise WorkflowError("MODEL_CONTRACT_FAILED")
-        if self.v2 and expected_mode != "Pro" and result.get("effective_mode_variant") != manifest.get("mode_variant"):
+        if expected_mode != "Pro" and result.get("effective_mode_variant") != manifest.get("mode_variant"):
             raise WorkflowError("MODE_VARIANT_CONTRACT_FAILED")
+        if expected_mode != "Pro" and result.get("regular_mode_selection") != manifest.get("regular_mode_selection"):
+            raise WorkflowError("REGULAR_MODE_SELECTION_RECEIPT_FAILED")
         policy = dict(result.get("gpt_question_policy") or {})
         if policy.get("gpt_operation_mode") != manifest.get("gpt_operation_mode"):
             raise WorkflowError("OPERATION_MODE_FAILED")
@@ -916,6 +1091,51 @@ class ProPlanHandoffDriver:
             if "solver_count" in advisory:
                 raise WorkflowError("WEB_MULTI_V2_DYNAMIC_CONCURRENCY_INVALID")
         advisory["input_plan_sha256"] = plan_hash
+        advisory_path = self.handoff_dir / f"advisory-{attempt}.json"
+        write_immutable_text(advisory_path, json.dumps(advisory, ensure_ascii=False, indent=2, sort_keys=True))
+        return advisory_path, file_sha256(advisory_path), advisory
+
+    def _run_pro_advisory(
+        self,
+        state: Mapping[str, Any],
+        *,
+        attempt: int,
+        plan_path: Path,
+        plan_hash: str,
+    ) -> tuple[Path, str, dict[str, Any]]:
+        """Run selected comprehensive advisory through attachment-only Pro.
+
+        This is intentionally a single read-only advisory conversation.  Web
+        Multi-GPT is not a fallback for this route: Pro's attachment-only
+        policy and app prohibition are part of the immutable stage manifest.
+        """
+        binding = self._binding(state, "pro-advisory", attempt, plan_hash=plan_hash)
+        prompt = PROMPTS.render_prompt(
+            "synthesis",
+            original_task=self.question,
+            context_note=f"Candidate plan attachment: {plan_path}. It is non-binding guidance.",
+            stage_mission=(
+                "Independently assess the solution space, provide a direct baseline and a materially different reframe, "
+                "then state advisory tradeoffs only. Do not implement, approve, or authorize release."
+            ),
+            output_instructions="Return a concise advisory suitable for a later independent reviewer.",
+        )
+        manifest = self._manifest(state, binding, prompt, files=(plan_path,))
+        if manifest["mode_label"] != "Pro" or manifest["app_policy"] != "forbidden" or manifest["chatgpt_app_name"] is not None:
+            raise WorkflowError("PRO_ADVISORY_ROUTE_CONTRACT_FAILED")
+        result, transcript, _ = self._dispatch("pro-advisory", attempt, manifest)
+        self._verify_runtime(result, manifest)
+        advisory = {
+            "schema": "codex.chatgpt.pro-advisory/v1",
+            "workflow_id": self.workflow_id,
+            "attempt": attempt,
+            "input_plan_sha256": plan_hash,
+            "mode_label": "Pro",
+            "app_policy": "forbidden",
+            "conversation_url": result["conversation_url"],
+            "transcript_sha256": sha256_text(transcript),
+            "transcript": transcript,
+        }
         advisory_path = self.handoff_dir / f"advisory-{attempt}.json"
         write_immutable_text(advisory_path, json.dumps(advisory, ensure_ascii=False, indent=2, sort_keys=True))
         return advisory_path, file_sha256(advisory_path), advisory
@@ -1051,7 +1271,7 @@ class ProPlanHandoffDriver:
                 if self.v2:
                     advisory_gate, _ = self._gate_descriptor("advisory")
                     if advisory_gate["decision"] == "run":
-                        advisory_path, advisory_hash, _ = self._run_web_multi_advisory(
+                        advisory_path, advisory_hash, _ = self._run_pro_advisory(
                             state, attempt=attempt, plan_path=plan_path, plan_hash=plan_hash,
                         )
                         advisory_gate["artifact"] = {"path": str(advisory_path), "sha256": advisory_hash}
@@ -1159,6 +1379,7 @@ class ProPlanHandoffDriver:
                 "source_snapshot_sha256": state["source_snapshot_sha256"],
                 "plan": {"path": str(plan_path), "sha256": plan_hash},
                 "review": {"path": str(review_path), "sha256": review_hash},
+                "parallel_execution": self.parallel_execution,
             }
             if advisory_path and advisory_hash:
                 handoff["advisory"] = {"path": str(advisory_path), "sha256": advisory_hash}
@@ -1167,6 +1388,7 @@ class ProPlanHandoffDriver:
                 handoff["advisory_descriptor"] = {"path": str(advisory_descriptor_path), "sha256": advisory_descriptor_hash}
             handoff_path = self.handoff_dir / "handoff.manifest.json"
             write_immutable_text(handoff_path, json.dumps(handoff, ensure_ascii=False, indent=2, sort_keys=True))
+            parallel_selected = bool(self.parallel_execution.get("selected"))
             execution_mission = {
                 "schema": "codex.chatgpt.execution-mission/v1",
                 "workflow_id": self.workflow_id,
@@ -1204,10 +1426,14 @@ class ProPlanHandoffDriver:
                     "report_changed_files_commands_and_blockers": True,
                 },
                 "execution_parallelism": {
-                    "owner": "web-gpt-orchestrator",
-                    "scope": "within-single-execution-mission",
-                    "lane_policy": "partition safe independent exploration, editing, and tests into internal lanes or parallel tool calls, then integrate",
-                    "same_project_web_submissions": "one-active-or-uncertain-run",
+                    "owner": "parallel-v3-web-gpt-implementers" if parallel_selected else "web-gpt-orchestrator",
+                    "scope": "multiple exact child sessions after plan/review PASS" if parallel_selected else "within-single-execution-mission",
+                    "lane_policy": (
+                        "run only isolated, graph-approved units in capacity-bound concurrent waves; host integrates deterministically"
+                        if parallel_selected else
+                        "partition safe independent exploration, editing, and tests into internal lanes or parallel tool calls, then integrate"
+                    ),
+                    "same_project_web_submissions": "capacity-bound exact child sessions" if parallel_selected else "one-active-or-uncertain-run",
                     "local_codex": "host-control-only; no delegated strategy search, code authoring, alternate implementation paths, or execution",
                 },
                 "host_only_boundaries": [
@@ -1222,6 +1448,36 @@ class ProPlanHandoffDriver:
                 execution_mission_path,
                 json.dumps(execution_mission, ensure_ascii=False, indent=2, sort_keys=True),
             )
+            if parallel_selected:
+                parallel_runtime = self.parallel_implementation_runtime or LocalParallelImplementationRuntime()
+                parallel_result = dict(parallel_runtime.execute(
+                    Path(str(self.parallel_execution["workflow_v3_manifest"])),
+                    Path(str(self.parallel_execution["implementation_graph"])),
+                    Path(str(self.parallel_execution["capacity_receipt"])),
+                ))
+                final = {
+                    **state,
+                    "status": "LOCAL_VERIFY_REQUIRED",
+                    "plan_path": str(plan_path),
+                    "plan_sha256": plan_hash,
+                    "review_path": str(review_path),
+                    "review_sha256": review_hash,
+                    "advisory_path": str(advisory_path) if advisory_path else None,
+                    "advisory_sha256": advisory_hash,
+                    "research_descriptor_path": str(research_descriptor_path) if research_descriptor_path else None,
+                    "research_descriptor_sha256": research_descriptor_hash,
+                    "advisory_descriptor_path": str(advisory_descriptor_path) if advisory_descriptor_path else None,
+                    "advisory_descriptor_sha256": advisory_descriptor_hash,
+                    "handoff_path": str(handoff_path),
+                    "execution_mission_path": str(execution_mission_path),
+                    "implementation_route": self.parallel_execution,
+                    "parallel_implementation_result": parallel_result,
+                }
+                atomic_write_json(self.workflow_dir / "final.json", final)
+                latest = load_mapping(self.state_path)
+                final["stages"] = latest.get("stages", state.get("stages", {}))
+                atomic_write_json(self.state_path, final)
+                return final
             binding = self._binding(state, "gpt-orchestrator", 1, plan_hash=plan_hash, review_hash=review_hash, research_descriptor_sha256=research_descriptor_hash, advisory_descriptor_sha256=advisory_descriptor_hash)
             if self.v2:
                 orchestrator_template = self._v2_envelope_template(
@@ -1297,6 +1553,7 @@ class ProPlanHandoffDriver:
                 "advisory_descriptor_sha256": advisory_descriptor_hash,
                 "handoff_path": str(handoff_path),
                 "execution_mission_path": str(execution_mission_path),
+                "implementation_route": self.parallel_execution,
                 "orchestrator_envelope": envelope,
             }
             atomic_write_json(self.workflow_dir / "final.json", final)
