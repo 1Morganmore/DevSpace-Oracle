@@ -339,7 +339,18 @@ def main() -> int:
         ):
             target = base / name
             target.mkdir()
-            function(target)
+            try:
+                function(target)
+            except Exception as exc:
+                print(json.dumps({
+                    "status": "FAIL",
+                    "test": name,
+                    "error_type": type(exc).__name__,
+                    "error_code": str(getattr(exc, "code", "")),
+                    "error": str(exc),
+                    "evidence": getattr(exc, "evidence", None),
+                }, sort_keys=True, default=str), file=sys.stderr)
+                raise
             results.append({"name": name, "result": "PASS"})
     print(json.dumps({"status": "PASS", "tests": results}, sort_keys=True))
     return 0
