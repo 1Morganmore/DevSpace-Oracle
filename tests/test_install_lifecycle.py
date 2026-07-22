@@ -77,6 +77,55 @@ def test_installer_wal_records_actual_per_file_transition_order() -> None:
             assert replacement.is_file()
 
 
+def test_interrupted_install_recovery_rolls_back_completed_steps_and_preserves_unmutated_intent() -> None:
+    with tempfile.TemporaryDirectory() as home:
+        codex_home = Path(home)
+        backup_root = codex_home / 'backups' / 'interrupted'
+        completed_path = codex_home / 'bin' / 'completed.py'
+        intent_path = codex_home / 'bin' / 'intent.py'
+        completed_backup = backup_root / 'bin' / 'completed.py'
+        intent_backup = backup_root / 'bin' / 'intent.py'
+        for path in (completed_path, intent_path, completed_backup, intent_backup):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        completed_path.write_bytes(b'new-completed\n')
+        intent_path.write_bytes(b'old-intent\n')
+        completed_backup.write_bytes(b'old-completed\n')
+        intent_backup.write_bytes(b'old-intent\n')
+
+        import hashlib
+        digest = lambda value: hashlib.sha256(value).hexdigest()
+        journal = {
+            'schema': 'codexpro.install-wal/v1',
+            'status': 'ACTIVE',
+            'backup': str(backup_root),
+            'files': [
+                {
+                    'path': 'bin/completed.py', 'action': 'overwritten',
+                    'installed_sha256': digest(b'new-completed\n'),
+                    'backup_sha256': digest(b'old-completed\n'),
+                    'phase': 'COMPLETE', 'transitions': ['INTENT', 'MUTATED', 'VERIFIED', 'COMPLETE'],
+                },
+                {
+                    'path': 'bin/intent.py', 'action': 'overwritten',
+                    'installed_sha256': digest(b'new-intent\n'),
+                    'backup_sha256': digest(b'old-intent\n'),
+                    'phase': 'INTENT', 'transitions': ['INTENT'],
+                },
+            ],
+        }
+        wal = backup_root / 'install.wal.json'
+        wal.write_text(json.dumps(journal), encoding='utf-8')
+
+        recovered = run_powershell(
+            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home,
+            '-SkipDependencyInstall',
+        )
+        assert recovered.returncode == 0, recovered.stderr
+        assert completed_path.read_bytes() == b'old-completed\n'
+        assert intent_path.read_bytes() == b'old-intent\n'
+        assert json.loads(wal.read_text(encoding='utf-8'))['status'] == 'ROLLED_BACK_AFTER_CRASH'
+
+
 def test_doctor_accepts_current_v3_install_receipt_schema() -> None:
     with tempfile.TemporaryDirectory() as home:
         root = Path(home)

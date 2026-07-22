@@ -19,8 +19,19 @@ function Get-Hash([string]$Path){
   }
 }
 function Copy-FileDurable([string]$Source,[string]$Destination){
-  $input=$null;$output=$null
-  try{$input=[IO.File]::Open($Source,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read);$output=[IO.File]::Open($Destination,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None);$input.CopyTo($output);$output.Flush($true)}finally{if($output){$output.Dispose()};if($input){$input.Dispose()}}
+  $directory=Split-Path -Parent $Destination;New-Item -ItemType Directory -Force -Path $directory|Out-Null
+  $temporary=Join-Path $directory ".codexpro-$([guid]::NewGuid().ToString('N')).tmp";$input=$null;$output=$null
+  try{
+    $input=[IO.File]::Open($Source,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    $output=[IO.File]::Open($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    $input.CopyTo($output);$output.Flush($true);$output.Dispose();$output=$null;$input.Dispose();$input=$null
+    if(Test-Path -LiteralPath $Destination){
+      $replaceBackup=Join-Path $directory ".codexpro-$([guid]::NewGuid().ToString('N')).bak"
+      try{[IO.File]::Replace($temporary,$Destination,$replaceBackup,$true)}finally{if(Test-Path -LiteralPath $replaceBackup){Remove-Item -LiteralPath $replaceBackup -Force}}
+    }else{[IO.File]::Move($temporary,$Destination)}
+  } finally {
+    if($output){$output.Dispose()};if($input){$input.Dispose()};if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force}
+  }
 }
 function Write-JsonDurable([string]$Path,$Value){
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path)|Out-Null;$temporary="$Path.$([guid]::NewGuid().ToString('N')).tmp"
@@ -30,7 +41,28 @@ function Test-IsWithinRoot([string]$Root,[string]$Path){$r=[IO.Path]::GetFullPat
 function Get-SafeChild([string]$Root,[string]$Relative){if([string]::IsNullOrWhiteSpace($Relative)-or[IO.Path]::IsPathRooted($Relative)-or$Relative -match '(^|[\\/])\.{1,2}([\\/]|$)'){throw "unsafe relative path: $Relative"};$p=[IO.Path]::GetFullPath((Join-Path $Root $Relative));if(!(Test-IsWithinRoot $Root $p)){throw "path escapes root: $Relative"};$cursor=Split-Path -Parent $p;while((Test-IsWithinRoot $Root $cursor) -and $cursor -ne [IO.Path]::GetFullPath($Root)){if(Test-Path -LiteralPath $cursor){$i=Get-Item -LiteralPath $cursor -Force;if($i.LinkType){throw "symlink/reparse path refused: $cursor"}};$cursor=Split-Path -Parent $cursor};$p}
 function Get-ManifestFiles([string]$Root,$Value){$files=@();foreach($pattern in $Value.include){if($pattern -match '(^|/)\.{1,2}($|/)' -or [IO.Path]::IsPathRooted($pattern)){throw "unsafe manifest pattern: $pattern"};$base=if($pattern.StartsWith('bin/')){Join-Path $Root 'bin'}elseif($pattern.StartsWith('skills/')){Join-Path $Root 'skills'}elseif($pattern.StartsWith('scripts/')){Join-Path $Root 'scripts'}elseif($pattern.StartsWith('contracts/')){Join-Path $Root 'contracts'}elseif($pattern.StartsWith('tests/fixtures/')){Join-Path $Root 'tests/fixtures'}else{throw "unsupported manifest root: $pattern"};$patternMatches=@();foreach($item in @(Get-ChildItem -LiteralPath $base -File -Recurse -Force)){if($item.LinkType){throw "manifest refuses symlink: $($item.FullName)"};$relative=$item.FullName.Substring($Root.Length).TrimStart([char[]]'\/').Replace('\','/');if($relative -like $pattern){[void](Get-SafeChild $Root $relative);$patternMatches+=$relative}};if(!$patternMatches.Count){throw "manifest pattern matched no files: $pattern"};$files+=$patternMatches};@($files|Sort-Object -Unique)}
 function Resume-PendingInstallTransactions([string]$Root){
-  $backupBase=Join-Path $Root 'backups';if(!(Test-Path -LiteralPath $backupBase)){return};foreach($journalPath in @(Get-ChildItem -LiteralPath $backupBase -Filter 'install.wal.json' -File -Recurse -Force -ErrorAction SilentlyContinue|Sort-Object FullName)){$journal=Get-Content -LiteralPath $journalPath.FullName -Raw|ConvertFrom-Json;if($journal.schema -ne 'codexpro.install-wal/v1' -or $journal.status -eq 'COMPLETE' -or $journal.status -eq 'ROLLED_BACK_AFTER_CRASH'){continue};$conflicts=@();foreach($entry in @($journal.files|Sort-Object -Descending path)){if($entry.phase -eq 'COMPLETE'){continue};$destination=Get-SafeChild $Root ([string]$entry.path);if(!(Test-Path -LiteralPath $destination)){continue};if((Get-Hash $destination)-ne [string]$entry.installed_sha256){$conflicts+=@{path=$entry.path;action='preserved_modified_after_interrupted_install'};continue};if($entry.action -eq 'created'){Remove-Item -LiteralPath $destination -Force;continue};$backup=Get-SafeChild ([string]$journal.backup) ([string]$entry.path);if(!(Test-Path -LiteralPath $backup) -or (Get-Hash $backup)-ne [string]$entry.backup_sha256){$conflicts+=@{path=$entry.path;action='missing_interrupted_backup'};continue};Copy-FileDurable $backup $destination};if($conflicts.Count){throw ("INSTALL_CRASH_RECOVERY_CONFLICT: "+($conflicts|ConvertTo-Json -Compress))};$journal.status='ROLLED_BACK_AFTER_CRASH';$journal.recovered_at=[DateTime]::UtcNow.ToString('o');Write-JsonDurable $journalPath.FullName $journal}
+  $backupBase=Join-Path $Root 'backups';if(!(Test-Path -LiteralPath $backupBase)){return}
+  foreach($journalPath in @(Get-ChildItem -LiteralPath $backupBase -Filter 'install.wal.json' -File -Recurse -Force -ErrorAction SilentlyContinue|Sort-Object FullName)){
+    $journal=Get-Content -LiteralPath $journalPath.FullName -Raw|ConvertFrom-Json
+    if($journal.schema -ne 'codexpro.install-wal/v1' -or $journal.status -eq 'COMPLETE' -or $journal.status -eq 'ROLLED_BACK_AFTER_CRASH'){continue}
+    $conflicts=@();$entries=@($journal.files)
+    for($index=$entries.Count-1;$index -ge 0;$index--){
+      $entry=$entries[$index];$destination=Get-SafeChild $Root ([string]$entry.path)
+      if(!(Test-Path -LiteralPath $destination)){continue}
+      $destinationHash=Get-Hash $destination
+      if($entry.phase -eq 'INTENT' -and $destinationHash -ne [string]$entry.installed_sha256){
+        if($entry.action -eq 'overwritten' -and $destinationHash -eq [string]$entry.backup_sha256){continue}
+        $conflicts+=@{path=$entry.path;action='preserved_modified_after_interrupted_install'};continue
+      }
+      if($destinationHash -ne [string]$entry.installed_sha256){$conflicts+=@{path=$entry.path;action='preserved_modified_after_interrupted_install'};continue}
+      if($entry.action -eq 'created'){Remove-Item -LiteralPath $destination -Force;continue}
+      $backup=Get-SafeChild ([string]$journal.backup) ([string]$entry.path)
+      if(!(Test-Path -LiteralPath $backup) -or (Get-Hash $backup)-ne [string]$entry.backup_sha256){$conflicts+=@{path=$entry.path;action='missing_interrupted_backup'};continue}
+      Copy-FileDurable $backup $destination
+    }
+    if($conflicts.Count){throw ("INSTALL_CRASH_RECOVERY_CONFLICT: "+($conflicts|ConvertTo-Json -Compress))}
+    $journal.status='ROLLED_BACK_AFTER_CRASH';$journal|Add-Member -NotePropertyName recovered_at -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force;Write-JsonDurable $journalPath.FullName $journal
+  }
 }
 $Files=@(Get-ManifestFiles $RepoRoot $Manifest)
 if($WhatIfPreference){$Files|ForEach-Object{"Would stage and install $_"};if(!$SkipDependencyInstall){"Would explicitly install and contract-validate agbrowse@$($Manifest.external.agbrowse.version)"};'CodexPro dependency remains external: bootstrap scripts acquire the latest supported app runtime.';exit 0}

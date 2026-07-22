@@ -15,8 +15,6 @@ DENY_PATTERNS = [
     "택톡",
     "BB-torres",
     "문제출제",
-    "planner-v7-app-trace-quiescent-incident",
-    "planner-v8-app-trace-quiescent-incident",
 ]
 
 SKIP_DIRS = {
@@ -63,8 +61,7 @@ def iter_files(root: Path):
             continue
         if any(
             part in SKIP_DIRS
-            or part.startswith(".pytest-")
-            or part.startswith(".pytest_tmp")
+            or part.startswith(".pytest")
             for part in rel.parts
         ):
             continue
