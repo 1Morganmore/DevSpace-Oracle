@@ -21,16 +21,18 @@ Pro never uses an app. Every non-Pro stage—including plan, review, orchestrato
 
 ### GPT 종합모드
 
-Every new comprehensive workflow uses `codex.chatgpt.comprehensive-workflow/v2`; v1 is recovery-only for an already persisted matching legacy workflow state.
+Every new comprehensive workflow uses `codex.chatgpt.comprehensive-workflow/v4` with `relay.mode: web-native-v1`. V1 and v2 are recovery-only for already persisted matching legacy workflow state. V3 remains the separate parallel-implementation contract and is never repurposed as the relay workflow.
 
-1. Validate the structured v2 manifest and both deterministic gates before browser work.
+1. Validate the structured v4 manifest, web-native relay mode, and both deterministic gates before browser work.
 2. Run Deep Research only when its `auto` triggers select it or the user/policy requires it; otherwise persist an immutable skip descriptor.
-3. Fresh regular GPT plans constructively from the original task with the project app context and research descriptor hash. A prior plan/review is not the frame or authority.
+3. Fresh regular GPT plans constructively from the original task with the project app context and research descriptor hash. It also authors the complete semantic prompt for the next review or Web Multi stage; local Codex validates and materializes those exact UTF-8 bytes without rewriting them.
 4. Run genuine Web Multi-GPT only when its `auto` risk inputs select it or the user/policy requires it; otherwise persist an immutable skip descriptor.
-5. Fresh regular GPT alone takes the adversarial posture and reviews the immutable plan plus research/advisory descriptors.
+5. Fresh regular GPT alone takes the adversarial posture and reviews the immutable plan plus research/advisory descriptors. On `REVISE` it authors the next Planner prompt and compact revision delta; on `PASS` it authors the orchestrator prompt and implementation mission.
 6. Continue only on `PASS`.
-7. Compile an `ExecutionMission` that preserves the original task, selected plan as guidance, mandatory conditions, write scope, acceptance tests, deviation policy, and host-only boundaries.
-8. Fresh regular GPT orchestrator owns live workspace exploration, decisions, edits, tests, bounded adaptation, and all expensive strategy/implementation branches from that mission. It does not consume the full review/advisory transcript as its cognitive frame; local deterministic verification remains required.
+7. Bind the web-authored mission into an `ExecutionMission` that preserves the original task, selected plan as guidance, mandatory conditions, write scope, acceptance tests, deviation policy, and host-only boundaries.
+8. Fresh regular GPT orchestrator receives the reviewer-authored prompt and owns live workspace exploration, decisions, edits, tests, bounded adaptation, and all expensive strategy/implementation branches. Local Codex performs only deterministic binding/transport/recovery and final verification.
+
+The stage relay is `codex.chatgpt.stage-relay/v1`. Its semantic payload is immutable and branch-specific. The host adds a separate deterministic binding wrapper containing the hashes that became known only after the previous web stage completed; this avoids self-referential hashes and prevents local prompt authoring. Unknown keys, wrong workflow/stage bindings, invalid UTF-8, `???`, replacement characters, overwrites, and cross-workflow reuse fail before the next submission.
 
 Same-project browser submission remains one active or uncertain web run at a time. That serialization does not make implementation locally serial: the single orchestrator `ExecutionMission` must split safe independent exploration, editing, and test work into internal lanes or parallel tool calls and integrate them itself. Local Codex must not interpret global tool-parallelism guidance as permission to start local strategy search, code authoring, alternate implementation paths, or delegated execution. Its work is limited to prompt/manifest transport, recovery, hashes and locks, exact browser identity, host-only safety/release actions, and final deterministic verification.
 
@@ -95,6 +97,6 @@ python "$env:USERPROFILE\.codex\skills\chatgpt-pro-plan-handoff\scripts\run_para
 python "$env:USERPROFILE\.codex\skills\chatgpt-pro-plan-handoff\scripts\run_parallel_implementation.py" finalize --parent-run-dir <parent-run>
 ```
 
-Use `codex.chatgpt.pro-plan-handoff/v1` only for `workflow_mode: pro-plan-to-gpt-orchestrator` and for recovery of an already persisted matching legacy comprehensive state with a valid stage checkpoint. A merely prepared v1 state has no recovery authority. Every new `workflow_mode: gpt-comprehensive` manifest must use `codex.chatgpt.comprehensive-workflow/v2` and include validated `gates.research` and `gates.advisory` decision inputs. A new v1 comprehensive manifest fails before network side effects with `COMPREHENSIVE_V2_REQUIRED`.
+Use `codex.chatgpt.pro-plan-handoff/v1` only for `workflow_mode: pro-plan-to-gpt-orchestrator` and for recovery of an already persisted matching legacy comprehensive state with a valid stage checkpoint. V2 has the same recovery-only status. A pre-v4 state without manifest identity must first pass its immutable snapshot, archive, and stage-checkpoint checks; the driver then pins the current manifest schema and exact SHA-256 once, and every later recovery requires an exact match. A merely prepared legacy state has no recovery authority. Every new `workflow_mode: gpt-comprehensive` manifest must use `codex.chatgpt.comprehensive-workflow/v4`, the exact web-native relay mode, and validated `gates.research` and `gates.advisory` inputs. A new v1 or v2 comprehensive manifest fails before network side effects with `COMPREHENSIVE_V4_REQUIRED`.
 
 The driver validates the existing plan/review/orchestrator JSON envelope schemas and emits `final.json` only after deterministic contract checks.

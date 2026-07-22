@@ -44,7 +44,10 @@ from workspace_guard import (
 
 WORKFLOW_SCHEMA = "codex.chatgpt.pro-plan-handoff/v1"
 WORKFLOW_V2_SCHEMA = "codex.chatgpt.comprehensive-workflow/v2"
+WORKFLOW_V4_SCHEMA = "codex.chatgpt.comprehensive-workflow/v4"
 GATE_V2_SCHEMA = "codex.chatgpt.gate/v2"
+RELAY_SCHEMA = "codex.chatgpt.stage-relay/v1"
+WEB_NATIVE_RELAY_MODE = "web-native-v1"
 STATE_SCHEMA = "codex.chatgpt.agbrowse-handoff-state/v1"
 BRIDGE_PATH = Path.home() / ".codex" / "bin" / "chatgpt_agbrowse_bridge.py"
 DEFAULT_CONTRACT_PATH = Path.home() / ".codex" / "contracts" / "agbrowse-0.1.18.json"
@@ -246,6 +249,19 @@ def write_immutable_text(path: Path, value: str) -> None:
     atomic_write_text(path, value)
 
 
+def write_immutable_utf8_bytes(path: Path, value: str) -> None:
+    """Persist web-authored text without platform newline translation."""
+    data = value.encode("utf-8", errors="strict")
+    if path.exists():
+        if path.read_bytes() != data:
+            raise WorkflowError("IMMUTABLE_ARTIFACT_CONFLICT", str(path))
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
 def resolve_agbrowse_contract(value: Mapping[str, Any]) -> tuple[str, str]:
     """Return the exact selected contract path and its immutable content hash.
 
@@ -253,7 +269,7 @@ def resolve_agbrowse_contract(value: Mapping[str, Any]) -> tuple[str, str]:
     retains the historical 0.1.18 default.  Canonicalize once so every child
     process receives the same absolute file identity regardless of its cwd.
     """
-    selected = value.get("agbrowse_contract") if value.get("schema") == WORKFLOW_V2_SCHEMA else None
+    selected = value.get("agbrowse_contract") if value.get("schema") in {WORKFLOW_V2_SCHEMA, WORKFLOW_V4_SCHEMA} else None
     if selected is None:
         selected = str(DEFAULT_CONTRACT_PATH)
     if not isinstance(selected, str) or not selected.strip():
@@ -298,7 +314,7 @@ def validate_manifest(
     allow_legacy_comprehensive_recovery: bool = False,
 ) -> dict[str, Any]:
     schema = value.get("schema")
-    if schema not in {WORKFLOW_SCHEMA, WORKFLOW_V2_SCHEMA}:
+    if schema not in {WORKFLOW_SCHEMA, WORKFLOW_V2_SCHEMA, WORKFLOW_V4_SCHEMA}:
         raise WorkflowError("WORKFLOW_SCHEMA_INVALID")
     if value.get("workflow_mode") not in {"pro-plan-to-gpt-orchestrator", "gpt-comprehensive"}:
         raise WorkflowError("WORKFLOW_MODE_INVALID")
@@ -307,7 +323,13 @@ def validate_manifest(
         and value.get("workflow_mode") == "gpt-comprehensive"
         and not allow_legacy_comprehensive_recovery
     ):
-        raise WorkflowError("COMPREHENSIVE_V2_REQUIRED")
+        raise WorkflowError("COMPREHENSIVE_V4_REQUIRED")
+    if (
+        schema == WORKFLOW_V2_SCHEMA
+        and value.get("workflow_mode") == "gpt-comprehensive"
+        and not allow_legacy_comprehensive_recovery
+    ):
+        raise WorkflowError("COMPREHENSIVE_V4_REQUIRED")
     if not str(value.get("workflow_id") or "").strip():
         raise WorkflowError("WORKFLOW_ID_MISSING")
     if not str(value.get("question") or "").strip():
@@ -321,9 +343,17 @@ def validate_manifest(
     if not workspace.get("chatgpt_app_name"):
         raise WorkflowError("NON_PRO_APP_REQUIRED")
     root = Path(str(workspace["root"])).resolve(strict=True)
-    if schema == WORKFLOW_V2_SCHEMA:
+    if schema in {WORKFLOW_V2_SCHEMA, WORKFLOW_V4_SCHEMA}:
         if value.get("workflow_mode") != "gpt-comprehensive":
-            raise WorkflowError("WORKFLOW_V2_REQUIRES_COMPREHENSIVE")
+            raise WorkflowError("STRUCTURED_WORKFLOW_REQUIRES_COMPREHENSIVE")
+        if schema == WORKFLOW_V4_SCHEMA:
+            relay = value.get("relay")
+            if (
+                not isinstance(relay, dict)
+                or set(relay) != {"mode"}
+                or relay.get("mode") != WEB_NATIVE_RELAY_MODE
+            ):
+                raise WorkflowError("COMPREHENSIVE_RELAY_INVALID")
         gates = value.get("gates")
         if not isinstance(gates, dict):
             raise WorkflowError("GATES_REQUIRED")
@@ -540,7 +570,12 @@ class ProPlanHandoffDriver:
         self.workspace_root = Path(str(self.workspace["root"])).resolve(strict=True)
         self.parallel_execution = self._parallel_execution_selection()
         self.comprehensive = self.manifest["workflow_mode"] == "gpt-comprehensive"
-        self.v2 = self.manifest.get("schema") == WORKFLOW_V2_SCHEMA
+        self.v2 = self.manifest.get("schema") in {WORKFLOW_V2_SCHEMA, WORKFLOW_V4_SCHEMA}
+        self.web_native_relay = bool(
+            self.manifest.get("schema") == WORKFLOW_V4_SCHEMA
+            and isinstance(self.manifest.get("relay"), Mapping)
+            and self.manifest["relay"].get("mode") == WEB_NATIVE_RELAY_MODE
+        )
         try:
             self.regular_mode_selection = dict(PROMPTS.resolve_regular_mode_selection())
         except Exception as exc:
@@ -621,13 +656,17 @@ class ProPlanHandoffDriver:
     def _legacy_comprehensive_recovery_exists(self, manifest: Mapping[str, Any]) -> bool:
         """Allow v1 comprehensive manifests only when immutable legacy state already exists.
 
-        New comprehensive work must use v2 gates.  This narrow proof keeps an
-        interrupted v1 workflow recoverable without allowing a new v1 send.
+        New comprehensive work must use v4 relay. This narrow proof keeps an
+        interrupted v1/v2 workflow recoverable without allowing a new legacy send.
         """
-        if (
-            manifest.get("schema") != WORKFLOW_SCHEMA
-            or manifest.get("workflow_mode") != "gpt-comprehensive"
-        ):
+        schema = manifest.get("schema")
+        if manifest.get("workflow_mode") != "gpt-comprehensive":
+            return False
+        if schema == WORKFLOW_SCHEMA:
+            pass
+        elif schema == WORKFLOW_V2_SCHEMA and manifest.get("relay") is None:
+            pass
+        else:
             return False
         try:
             workspace = manifest.get("workspace")
@@ -646,10 +685,20 @@ class ProPlanHandoffDriver:
             workflow_dir = output / workflow_id
             state_path = workflow_dir / "state.json"
             state = load_mapping(state_path)
+            recorded_manifest_schema = state.get("workflow_manifest_schema")
+            recorded_manifest_sha256 = state.get("workflow_manifest_sha256")
             if (
                 state.get("schema") != STATE_SCHEMA
                 or state.get("workflow_id") != workflow_id
                 or state.get("question_sha256") != sha256_text(question)
+                or (recorded_manifest_schema is None) != (recorded_manifest_sha256 is None)
+                or (
+                    recorded_manifest_schema is not None
+                    and (
+                        recorded_manifest_schema != schema
+                        or recorded_manifest_sha256 != file_sha256(self.manifest_path)
+                    )
+                )
             ):
                 return False
             stages = state.get("stages")
@@ -743,6 +792,240 @@ class ProPlanHandoffDriver:
         }
         return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
 
+    @staticmethod
+    def _relay_template(
+        binding: ExpectedBinding,
+        *,
+        next_stage: str,
+        prompt_profile: str,
+        input_bindings: Mapping[str, str],
+        include_review_continuation: bool = False,
+        include_mission: bool = False,
+        include_revision_delta: bool = False,
+    ) -> dict[str, Any]:
+        value: dict[str, Any] = {
+            "schema": RELAY_SCHEMA,
+            "workflow_id": binding.workflow_id,
+            "from_stage": binding.stage,
+            "attempt_index": binding.attempt_index,
+            "nonce": binding.nonce,
+            "next_stage": next_stage,
+            "prompt_profile": prompt_profile,
+            "input_bindings": dict(input_bindings),
+            "next_prompt_body": "<write the complete semantic instructions for the next web GPT stage>",
+        }
+        if include_review_continuation:
+            value["review_prompt_body"] = "<write the complete semantic instructions for the later independent review stage>"
+        if include_mission:
+            value["mission_body"] = "<write the complete implementation mission for the orchestrator>"
+        if include_revision_delta:
+            value["revision_delta"] = {
+                "required_changes": [],
+                "conditions": [],
+                "evidence_gaps": [],
+                "preserve": [],
+            }
+        return value
+
+    @staticmethod
+    def _relay_text(value: Any, field: str) -> str:
+        if not isinstance(value, str):
+            raise WorkflowError("STAGE_RELAY_INVALID", field)
+        if not value.strip() or len(value) > 200_000 or "???" in value or "\ufffd" in value:
+            raise WorkflowError("STAGE_RELAY_INVALID", field)
+        try:
+            value.encode("utf-8", errors="strict")
+        except UnicodeError as exc:
+            raise WorkflowError("STAGE_RELAY_INVALID", field) from exc
+        return value
+
+    def _relay_bound_parallel_graph(
+        self,
+        graph_path: Path,
+        relay_receipt: Mapping[str, Any],
+    ) -> tuple[Path, dict[str, Any]]:
+        """Bind the reviewer's exact approved mission into every v3 child unit."""
+        mission_ref = relay_receipt.get("mission")
+        if not isinstance(mission_ref, Mapping):
+            raise WorkflowError("PARALLEL_IMPLEMENTATION_RELAY_MISSION_MISSING")
+        mission_path = Path(str(mission_ref.get("path") or ""))
+        mission_sha256 = str(mission_ref.get("sha256") or "")
+        if (
+            not mission_path.is_file()
+            or mission_path.is_symlink()
+            or file_sha256(mission_path) != mission_sha256
+        ):
+            raise WorkflowError("PARALLEL_IMPLEMENTATION_RELAY_MISSION_IDENTITY_INVALID")
+        reviewer_mission = mission_path.read_bytes().decode("utf-8", errors="strict")
+        graph = load_mapping(graph_path)
+        units = graph.get("units")
+        if graph.get("schema") != "codex.chatgpt.implementation-graph-result/v1" or not isinstance(units, list):
+            raise WorkflowError("PARALLEL_IMPLEMENTATION_GRAPH_INVALID")
+        derived_units: list[dict[str, Any]] = []
+        for item in units:
+            if not isinstance(item, Mapping) or not isinstance(item.get("mission"), str):
+                raise WorkflowError("PARALLEL_IMPLEMENTATION_GRAPH_INVALID")
+            original_mission = str(item["mission"])
+            bound_mission = (
+                "[REVIEWER-AUTHORED GLOBAL MISSION]\n"
+                + reviewer_mission
+                + "\n\n[PRE-APPROVED UNIT ASSIGNMENT]\n"
+                + original_mission
+            )
+            if len(bound_mission) > 200_000:
+                raise WorkflowError("PARALLEL_IMPLEMENTATION_RELAY_MISSION_TOO_LARGE")
+            derived_units.append({**dict(item), "mission": bound_mission})
+        derived_graph = {**graph, "units": derived_units}
+        derived_path = self.handoff_dir / "implementation-graph.relay-bound.json"
+        write_immutable_text(
+            derived_path,
+            json.dumps(derived_graph, ensure_ascii=False, indent=2, sort_keys=True),
+        )
+        receipt = {
+            "schema": "codex.chatgpt.parallel-relay-binding/v1",
+            "workflow_id": self.workflow_id,
+            "source_graph": {"path": str(graph_path), "sha256": file_sha256(graph_path)},
+            "reviewer_mission": {"path": str(mission_path), "sha256": mission_sha256},
+            "relay_receipt": {
+                "path": str(relay_receipt.get("receipt_path") or ""),
+                "sha256": str(relay_receipt.get("receipt_sha256") or ""),
+            },
+            "derived_graph": {"path": str(derived_path), "sha256": file_sha256(derived_path)},
+        }
+        receipt_path = self.handoff_dir / "implementation-graph.relay-bound.receipt.json"
+        write_immutable_text(
+            receipt_path,
+            json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True),
+        )
+        return derived_path, {
+            **receipt,
+            "receipt_path": str(receipt_path),
+            "receipt_sha256": file_sha256(receipt_path),
+        }
+
+    def _validate_and_materialize_relay(
+        self,
+        envelope: Mapping[str, Any],
+        binding: ExpectedBinding,
+        *,
+        next_stage: str,
+        prompt_profile: str,
+        input_bindings: Mapping[str, str],
+        require_review_continuation: bool = False,
+        require_mission: bool = False,
+        require_revision_delta: bool = False,
+    ) -> dict[str, Any]:
+        relay = envelope.get("relay")
+        if not isinstance(relay, dict):
+            raise WorkflowError("STAGE_RELAY_MISSING", binding.stage)
+        expected_keys = {
+            "schema", "workflow_id", "from_stage", "attempt_index", "nonce",
+            "next_stage", "prompt_profile", "input_bindings", "next_prompt_body",
+            *({"review_prompt_body"} if require_review_continuation else set()),
+            *({"mission_body"} if require_mission else set()),
+            *({"revision_delta"} if require_revision_delta else set()),
+        }
+        if set(relay) != expected_keys:
+            raise WorkflowError("STAGE_RELAY_KEYS_INVALID", binding.stage)
+        if (
+            relay.get("schema") != RELAY_SCHEMA
+            or relay.get("workflow_id") != binding.workflow_id
+            or relay.get("from_stage") != binding.stage
+            or relay.get("attempt_index") != binding.attempt_index
+            or relay.get("nonce") != binding.nonce
+            or relay.get("next_stage") != next_stage
+            or relay.get("prompt_profile") != prompt_profile
+            or relay.get("input_bindings") != dict(input_bindings)
+        ):
+            raise WorkflowError("STAGE_RELAY_BINDING_MISMATCH", binding.stage)
+        next_prompt = self._relay_text(relay.get("next_prompt_body"), "next_prompt_body")
+        review_prompt = (
+            self._relay_text(relay.get("review_prompt_body"), "review_prompt_body")
+            if require_review_continuation else None
+        )
+        mission_body = (
+            self._relay_text(relay.get("mission_body"), "mission_body")
+            if require_mission else None
+        )
+        revision_delta = relay.get("revision_delta") if require_revision_delta else None
+        if require_revision_delta:
+            expected_delta_keys = {"required_changes", "conditions", "evidence_gaps", "preserve"}
+            if (
+                not isinstance(revision_delta, dict)
+                or set(revision_delta) != expected_delta_keys
+                or any(
+                    not isinstance(revision_delta[key], list)
+                    or any(not isinstance(item, str) or not item.strip() for item in revision_delta[key])
+                    for key in expected_delta_keys
+                )
+            ):
+                raise WorkflowError("STAGE_RELAY_REVISION_DELTA_INVALID", binding.stage)
+
+        stem = f"relay-{binding.stage}-attempt-{binding.attempt_index}"
+        relay_path = self.handoff_dir / f"{stem}.json"
+        next_prompt_path = self.handoff_dir / f"{stem}-next-prompt.txt"
+        write_immutable_text(relay_path, json.dumps(relay, ensure_ascii=False, indent=2, sort_keys=True))
+        write_immutable_utf8_bytes(next_prompt_path, next_prompt)
+        receipt: dict[str, Any] = {
+            "schema": "codex.chatgpt.stage-relay-receipt/v1",
+            "workflow_id": self.workflow_id,
+            "from_stage": binding.stage,
+            "attempt_index": binding.attempt_index,
+            "nonce": binding.nonce,
+            "relay": {"path": str(relay_path), "sha256": file_sha256(relay_path)},
+            "next_prompt": {"path": str(next_prompt_path), "sha256": file_sha256(next_prompt_path)},
+            "next_stage": next_stage,
+            "prompt_profile": prompt_profile,
+            "input_bindings": dict(input_bindings),
+        }
+        if review_prompt is not None:
+            review_path = self.handoff_dir / f"{stem}-review-prompt.txt"
+            write_immutable_utf8_bytes(review_path, review_prompt)
+            receipt["review_prompt"] = {"path": str(review_path), "sha256": file_sha256(review_path)}
+        if mission_body is not None:
+            mission_path = self.handoff_dir / f"{stem}-mission.txt"
+            write_immutable_utf8_bytes(mission_path, mission_body)
+            receipt["mission"] = {"path": str(mission_path), "sha256": file_sha256(mission_path)}
+        if revision_delta is not None:
+            delta_path = self.handoff_dir / f"{stem}-revision-delta.json"
+            write_immutable_text(delta_path, json.dumps(revision_delta, ensure_ascii=False, indent=2, sort_keys=True))
+            receipt["revision_delta"] = {"path": str(delta_path), "sha256": file_sha256(delta_path)}
+        receipt_path = self.handoff_dir / f"{stem}.receipt.json"
+        write_immutable_text(receipt_path, json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True))
+        return {**receipt, "receipt_path": str(receipt_path), "receipt_sha256": file_sha256(receipt_path)}
+
+    @staticmethod
+    def _bound_relay_prompt(
+        prompt_ref: Mapping[str, Any],
+        *,
+        binding: ExpectedBinding,
+        immutable_inputs: Iterable[Mapping[str, Any]],
+        output_template: str,
+    ) -> str:
+        path = Path(str(prompt_ref.get("path") or ""))
+        expected = str(prompt_ref.get("sha256") or "")
+        if not path.is_file() or path.is_symlink() or file_sha256(path) != expected:
+            raise WorkflowError("STAGE_RELAY_PROMPT_IDENTITY_INVALID", str(path))
+        body = path.read_text(encoding="utf-8")
+        host_binding = {
+            "schema": "codex.chatgpt.relay-host-binding/v1",
+            "workflow_id": binding.workflow_id,
+            "stage": binding.stage,
+            "attempt_index": binding.attempt_index,
+            "nonce": binding.nonce,
+            "question_sha256": binding.question_sha256,
+            "source_snapshot_sha256": binding.source_snapshot_sha256,
+            "immutable_inputs": list(immutable_inputs),
+        }
+        return (
+            body.rstrip()
+            + "\n\n[HOST-VERIFIED IMMUTABLE BINDING]\n"
+            + json.dumps(host_binding, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n\n[REQUIRED FINAL ENVELOPE]\n"
+            + output_template.strip()
+            + "\n"
+        )
+
     def _write_gate_descriptor(self, name: str, descriptor: Mapping[str, Any]) -> tuple[Path, str]:
         path = self.handoff_dir / f"{name}.gate.json"
         write_immutable_text(path, json.dumps(descriptor, ensure_ascii=False, indent=2, sort_keys=True))
@@ -760,6 +1043,22 @@ class ProPlanHandoffDriver:
     def prepare(self) -> dict[str, Any]:
         if self.state_path.is_file():
             state = load_mapping(self.state_path)
+            recorded_manifest_schema = state.get("workflow_manifest_schema")
+            recorded_manifest_sha256 = state.get("workflow_manifest_sha256")
+            if recorded_manifest_schema is None and recorded_manifest_sha256 is None and not self.web_native_relay:
+                # Pre-v4 states could not persist this identity. The constructor
+                # already proved their immutable snapshot/archive/checkpoints;
+                # pin the exact manifest on the first upgraded recovery so a
+                # later config edit cannot change the continuation contract.
+                state["workflow_manifest_schema"] = self.manifest.get("schema")
+                state["workflow_manifest_sha256"] = file_sha256(self.manifest_path)
+                state["legacy_manifest_identity_upgrade"] = "validated-pre-v4-state"
+                atomic_write_json(self.state_path, state)
+            elif (
+                recorded_manifest_schema != self.manifest.get("schema")
+                or recorded_manifest_sha256 != file_sha256(self.manifest_path)
+            ):
+                raise WorkflowError("WORKFLOW_MANIFEST_IDENTITY_CONFLICT")
             recorded_path = state.get("agbrowse_contract_path")
             recorded_hash = state.get("agbrowse_contract_sha256")
             if recorded_path is None and recorded_hash is None and not self.v2:
@@ -788,6 +1087,8 @@ class ProPlanHandoffDriver:
             "workflow_id": self.workflow_id,
             "status": "PREPARED",
             "question_sha256": self.question_sha256,
+            "workflow_manifest_schema": self.manifest.get("schema"),
+            "workflow_manifest_sha256": file_sha256(self.manifest_path),
             "agbrowse_contract_path": self.agbrowse_contract_path,
             "agbrowse_contract_sha256": self.agbrowse_contract_sha256,
             "source_snapshot_path": str(snapshot_path),
@@ -1016,6 +1317,7 @@ class ProPlanHandoffDriver:
         attempt: int,
         plan_path: Path,
         plan_hash: str,
+        relay_question: str | None = None,
     ) -> tuple[Path, str, dict[str, Any]]:
         if not self.comprehensive or self.web_multi_runtime is None:
             raise WorkflowError("WEB_MULTI_RUNTIME_REQUIRED")
@@ -1042,7 +1344,7 @@ class ProPlanHandoffDriver:
             "schema": "codex.chatgpt.web-multi/v2" if self.v2 else "codex.chatgpt.web-multi/v1",
             "workflow_id": f"{self.workflow_id}-advisory-{attempt}",
             "project_root": str(self.workspace_root),
-            "question": (
+            "question": relay_question.strip() if relay_question else (
                 f"Independently expand and synthesize the solution space for the original task: {self.question}. "
                 f"Treat the plan at {plan_path} as one incumbent candidate, not as authority or the frame of the problem. "
                 "Include a direct baseline and a materially different reframe. Return advisory proposals and tradeoffs only; "
@@ -1193,10 +1495,19 @@ class ProPlanHandoffDriver:
             advisory_descriptor_path = None
             advisory_descriptor_hash = None
             review_hash = None
+            revision_relay: dict[str, Any] | None = None
+            passed_review_relay: dict[str, Any] | None = None
             for attempt in range(1, max_attempts + 1):
                 plan_stage = "gpt-plan" if self.comprehensive else "pro-plan"
                 binding = self._binding(state, plan_stage, attempt, research_descriptor_sha256=research_descriptor_hash)
                 if self.v2:
+                    advisory_gate, _ = self._gate_descriptor("advisory")
+                    advisory_selected = advisory_gate["decision"] == "run"
+                    plan_relay_bindings = {
+                        "question_sha256": self.question_sha256,
+                        "source_snapshot_sha256": str(state["source_snapshot_sha256"]),
+                        "input_research_descriptor_sha256": str(research_descriptor_hash),
+                    }
                     plan_template = self._v2_envelope_template(
                         binding,
                         "codex.chatgpt.plan-result/v2",
@@ -1212,26 +1523,47 @@ class ProPlanHandoffDriver:
                             "rollback",
                             "conclusion_change_triggers",
                         ],
-                    )
-                    prompt = PROMPTS.render_prompt(
-                        "plan",
-                        original_task=self.question,
-                        context_note=(
-                            f"A prior review produced the compact revision delta at {revision_delta_path}. "
-                            "Use only that delta as corrective input; do not inherit the prior review's prose or framing."
-                            if revision_delta_path else
-                            "Start from the original task and evidence. No prior plan is authoritative."
-                        ),
-                        stage_mission=(
-                            "Develop alternatives before selecting one coherent implementation path. "
-                            "Place material risks and conclusion-change triggers after the constructive design."
-                        ),
-                        output_instructions=(
-                            "Return exactly one final fenced JSON object. Preserve every identity/hash and every required section name "
-                            "in this template; add detailed plan fields as needed and add no text after the fence:\n"
-                            f"{plan_template}"
+                        **(
+                            {
+                                "relay": self._relay_template(
+                                    binding,
+                                    next_stage="web-multi-advisory" if advisory_selected else "gpt-review",
+                                    prompt_profile="web-branch-designer" if advisory_selected else "review",
+                                    input_bindings=plan_relay_bindings,
+                                    include_review_continuation=advisory_selected,
+                                )
+                            }
+                            if self.web_native_relay else {}
                         ),
                     )
+                    if self.web_native_relay and revision_relay is not None:
+                        prompt = self._bound_relay_prompt(
+                            revision_relay["next_prompt"],
+                            binding=binding,
+                            immutable_inputs=([revision_relay["revision_delta"]] if revision_relay.get("revision_delta") else []),
+                            output_template=plan_template,
+                        )
+                    else:
+                        prompt = PROMPTS.render_prompt(
+                            "plan",
+                            original_task=self.question,
+                            context_note=(
+                                f"A prior review produced the compact revision delta at {revision_delta_path}. "
+                                "Use only that delta as corrective input; do not inherit the prior review's prose or framing."
+                                if revision_delta_path else
+                                "Start from the original task and evidence. No prior plan is authoritative."
+                            ),
+                            stage_mission=(
+                                "Develop alternatives before selecting one coherent implementation path. "
+                                "Place material risks and conclusion-change triggers after the constructive design."
+                            ),
+                            output_instructions=(
+                                "Return exactly one final fenced JSON object. Preserve every identity/hash and every required section name "
+                                "in this template; add detailed plan fields as needed. When relay is present, author its prompt text for the "
+                                "declared next web stage rather than asking local Codex to rewrite it. Add no text after the fence:\n"
+                                f"{plan_template}"
+                            ),
+                        )
                 else:
                     prompt = PROMPTS.render_prompt(
                         "plan",
@@ -1263,17 +1595,37 @@ class ProPlanHandoffDriver:
                 plan_path = self.handoff_dir / f"plan-{attempt}.json"
                 write_immutable_text(plan_path, json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True))
                 plan_hash = file_sha256(plan_path)
+                plan_relay = None
+                if self.web_native_relay:
+                    plan_relay = self._validate_and_materialize_relay(
+                        plan,
+                        binding,
+                        next_stage="web-multi-advisory" if advisory_selected else "gpt-review",
+                        prompt_profile="web-branch-designer" if advisory_selected else "review",
+                        input_bindings=plan_relay_bindings,
+                        require_review_continuation=advisory_selected,
+                    )
 
                 advisory_path = None
                 advisory_hash = None
                 advisory_descriptor_path = None
                 advisory_descriptor_hash = None
                 if self.v2:
-                    advisory_gate, _ = self._gate_descriptor("advisory")
                     if advisory_gate["decision"] == "run":
-                        advisory_path, advisory_hash, _ = self._run_pro_advisory(
-                            state, attempt=attempt, plan_path=plan_path, plan_hash=plan_hash,
-                        )
+                        if self.web_native_relay:
+                            assert plan_relay is not None
+                            relay_question = Path(str(plan_relay["next_prompt"]["path"])).read_text(encoding="utf-8")
+                            advisory_path, advisory_hash, _ = self._run_web_multi_advisory(
+                                state,
+                                attempt=attempt,
+                                plan_path=plan_path,
+                                plan_hash=plan_hash,
+                                relay_question=relay_question,
+                            )
+                        else:
+                            advisory_path, advisory_hash, _ = self._run_pro_advisory(
+                                state, attempt=attempt, plan_path=plan_path, plan_hash=plan_hash,
+                            )
                         advisory_gate["artifact"] = {"path": str(advisory_path), "sha256": advisory_hash}
                     advisory_descriptor_path, advisory_descriptor_hash = self._write_gate_descriptor(
                         f"advisory-{attempt}", advisory_gate
@@ -1296,30 +1648,90 @@ class ProPlanHandoffDriver:
                     advisory_descriptor_sha256=advisory_descriptor_hash,
                 )
                 if self.v2:
-                    review_template = self._v2_envelope_template(
-                        review_binding,
-                        "codex.chatgpt.review-result/v2",
-                        input_plan_sha256=plan_hash,
-                        input_research_descriptor_sha256=research_descriptor_hash,
-                        input_advisory_descriptor_sha256=advisory_descriptor_hash,
-                        verdict="PASS",
-                    )
-                    review_prompt = PROMPTS.render_prompt(
-                        "review",
-                        original_task=self.question,
-                        context_note=(
-                            f"Candidate plan: {plan_path}. "
-                            + (f"Independent advisory: {advisory_path}." if advisory_path else "Advisory was skipped by its immutable gate.")
-                        ),
-                        stage_mission=(
-                            "Review against the original task, declared constraints, and evidence. "
-                            "PASS only when implementation-ready; otherwise REVISE or BLOCK."
-                        ),
-                        output_instructions=(
-                            "Return exactly one final fenced JSON object, preserve all identity/hash values in this template, "
-                            "and add no text after the fence:\n" + review_template
-                        ),
-                    )
+                    review_relay_bindings = {
+                        "question_sha256": self.question_sha256,
+                        "source_snapshot_sha256": str(state["source_snapshot_sha256"]),
+                        "input_plan_sha256": str(plan_hash),
+                        "input_research_descriptor_sha256": str(research_descriptor_hash),
+                        "input_advisory_descriptor_sha256": str(advisory_descriptor_hash),
+                    }
+                    if self.web_native_relay:
+                        pass_relay_template = self._relay_template(
+                            review_binding,
+                            next_stage="gpt-orchestrator",
+                            prompt_profile="orchestrator",
+                            input_bindings=review_relay_bindings,
+                            include_mission=True,
+                        )
+                        revise_relay_template = self._relay_template(
+                            review_binding,
+                            next_stage="gpt-plan",
+                            prompt_profile="plan",
+                            input_bindings=review_relay_bindings,
+                            include_revision_delta=True,
+                        )
+                        review_template = self._v2_envelope_template(
+                            review_binding,
+                            "codex.chatgpt.review-result/v2",
+                            input_plan_sha256=plan_hash,
+                            input_research_descriptor_sha256=research_descriptor_hash,
+                            input_advisory_descriptor_sha256=advisory_descriptor_hash,
+                            verdict="<PASS|REVISE|BLOCK>",
+                            relay="<replace with exactly the matching branch object below; omit relay only for BLOCK>",
+                        ) + (
+                            "\n\nPASS relay object:\n"
+                            + json.dumps(pass_relay_template, ensure_ascii=False, indent=2, sort_keys=True)
+                            + "\n\nREVISE relay object:\n"
+                            + json.dumps(revise_relay_template, ensure_ascii=False, indent=2, sort_keys=True)
+                            + "\n\nBLOCK branch: omit relay and explain the blocker in ordinary review fields."
+                        )
+                    else:
+                        review_template = self._v2_envelope_template(
+                            review_binding,
+                            "codex.chatgpt.review-result/v2",
+                            input_plan_sha256=plan_hash,
+                            input_research_descriptor_sha256=research_descriptor_hash,
+                            input_advisory_descriptor_sha256=advisory_descriptor_hash,
+                            verdict="PASS",
+                        )
+                    if self.web_native_relay:
+                        assert plan_relay is not None
+                        prompt_ref = (
+                            plan_relay["review_prompt"]
+                            if advisory_selected else plan_relay["next_prompt"]
+                        )
+                        immutable_inputs = [
+                            {"role": "candidate-plan", "path": str(plan_path), "sha256": plan_hash},
+                            {"role": "research-descriptor", "path": str(research_descriptor_path), "sha256": research_descriptor_hash},
+                            {"role": "advisory-descriptor", "path": str(advisory_descriptor_path), "sha256": advisory_descriptor_hash},
+                            *(
+                                [{"role": "web-multi-advisory", "path": str(advisory_path), "sha256": advisory_hash}]
+                                if advisory_path and advisory_hash else []
+                            ),
+                        ]
+                        review_prompt = self._bound_relay_prompt(
+                            prompt_ref,
+                            binding=review_binding,
+                            immutable_inputs=immutable_inputs,
+                            output_template=review_template,
+                        )
+                    else:
+                        review_prompt = PROMPTS.render_prompt(
+                            "review",
+                            original_task=self.question,
+                            context_note=(
+                                f"Candidate plan: {plan_path}. "
+                                + (f"Independent advisory: {advisory_path}." if advisory_path else "Advisory was skipped by its immutable gate.")
+                            ),
+                            stage_mission=(
+                                "Review against the original task, declared constraints, and evidence. "
+                                "PASS only when implementation-ready; otherwise REVISE or BLOCK."
+                            ),
+                            output_instructions=(
+                                "Return exactly one final fenced JSON object, preserve all identity/hash values in this template, "
+                                "and add no text after the fence:\n" + review_template
+                            ),
+                        )
                 else:
                     review_prompt = PROMPTS.render_prompt(
                         "review",
@@ -1343,7 +1755,19 @@ class ProPlanHandoffDriver:
                 review_path = self.handoff_dir / f"review-{attempt}.json"
                 write_immutable_text(review_path, json.dumps(review, ensure_ascii=False, indent=2, sort_keys=True))
                 review_hash = file_sha256(review_path)
+                current_review_relay = None
+                if self.web_native_relay and review["verdict"] in {"PASS", "REVISE"}:
+                    current_review_relay = self._validate_and_materialize_relay(
+                        review,
+                        review_binding,
+                        next_stage="gpt-orchestrator" if review["verdict"] == "PASS" else "gpt-plan",
+                        prompt_profile="orchestrator" if review["verdict"] == "PASS" else "plan",
+                        input_bindings=review_relay_bindings,
+                        require_mission=review["verdict"] == "PASS",
+                        require_revision_delta=review["verdict"] == "REVISE",
+                    )
                 if review["verdict"] == "PASS":
+                    passed_review_relay = current_review_relay
                     break
                 if review["verdict"] == "BLOCK":
                     raise WorkflowError("REVIEW_BLOCKED")
@@ -1358,6 +1782,13 @@ class ProPlanHandoffDriver:
                     "evidence_gaps": review.get("evidence_gaps") or [],
                     "preserve": review.get("preserve") or review.get("strengths") or [],
                 }
+                if self.web_native_relay:
+                    assert current_review_relay is not None
+                    authored_delta = json.loads(
+                        Path(str(current_review_relay["revision_delta"]["path"])).read_text(encoding="utf-8")
+                    )
+                    revision_delta.update(authored_delta)
+                    revision_relay = current_review_relay
                 revision_delta_path = self.handoff_dir / f"revision-delta-{attempt}.json"
                 write_immutable_text(
                     revision_delta_path,
@@ -1386,6 +1817,15 @@ class ProPlanHandoffDriver:
             if self.v2:
                 handoff["research_descriptor"] = {"path": str(research_descriptor_path), "sha256": research_descriptor_hash}
                 handoff["advisory_descriptor"] = {"path": str(advisory_descriptor_path), "sha256": advisory_descriptor_hash}
+            if self.web_native_relay:
+                if passed_review_relay is None:
+                    raise WorkflowError("ORCHESTRATOR_RELAY_MISSING")
+                handoff["stage_relay"] = {
+                    "receipt_path": str(passed_review_relay["receipt_path"]),
+                    "receipt_sha256": str(passed_review_relay["receipt_sha256"]),
+                    "next_prompt": dict(passed_review_relay["next_prompt"]),
+                    "mission": dict(passed_review_relay["mission"]),
+                }
             handoff_path = self.handoff_dir / "handoff.manifest.json"
             write_immutable_text(handoff_path, json.dumps(handoff, ensure_ascii=False, indent=2, sort_keys=True))
             parallel_selected = bool(self.parallel_execution.get("selected"))
@@ -1401,6 +1841,15 @@ class ProPlanHandoffDriver:
                     "verdict": review.get("verdict"),
                     "mandatory_conditions": review.get("conditions") or review.get("required_changes") or [],
                 },
+                "web_authored_mission": (
+                    {
+                        "path": str(passed_review_relay["mission"]["path"]),
+                        "sha256": str(passed_review_relay["mission"]["sha256"]),
+                        "relay_receipt_path": str(passed_review_relay["receipt_path"]),
+                        "relay_receipt_sha256": str(passed_review_relay["receipt_sha256"]),
+                    }
+                    if self.web_native_relay and passed_review_relay is not None else None
+                ),
                 "research_descriptor": (
                     {"path": str(research_descriptor_path), "sha256": research_descriptor_hash}
                     if research_descriptor_path and research_descriptor_hash else None
@@ -1449,10 +1898,16 @@ class ProPlanHandoffDriver:
                 json.dumps(execution_mission, ensure_ascii=False, indent=2, sort_keys=True),
             )
             if parallel_selected:
+                if passed_review_relay is None:
+                    raise WorkflowError("PARALLEL_IMPLEMENTATION_RELAY_MISSING")
+                relay_bound_graph, parallel_relay_binding = self._relay_bound_parallel_graph(
+                    Path(str(self.parallel_execution["implementation_graph"])),
+                    passed_review_relay,
+                )
                 parallel_runtime = self.parallel_implementation_runtime or LocalParallelImplementationRuntime()
                 parallel_result = dict(parallel_runtime.execute(
                     Path(str(self.parallel_execution["workflow_v3_manifest"])),
-                    Path(str(self.parallel_execution["implementation_graph"])),
+                    relay_bound_graph,
                     Path(str(self.parallel_execution["capacity_receipt"])),
                 ))
                 final = {
@@ -1471,6 +1926,9 @@ class ProPlanHandoffDriver:
                     "handoff_path": str(handoff_path),
                     "execution_mission_path": str(execution_mission_path),
                     "implementation_route": self.parallel_execution,
+                    "parallel_relay_binding": parallel_relay_binding,
+                    "relay_receipt_path": str(passed_review_relay["receipt_path"]) if passed_review_relay else None,
+                    "relay_receipt_sha256": str(passed_review_relay["receipt_sha256"]) if passed_review_relay else None,
                     "parallel_implementation_result": parallel_result,
                 }
                 atomic_write_json(self.workflow_dir / "final.json", final)
@@ -1492,26 +1950,41 @@ class ProPlanHandoffDriver:
                     commands=[],
                     blockers=[],
                 )
-                prompt = PROMPTS.render_prompt(
-                    "orchestrator",
-                    original_task=self.question,
-                    context_note=(
-                        f"ExecutionMission: {execution_mission_path}. "
-                        f"The selected plan at {plan_path} is guidance, not a cage. "
-                        "Do not consume the full review or advisory transcript as an execution frame."
-                    ),
-                    stage_mission=(
-                        "Use the selected app to inspect the live workspace, implement, test, inspect results, "
-                        "and adapt within the mission's deviation policy. Partition safe independent work into "
-                        "internal lanes or parallel tool calls and integrate it yourself. Do not return strategy "
-                        "search or implementation to local Codex; keep local Codex token use minimal."
-                    ),
-                    output_instructions=(
-                        "Return exactly one final fenced JSON object, preserve every identity/hash value in this template, "
-                        "fill the result arrays, and add no text after the fence:\n"
-                        f"{orchestrator_template}"
-                    ),
-                )
+                if self.web_native_relay:
+                    if passed_review_relay is None or not passed_review_relay.get("mission"):
+                        raise WorkflowError("ORCHESTRATOR_RELAY_MISSING")
+                    prompt = self._bound_relay_prompt(
+                        passed_review_relay["next_prompt"],
+                        binding=binding,
+                        immutable_inputs=[
+                            {"role": "execution-mission", "path": str(execution_mission_path), "sha256": file_sha256(execution_mission_path)},
+                            {"role": "selected-plan", "path": str(plan_path), "sha256": plan_hash},
+                            {"role": "approved-review", "path": str(review_path), "sha256": review_hash},
+                            {"role": "web-authored-mission", **dict(passed_review_relay["mission"])},
+                        ],
+                        output_template=orchestrator_template,
+                    )
+                else:
+                    prompt = PROMPTS.render_prompt(
+                        "orchestrator",
+                        original_task=self.question,
+                        context_note=(
+                            f"ExecutionMission: {execution_mission_path}. "
+                            f"The selected plan at {plan_path} is guidance, not a cage. "
+                            "Do not consume the full review or advisory transcript as an execution frame."
+                        ),
+                        stage_mission=(
+                            "Use the selected app to inspect the live workspace, implement, test, inspect results, "
+                            "and adapt within the mission's deviation policy. Partition safe independent work into "
+                            "internal lanes or parallel tool calls and integrate it yourself. Do not return strategy "
+                            "search or implementation to local Codex; keep local Codex token use minimal."
+                        ),
+                        output_instructions=(
+                            "Return exactly one final fenced JSON object, preserve every identity/hash value in this template, "
+                            "fill the result arrays, and add no text after the fence:\n"
+                            f"{orchestrator_template}"
+                        ),
+                    )
             else:
                 prompt = PROMPTS.render_prompt(
                     "orchestrator",
@@ -1527,11 +2000,14 @@ class ProPlanHandoffDriver:
                         "Keep local Codex token use minimal."
                     ),
                 )
+            orchestrator_read_only_paths: tuple[Path, ...] = (execution_mission_path, plan_path)
+            if self.web_native_relay and passed_review_relay is not None and passed_review_relay.get("mission"):
+                orchestrator_read_only_paths += (Path(str(passed_review_relay["mission"]["path"])),)
             manifest = self._manifest(
                 state,
                 binding,
                 prompt,
-                read_only_paths=(execution_mission_path, plan_path),
+                read_only_paths=orchestrator_read_only_paths,
             )
             result, transcript, _ = self._dispatch("gpt-orchestrator", 1, manifest)
             self._verify_runtime(result, manifest)
@@ -1554,6 +2030,8 @@ class ProPlanHandoffDriver:
                 "handoff_path": str(handoff_path),
                 "execution_mission_path": str(execution_mission_path),
                 "implementation_route": self.parallel_execution,
+                "relay_receipt_path": str(passed_review_relay["receipt_path"]) if passed_review_relay else None,
+                "relay_receipt_sha256": str(passed_review_relay["receipt_sha256"]) if passed_review_relay else None,
                 "orchestrator_envelope": envelope,
             }
             atomic_write_json(self.workflow_dir / "final.json", final)

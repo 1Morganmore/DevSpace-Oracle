@@ -215,6 +215,40 @@ def test_v2_missing_mode_variant_selects_highest_available_regular_level(tmp_pat
     assert not (tmp_path / "output").exists()
 
 
+@pytest.mark.parametrize("value", [None, 0, 6, True, "5"])
+def test_provider_parallel_limit_is_strictly_validated_before_side_effects(tmp_path: Path, value: object) -> None:
+    manifest = make_v2_manifest(tmp_path, extra={"provider_parallel_limit": value})
+
+    with pytest.raises(RUNTIME.WebMultiError) as failure:
+        RUNTIME.WebMultiRuntime(manifest, state_root=tmp_path / "state")
+
+    assert failure.value.code.startswith("PROVIDER_PARALLEL_LIMIT_")
+    assert not (tmp_path / "output").exists()
+    assert not (tmp_path / "state").exists()
+
+
+def test_provider_parallel_limit_is_in_dry_run_and_stage_receipts(tmp_path: Path) -> None:
+    runtime = RUNTIME.WebMultiRuntime(
+        make_v2_manifest(tmp_path, extra={"provider_parallel_limit": 3}),
+        state_root=tmp_path / "state",
+        stage_executor=DynamicExecutor(6, slow_pairs=False),
+    )
+
+    assert runtime.dry_run()["provider_parallel_limit"] == 3
+    evidence_map = runtime._source_evidence_map()
+    runtime.workflow_dir.mkdir(parents=True, exist_ok=True)
+    RUNTIME.write_immutable_json(runtime.evidence_map_path, evidence_map)
+    artifacts = runtime._stage_artifacts(
+        RUNTIME.StageSpec("planner", "Planner", 0, 0, runtime.manifest["question"], tuple()),
+        {"run_id": "receipt-parent"},
+        evidence_map,
+    )
+    context = json.loads(Path(artifacts["context_path"]).read_text(encoding="utf-8"))
+    receipt = json.loads(Path(artifacts["manifest_path"]).read_text(encoding="utf-8"))
+    assert context["provider_parallel_limit"] == 3
+    assert receipt["provider_parallel_limit"] == 3
+
+
 class FallbackExecutor(DynamicExecutor):
     def __init__(self, *, fail_role: str):
         super().__init__(6, slow_pairs=False)
@@ -289,6 +323,7 @@ def test_dynamic_pipeline_pairs_lanes_and_selects_exact_seed_zero_result(tmp_pat
 
     assert result["actual_solver_count"] == 6
     assert result["observed_solver_count"] == 6
+    assert result["provider_parallel_limit"] == 5
     assert result["organizer_result"] == "organized v2 answer"
     assert result["planner_policy"] == "strict-6-10"
     assert len(list(runtime.stages_dir.glob("final-merger-*/stage-result.json"))) == 6
@@ -318,6 +353,21 @@ def test_dynamic_pipeline_pairs_lanes_and_selects_exact_seed_zero_result(tmp_pat
         == "accepted"
         for path in runtime.stages_dir.glob("*/stage-result.json")
     )
+
+
+def test_dynamic_ten_lane_topology_completes_in_five_or_smaller_capacity_waves(tmp_path: Path) -> None:
+    runtime = RUNTIME.WebMultiRuntime(
+        make_v2_manifest(tmp_path),
+        state_root=tmp_path / "state",
+        stage_executor=DynamicExecutor(10, slow_pairs=False),
+    )
+
+    result = runtime.run()
+
+    assert result["actual_solver_count"] == 10
+    assert len(list(runtime.stages_dir.glob("final-merger-*/stage-result.json"))) == 8
+    assert result["provider_parallel_limit"] == 5
+    assert result["max_concurrent_child_generations"] <= 5
 
 
 def test_dynamic_resume_rejects_tampered_planner_descriptor(tmp_path: Path) -> None:

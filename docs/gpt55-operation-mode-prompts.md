@@ -70,10 +70,11 @@ Non-Pro stages select the strongest declared regular-web level (`Very High` befo
 
 The host compiles every worker prompt from `execution-mission-v2`. It includes immutable `input_base_oid`, exact claimed paths, registered test IDs, topology receipt, and structured output schema. A worker suggestion never expands its authority. Host-derived diff and filesystem evidence are authoritative.
 
-## Comprehensive mode
+## Comprehensive mode v4
 
-The compatibility v2 state/recovery topology remains stable, while new stage
-prompts use v3 profiles:
+The compatibility v1/v2 state/recovery topology remains stable, v3 remains the
+separate parallel-implementation contract, and new comprehensive workflows use
+v4 web-native relay with v3 prompt profiles:
 
 1. optional evidence/Deep Research gate;
 2. constructive fresh plan;
@@ -83,5 +84,11 @@ prompts use v3 profiles:
 6. `ExecutionMission` compilation;
 7. adaptive orchestrator implementation;
 8. deterministic local verification.
+
+The Planner authors the next review/advisory prompt. The Reviewer authors either
+the next Planner prompt plus revision delta or the Orchestrator prompt plus
+implementation mission. The host preserves those semantic bytes and adds only a
+deterministic hash/binding wrapper and required output envelope; it does not
+spend local Codex reasoning on rewriting the next prompt.
 
 `PASS` is only a transition token. It does not turn a plan into immutable truth.

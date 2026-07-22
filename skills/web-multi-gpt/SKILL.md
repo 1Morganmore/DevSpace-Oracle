@@ -54,6 +54,7 @@ The default compatibility manifest schema remains `codex.chatgpt.web-multi/v1`. 
 - `solver_count` in `2..4` (default `3`)
 - `max_iterations` in `1..5` (default `2`)
 - `provider_failure_retry_limit` in `0..2` (default `1`)
+- optional `provider_parallel_limit` as an integer in `1..5` (default `5`); this is the hard provider-generation cap, not a topology reduction
 
 V1 retains `mode_variant: Very High` by default; `High` remains available for its frozen comparison arm. V2 upstream-parity manifests accept the exact values `High` and `Very High`; when omitted, the strongest declared regular-web capability is selected (`Very High` before `High`). Any other value is rejected before any output, state, app, or browser side effect.
 
@@ -65,7 +66,7 @@ For an opt-in dynamic upstream-parity run, use schema `codex.chatgpt.web-multi/v
 - optional `agbrowse_contract_sha256`, exactly 64 lowercase hexadecimal characters matching the SHA-256 of the resolved `agbrowse_contract` file; when omitted, the existing contract-resolution compatibility path remains supported
 - no `solver_count` key at all, including `null`
 
-V2 uses an exact top-level allowlist, including the optional `agbrowse_contract_sha256` binding, and is compiled before output directories, RunStore, parent locks, child artifacts, app checks, or browser targets can be created. A supplied contract hash is shape-checked and matched against the resolved contract file before those side effects. The accepted Planner result owns one immutable descriptor containing the observed count, retained ordered approaches, actual count, source payload hash, and descriptor hash. Do not infer topology from child counts, open tabs, capacity pressure, or a manifest field.
+V2 uses an exact top-level allowlist, including the optional `agbrowse_contract_sha256` binding and `provider_parallel_limit`, and is compiled before output directories, RunStore, parent locks, child artifacts, app checks, or browser targets can be created. A supplied contract hash is shape-checked and matched against the resolved contract file before those side effects. The accepted Planner result owns one immutable descriptor containing the observed count, retained ordered approaches, actual count, source payload hash, and descriptor hash. Do not infer topology from child counts, open tabs, capacity pressure, or a manifest field.
 
 V1 remains byte-compatible: omitted `solver_count` means 3 and explicit values remain 2, 3, or 4. Do not silently upgrade a v1 manifest to v2.
 
@@ -74,6 +75,7 @@ V1 remains byte-compatible: omitted `solver_count` means 3 and explicit values r
 - Port selection and reduction semantics through the I/O-free `chatgpt_web_multi_upstream.py`; do not modify the workflow-selected external agbrowse package or add a second browser engine.
 - Solver completion starts its same-lane InitialRefiner immediately. All accepted InitialRefiners must finish before Merger groups are computed.
 - Merger completion starts its same-seed LoopRefiner immediately. All LoopRefiners must finish before Judge.
+- Every provider-generation wave is chunked at `provider_parallel_limit` (maximum 5). Each submission barrier covers only submitting children in its exact chunk, preventing a 6–10 lane topology from waiting for unscheduled siblings. Chunking preserves each Solver→InitialRefiner and Merger→LoopRefiner lane pairing; it never changes the accepted topology.
 - Candidate and group collectors use captured input-index slots. Completion order, stage IDs, model-returned source IDs, and result text never reorder them.
 - Merger count is `min(8, n)`, group size is `min(3, n)`, and outstanding candidates receive upstream duplicate-pool weighting.
 - Judge IDs are normalized from 1-based values; unknown and duplicate IDs are removed. Inadequate candidates are filtered and survivors are densely remapped. If all are inadequate, restore the original set.

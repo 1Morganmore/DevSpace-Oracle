@@ -68,7 +68,8 @@ def make_v2_manifest(
 ) -> Path:
     path = make_manifest(tmp_path, "gpt-comprehensive")
     value = json.loads(path.read_text(encoding="utf-8"))
-    value["schema"] = "codex.chatgpt.comprehensive-workflow/v2"
+    value["schema"] = "codex.chatgpt.comprehensive-workflow/v4"
+    value["relay"] = {"mode": "web-native-v1"}
     value["gates"] = {
         "research": {
             "policy": research_policy,
@@ -82,6 +83,15 @@ def make_v2_manifest(
             "contradiction_evidence": list(contradiction_evidence or []),
         },
     }
+    path.write_text(json.dumps(value), encoding="utf-8")
+    return path
+
+
+def make_legacy_v2_manifest(tmp_path: Path) -> Path:
+    path = make_v2_manifest(tmp_path)
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["schema"] = "codex.chatgpt.comprehensive-workflow/v2"
+    value.pop("relay", None)
     path.write_text(json.dumps(value), encoding="utf-8")
     return path
 
@@ -115,6 +125,13 @@ def seed_legacy_comprehensive_recovery(manifest_path: Path) -> Path:
                 "source_snapshot_path": str(snapshot_path),
                 "source_snapshot_sha256": snapshot["snapshot_sha256"],
                 "source_archive": archive,
+                **(
+                    {
+                        "agbrowse_contract_path": str(DEFAULT_CONTRACT_PATH),
+                        "agbrowse_contract_sha256": file_sha256(DEFAULT_CONTRACT_PATH),
+                    }
+                    if manifest.get("schema") == "codex.chatgpt.comprehensive-workflow/v2" else {}
+                ),
                 "stages": {
                     "gpt-plan-attempt-1": {
                         "schema": "codex.chatgpt.stage-checkpoint/v1",
@@ -223,7 +240,7 @@ def test_published_schemas_accept_gpt_comprehensive_plan_contract(tmp_path: Path
     validate_json_schema(manifest, workflow_schema)
     validate_json_schema(correlation, correlation_schema)
     validate_json_schema(plan, plan_schema)
-    with pytest.raises(WorkflowError, match="COMPREHENSIVE_V2_REQUIRED"):
+    with pytest.raises(WorkflowError, match="COMPREHENSIVE_V4_REQUIRED"):
         validate_manifest(manifest)
 
 
@@ -269,11 +286,17 @@ class ScriptedRuntime:
             "source_snapshot_sha256": corr["source_snapshot_sha256"],
         }
         v2 = corr.get("schema") == "codex.chatgpt.workflow-correlation/v2"
+        prompt_text = Path(manifest["prompt_file"]).read_text(encoding="utf-8")
+        web_native_relay = v2 and '"relay"' in prompt_text
 
         def prompt_hash_value(key: str) -> str:
-            text = Path(manifest["prompt_file"]).read_text(encoding="utf-8")
-            match = re.search(rf'"{re.escape(key)}"\s*:\s*"([0-9a-f]{{64}})"', text)
-            assert match, (key, text)
+            match = re.search(rf'"{re.escape(key)}"\s*:\s*"([0-9a-f]{{64}})"', prompt_text)
+            assert match, (key, prompt_text)
+            return match.group(1)
+
+        def prompt_string_value(key: str) -> str:
+            match = re.search(rf'"{re.escape(key)}"\s*:\s*"([^"\\]+)"', prompt_text)
+            assert match, (key, prompt_text)
             return match.group(1)
 
         if stage == "deep-research":
@@ -298,13 +321,35 @@ class ScriptedRuntime:
                 envelope["input_research_descriptor_sha256"] = prompt_hash_value(
                     "input_research_descriptor_sha256"
                 )
+                if web_native_relay:
+                    next_stage = prompt_string_value("next_stage")
+                    prompt_profile = prompt_string_value("prompt_profile")
+                    relay = {
+                        "schema": "codex.chatgpt.stage-relay/v1",
+                        "workflow_id": common["workflow_id"],
+                        "from_stage": "gpt-plan",
+                        "attempt_index": common["attempt_index"],
+                        "nonce": common["nonce"],
+                        "next_stage": next_stage,
+                        "prompt_profile": prompt_profile,
+                        "input_bindings": {
+                            "question_sha256": common["question_sha256"],
+                            "source_snapshot_sha256": common["source_snapshot_sha256"],
+                            "input_research_descriptor_sha256": envelope["input_research_descriptor_sha256"],
+                        },
+                        "next_prompt_body": "Continue the workflow using only the immutable inputs supplied by the host.",
+                    }
+                    if next_stage == "web-multi-advisory":
+                        relay["review_prompt_body"] = "Independently review the candidate plan and advisory evidence supplied by the host."
+                    envelope["relay"] = relay
         elif stage == "gpt-review":
             plan_path = Path(manifest["read_only_paths"][0])
+            verdict = self.verdicts.pop(0)
             envelope = {
                 "schema": "codex.chatgpt.review-result/v2" if v2 else REVIEW_RESULT_SCHEMA,
                 **common,
                 "input_plan_sha256": file_sha256(plan_path),
-                "verdict": self.verdicts.pop(0),
+                "verdict": verdict,
             }
             if v2:
                 research_descriptor = next(
@@ -315,6 +360,38 @@ class ScriptedRuntime:
                 )
                 envelope["input_research_descriptor_sha256"] = file_sha256(research_descriptor)
                 envelope["input_advisory_descriptor_sha256"] = file_sha256(advisory_descriptor)
+                if web_native_relay and verdict in {"PASS", "REVISE"}:
+                    relay = {
+                        "schema": "codex.chatgpt.stage-relay/v1",
+                        "workflow_id": common["workflow_id"],
+                        "from_stage": "gpt-review",
+                        "attempt_index": common["attempt_index"],
+                        "nonce": common["nonce"],
+                        "next_stage": "gpt-orchestrator" if verdict == "PASS" else "gpt-plan",
+                        "prompt_profile": "orchestrator" if verdict == "PASS" else "plan",
+                        "input_bindings": {
+                            "question_sha256": common["question_sha256"],
+                            "source_snapshot_sha256": common["source_snapshot_sha256"],
+                            "input_plan_sha256": envelope["input_plan_sha256"],
+                            "input_research_descriptor_sha256": envelope["input_research_descriptor_sha256"],
+                            "input_advisory_descriptor_sha256": envelope["input_advisory_descriptor_sha256"],
+                        },
+                        "next_prompt_body": (
+                            "Implement the approved plan in the live app workspace and complete proportionate tests."
+                            if verdict == "PASS" else
+                            "Revise the plan using the attached compact delta and immutable evidence."
+                        ),
+                    }
+                    if verdict == "PASS":
+                        relay["mission_body"] = "Own implementation, tests, integration, and completion reporting; local Codex is host-control only."
+                    else:
+                        relay["revision_delta"] = {
+                            "required_changes": ["repair the identified gap"],
+                            "conditions": [],
+                            "evidence_gaps": [],
+                            "preserve": ["verified constraints"],
+                        }
+                    envelope["relay"] = relay
             else:
                 advisory_paths = [Path(item) for item in manifest["read_only_paths"][1:] if Path(item).name.startswith("advisory-")]
                 if advisory_paths:
@@ -558,20 +635,21 @@ def test_comprehensive_plan_uses_regular_gpt_and_app(tmp_path):
     assert manifest["files"] == [manifest["prompt_file"]]
 
 
-def test_comprehensive_selected_advisory_uses_attachment_only_pro_before_review(tmp_path):
+def test_comprehensive_selected_advisory_uses_app_only_web_multi_before_review(tmp_path):
     events = []
     runtime = ScriptedRuntime(["PASS"], events=events)
+    web_multi = FakeWebMultiRuntime(events=events)
     result = ProPlanHandoffDriver(
         make_v2_manifest(tmp_path, advisory_policy="require"),
         runtime=runtime,
+        web_multi_runtime=web_multi,
     ).run()
 
-    assert events == ["gpt-plan", "pro-advisory", "gpt-review", "gpt-orchestrator"]
+    assert events == ["gpt-plan", "web-multi", "gpt-review", "gpt-orchestrator"]
     assert result["advisory_sha256"] == file_sha256(Path(result["advisory_path"]))
-    manifest = runtime.manifests[1]
-    assert manifest["mode_label"] == "Pro"
-    assert manifest["app_policy"] == "forbidden"
-    assert manifest["chatgpt_app_name"] is None
+    manifest = web_multi.manifests[0]
+    assert manifest["schema"] == "codex.chatgpt.web-multi/v2"
+    assert manifest["chatgpt_app_name"] == "CodexPro-Test"
 
 
 def test_comprehensive_pass_invokes_parallel_v3_children_when_capacity_is_attested(tmp_path: Path) -> None:
@@ -589,9 +667,19 @@ def test_comprehensive_pass_invokes_parallel_v3_children_when_capacity_is_attest
     ).run()
 
     assert events == ["gpt-plan", "gpt-review"]
-    assert parallel.calls == [(v3.resolve(), graph.resolve(), receipt.resolve())]
+    assert len(parallel.calls) == 1
+    called_v3, called_graph, called_receipt = parallel.calls[0]
+    assert called_v3 == v3.resolve()
+    assert called_receipt == receipt.resolve()
+    assert called_graph.name == "implementation-graph.relay-bound.json"
+    derived_graph = json.loads(called_graph.read_text(encoding="utf-8"))
+    derived_mission = derived_graph["units"][0]["mission"]
+    assert "[REVIEWER-AUTHORED GLOBAL MISSION]\n" in derived_mission
+    assert "Own implementation, tests, integration, and completion reporting; local Codex is host-control only." in derived_mission
+    assert derived_mission.endswith("[PRE-APPROVED UNIT ASSIGNMENT]\nimplement the approved change")
     assert result["implementation_route"]["selected"] is True
     assert result["parallel_implementation_result"]["execution"]["status"] == "FINALIZED"
+    assert file_sha256(Path(result["parallel_relay_binding"]["derived_graph"]["path"])) == result["parallel_relay_binding"]["derived_graph"]["sha256"]
     mission = json.loads(Path(result["execution_mission_path"]).read_text(encoding="utf-8"))
     assert mission["execution_parallelism"]["owner"] == "parallel-v3-web-gpt-implementers"
     assert mission["execution_parallelism"]["same_project_web_submissions"] == "capacity-bound exact child sessions"
@@ -619,14 +707,16 @@ def test_comprehensive_parallel_without_capacity_falls_back_to_single_command(tm
 def test_comprehensive_revise_repeats_fresh_plan_advisory_review_sequence(tmp_path):
     events = []
     runtime = ScriptedRuntime(["REVISE", "PASS"], events=events)
+    web_multi = FakeWebMultiRuntime(events=events)
     result = ProPlanHandoffDriver(
         make_v2_manifest(tmp_path, advisory_policy="require"),
         runtime=runtime,
+        web_multi_runtime=web_multi,
     ).run()
 
     assert events == [
-        "gpt-plan", "pro-advisory", "gpt-review",
-        "gpt-plan", "pro-advisory", "gpt-review",
+        "gpt-plan", "web-multi", "gpt-review",
+        "gpt-plan", "web-multi", "gpt-review",
         "gpt-orchestrator",
     ]
     assert Path(result["advisory_path"]).name == "advisory-2.json"
@@ -634,7 +724,7 @@ def test_comprehensive_revise_repeats_fresh_plan_advisory_review_sequence(tmp_pa
 
 def test_new_v1_comprehensive_manifest_is_rejected_before_runtime(tmp_path: Path) -> None:
     runtime = ScriptedRuntime()
-    with pytest.raises(WorkflowError, match="COMPREHENSIVE_V2_REQUIRED"):
+    with pytest.raises(WorkflowError, match="COMPREHENSIVE_V4_REQUIRED"):
         ProPlanHandoffDriver(
             make_manifest(tmp_path, "gpt-comprehensive"),
             runtime=runtime,
@@ -652,27 +742,150 @@ def test_matching_persisted_v1_comprehensive_state_remains_recoverable(tmp_path:
         web_multi_runtime=FakeWebMultiRuntime(),
     )
 
-    assert driver.prepare()["status"] == "PREPARED"
+    prepared = driver.prepare()
+    assert prepared["status"] == "PREPARED"
+    assert prepared["workflow_manifest_schema"] == "codex.chatgpt.pro-plan-handoff/v1"
+    assert prepared["workflow_manifest_sha256"] == file_sha256(manifest_path)
+    assert prepared["legacy_manifest_identity_upgrade"] == "validated-pre-v4-state"
     assert state_path.is_file()
 
 
-def test_v2_published_workflow_schema_accepts_explicit_decision_inputs(tmp_path: Path) -> None:
+def test_new_v2_comprehensive_manifest_is_rejected_but_seeded_recovery_is_allowed(tmp_path: Path) -> None:
+    new_path = make_legacy_v2_manifest(tmp_path / "new")
+    with pytest.raises(WorkflowError, match="COMPREHENSIVE_V4_REQUIRED"):
+        ProPlanHandoffDriver(new_path, runtime=ScriptedRuntime(), web_multi_runtime=FakeWebMultiRuntime())
+
+    recovery_path = make_legacy_v2_manifest(tmp_path / "recovery")
+    state_path = seed_legacy_comprehensive_recovery(recovery_path)
+    driver = ProPlanHandoffDriver(
+        recovery_path,
+        runtime=ScriptedRuntime(),
+        web_multi_runtime=FakeWebMultiRuntime(),
+    )
+    prepared = driver.prepare()
+    assert prepared["status"] == "PREPARED"
+    assert prepared["workflow_manifest_schema"] == "codex.chatgpt.comprehensive-workflow/v2"
+    assert prepared["workflow_manifest_sha256"] == file_sha256(recovery_path)
+    assert prepared["legacy_manifest_identity_upgrade"] == "validated-pre-v4-state"
+    assert state_path.is_file()
+
+
+def test_legacy_comprehensive_recovery_rejects_changed_manifest_identity(tmp_path: Path) -> None:
+    manifest_path = make_legacy_v2_manifest(tmp_path)
+    seed_legacy_comprehensive_recovery(manifest_path)
+    ProPlanHandoffDriver(
+        manifest_path,
+        runtime=ScriptedRuntime(),
+        web_multi_runtime=FakeWebMultiRuntime(),
+    ).prepare()
+    value = json.loads(manifest_path.read_text(encoding="utf-8"))
+    value["gates"]["research"]["policy"] = "require"
+    manifest_path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(WorkflowError, match="COMPREHENSIVE_V4_REQUIRED"):
+        ProPlanHandoffDriver(
+            manifest_path,
+            runtime=ScriptedRuntime(),
+            web_multi_runtime=FakeWebMultiRuntime(),
+        )
+
+
+def test_relay_prompt_materialization_preserves_exact_utf8_text_bytes(tmp_path: Path) -> None:
+    driver = ProPlanHandoffDriver(
+        make_v2_manifest(tmp_path),
+        runtime=ScriptedRuntime(),
+        web_multi_runtime=FakeWebMultiRuntime(),
+    )
+    state = driver.prepare()
+    binding = driver._binding(state, "gpt-plan", 1)
+    exact = "  keep leading space\nkeep trailing newline\n"
+    bindings = {
+        "question_sha256": binding.question_sha256,
+        "source_snapshot_sha256": binding.source_snapshot_sha256,
+        "input_research_descriptor_sha256": "a" * 64,
+    }
+    envelope = {
+        "relay": {
+            "schema": "codex.chatgpt.stage-relay/v1",
+            "workflow_id": binding.workflow_id,
+            "from_stage": binding.stage,
+            "attempt_index": binding.attempt_index,
+            "nonce": binding.nonce,
+            "next_stage": "gpt-review",
+            "prompt_profile": "review",
+            "input_bindings": bindings,
+            "next_prompt_body": exact,
+        }
+    }
+    receipt = driver._validate_and_materialize_relay(
+        envelope,
+        binding,
+        next_stage="gpt-review",
+        prompt_profile="review",
+        input_bindings=bindings,
+    )
+    assert Path(receipt["next_prompt"]["path"]).read_bytes() == exact.encode("utf-8")
+
+
+@pytest.mark.parametrize("relay", [None, {}, {"mode": "optional"}, {"mode": "web-native-v1", "extra": True}])
+def test_v4_requires_one_exact_web_native_relay_mode_before_runtime(tmp_path: Path, relay: object) -> None:
+    path = make_v2_manifest(tmp_path)
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if relay is None:
+        value.pop("relay")
+    else:
+        value["relay"] = relay
+    path.write_text(json.dumps(value), encoding="utf-8")
+    runtime = ScriptedRuntime()
+    with pytest.raises(WorkflowError, match="COMPREHENSIVE_RELAY_INVALID"):
+        ProPlanHandoffDriver(path, runtime=runtime, web_multi_runtime=FakeWebMultiRuntime())
+    assert runtime.manifests == []
+
+
+def test_v4_published_workflow_schema_accepts_explicit_decision_inputs(tmp_path: Path) -> None:
     path = make_v2_manifest(tmp_path)
     value = json.loads(path.read_text(encoding="utf-8"))
     schema = json.loads(
-        (Path(__file__).resolve().parents[1] / "schemas" / "workflow-v2.schema.json").read_text(encoding="utf-8")
+        (Path(__file__).resolve().parents[1] / "schemas" / "workflow-v4.schema.json").read_text(encoding="utf-8")
     )
 
     validate_json_schema(value, schema)
-    assert validate_manifest(value)["schema"] == "codex.chatgpt.comprehensive-workflow/v2"
+    assert validate_manifest(value)["schema"] == "codex.chatgpt.comprehensive-workflow/v4"
 
 
-def test_v2_schema_accepts_strict_optional_parallel_execution_reference(tmp_path: Path) -> None:
+def test_published_stage_relay_schema_accepts_only_one_exact_branch() -> None:
+    schema = json.loads(
+        (Path(__file__).resolve().parents[1] / "schemas" / "stage-relay-v1.schema.json").read_text(encoding="utf-8")
+    )
+    digest = "a" * 64
+    relay = {
+        "schema": "codex.chatgpt.stage-relay/v1",
+        "workflow_id": "wf-test",
+        "from_stage": "gpt-review",
+        "attempt_index": 1,
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "next_stage": "gpt-orchestrator",
+        "prompt_profile": "orchestrator",
+        "input_bindings": {
+            "question_sha256": digest,
+            "source_snapshot_sha256": digest,
+            "input_plan_sha256": digest,
+        },
+        "next_prompt_body": "Implement the approved mission.",
+        "mission_body": "Own implementation and tests.",
+    }
+    validate_json_schema(relay, schema)
+    relay["revision_delta"] = {"required_changes": [], "conditions": [], "evidence_gaps": [], "preserve": []}
+    with pytest.raises(ValidationError):
+        validate_json_schema(relay, schema)
+
+
+def test_v4_schema_accepts_strict_optional_parallel_execution_reference(tmp_path: Path) -> None:
     manifest_path = make_v2_manifest(tmp_path)
     add_parallel_execution(manifest_path)
     value = json.loads(manifest_path.read_text(encoding="utf-8"))
     schema = json.loads(
-        (Path(__file__).resolve().parents[1] / "schemas" / "workflow-v2.schema.json").read_text(encoding="utf-8")
+        (Path(__file__).resolve().parents[1] / "schemas" / "workflow-v4.schema.json").read_text(encoding="utf-8")
     )
     validate_json_schema(value, schema)
     value["parallel_execution"] = {"enabled": False, "capacity_receipt": "must-not-exist.json"}
@@ -690,8 +903,9 @@ def test_v2_selected_contract_is_exactly_propagated_and_identity_bound(tmp_path:
     )
     add_selected_contract(manifest_path, contract)
     runtime = ScriptedRuntime(["PASS"])
+    web_multi = FakeWebMultiRuntime()
     result = ProPlanHandoffDriver(
-        manifest_path, runtime=runtime
+        manifest_path, runtime=runtime, web_multi_runtime=web_multi
     ).run()
 
     expected_path = str(contract)
@@ -700,7 +914,7 @@ def test_v2_selected_contract_is_exactly_propagated_and_identity_bound(tmp_path:
     assert result["agbrowse_contract_sha256"] == expected_hash
     assert all(item["agbrowse_contract"] == expected_path for item in runtime.manifests)
     assert all(item["agbrowse_contract_sha256"] == expected_hash for item in runtime.manifests)
-    advisory_manifest = next(item for item in runtime.manifests if item["workflow_route"] == "attachment-only-pro" and item["mode_label"] == "Pro")
+    advisory_manifest = web_multi.manifests[0]
     assert advisory_manifest["agbrowse_contract"] == expected_path
     assert advisory_manifest["agbrowse_contract_sha256"] == expected_hash
 
@@ -775,8 +989,9 @@ def test_v2_auto_skips_optional_stages_and_binds_skip_descriptors(tmp_path: Path
     assert parallelism["scope"] == "within-single-execution-mission"
     assert parallelism["same_project_web_submissions"] == "one-active-or-uncertain-run"
     assert "no delegated strategy search" in parallelism["local_codex"]
-    assert "internal lanes or parallel tool calls" in prompt
-    assert "do not return strategy search or implementation to local codex" in prompt.casefold()
+    assert "implement the approved plan" in prompt.casefold()
+    assert "host-verified immutable binding" in prompt.casefold()
+    assert mission["web_authored_mission"]["sha256"]
     assert orchestrator_manifest["workflow_route"] == "command"
 
 
@@ -812,18 +1027,20 @@ def test_v2_research_trigger_runs_app_backed_deep_stage_at_high(tmp_path: Path) 
         {"cross_component_interfaces": 2},
     ],
 )
-def test_v2_advisory_risk_gate_runs_attachment_only_pro_advisory(tmp_path: Path, kwargs: dict) -> None:
+def test_v4_advisory_risk_gate_runs_app_only_web_multi_advisory(tmp_path: Path, kwargs: dict) -> None:
     events: list[str] = []
     runtime = ScriptedRuntime(["PASS"], events=events)
+    web_multi = FakeWebMultiRuntime(events=events)
     result = ProPlanHandoffDriver(
         make_v2_manifest(tmp_path, **kwargs),
         runtime=runtime,
+        web_multi_runtime=web_multi,
     ).run()
 
-    assert events == ["gpt-plan", "pro-advisory", "gpt-review", "gpt-orchestrator"]
-    advisory_manifest = runtime.manifests[1]
-    assert advisory_manifest["workflow_route"] == "attachment-only-pro"
-    assert advisory_manifest["app_policy"] == "forbidden"
+    assert events == ["gpt-plan", "web-multi", "gpt-review", "gpt-orchestrator"]
+    advisory_manifest = web_multi.manifests[0]
+    assert advisory_manifest["schema"] == "codex.chatgpt.web-multi/v2"
+    assert advisory_manifest["chatgpt_app_name"] == "CodexPro-Test"
     descriptor = json.loads(Path(result["advisory_descriptor_path"]).read_text(encoding="utf-8"))
     assert descriptor["decision"] == "run"
 

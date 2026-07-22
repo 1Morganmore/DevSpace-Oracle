@@ -140,11 +140,12 @@ def test_cold_start_creates_an_owned_parallel_session_instead_of_deferring() -> 
         assert "not a precondition" in text.casefold() or "never a prerequisite" in text.casefold(), path
 
 
-def test_new_comprehensive_workflows_are_v2_gated_and_v1_is_recovery_only() -> None:
+def test_new_comprehensive_workflows_are_v4_relayed_and_v1_v2_are_recovery_only() -> None:
     text = _text(HANDOFF_SKILL)
-    assert "codex.chatgpt.comprehensive-workflow/v2" in text
-    assert "COMPREHENSIVE_V2_REQUIRED" in text
-    assert "v1 is recovery-only" in text
+    assert "codex.chatgpt.comprehensive-workflow/v4" in text
+    assert "COMPREHENSIVE_V4_REQUIRED" in text
+    assert "V1 and v2 are recovery-only" in text
+    assert "local Codex validates and materializes" in text
     assert "routine plan does not pay the Web Multi-GPT latency cost" in text
 
 

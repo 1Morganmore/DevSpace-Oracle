@@ -216,6 +216,7 @@ def test_full_pipeline_uses_fresh_children_and_real_parallel_generation(tmp_path
     assert result["schema"] == "codex.chatgpt.web-multi-result/v1"
     assert result["organizer_result"] == "organized answer"
     assert result["advisory_only"] is True
+    assert result["provider_parallel_limit"] == 5
     assert result["max_concurrent_child_generations"] >= 2
     provenance = result["provenance"]
     assert len({item["run_id"] for item in provenance}) == len(provenance)
@@ -673,6 +674,103 @@ def test_actual_parallel_wave_shares_one_submission_barrier(tmp_path: Path) -> N
     assert len(observed_barriers) == 2
     assert len(set(observed_barriers)) == 1
 
+
+def test_provider_capacity_chunks_six_lane_submission_barriers_without_deadlock(tmp_path: Path) -> None:
+    runtime = RUNTIME.WebMultiRuntime(make_manifest(tmp_path, solver_count=2), state_root=tmp_path / "state")
+    observed: dict[str, object | None] = {}
+
+    def fake_execute(spec, evidence_map, *, submission_barrier=None):
+        observed[spec.stage_id] = submission_barrier
+        if submission_barrier is not None:
+            submission_barrier.wait(timeout=5)
+        return spec
+
+    runtime._execute_stage = fake_execute
+    specs = [
+        RUNTIME.StageSpec(f"solver-{lane}", "Solver", lane, 0, f"approach-{lane}", tuple())
+        for lane in range(6)
+    ]
+
+    results = runtime._wave(specs, {})
+
+    assert [item.stage_id for item in results] == [item.stage_id for item in specs]
+    first_chunk = [observed[f"solver-{lane}"] for lane in range(5)]
+    assert all(barrier is first_chunk[0] for barrier in first_chunk)
+    assert first_chunk[0] is not None
+    assert first_chunk[0].parties == 5
+    assert observed["solver-5"] is None
+
+
+def test_paired_wave_never_exceeds_provider_parallel_limit(tmp_path: Path) -> None:
+    runtime = RUNTIME.WebMultiRuntime(make_manifest(tmp_path, solver_count=2), state_root=tmp_path / "state")
+    runtime.stage_executor = lambda *_args: None
+    active = 0
+    maximum = 0
+    lock = threading.Lock()
+    starts: list[str] = []
+
+    def fake_execute(spec, evidence_map, *, submission_barrier=None):
+        nonlocal active, maximum
+        with lock:
+            starts.append(spec.stage_id)
+            active += 1
+            maximum = max(maximum, active)
+        try:
+            threading.Event().wait(0.01)
+        finally:
+            with lock:
+                active -= 1
+        return RUNTIME.StageResult(spec, {}, tmp_path / f"{spec.stage_id}.json", {}, 0.0, 0.0)
+
+    runtime._execute_stage = fake_execute
+    solvers = [RUNTIME.StageSpec(f"solver-{lane}", "Solver", lane, 0, "approach", tuple()) for lane in range(10)]
+
+    result = runtime._paired_wave(
+        solvers,
+        lambda lane, solver: RUNTIME.StageSpec(f"refiner-{lane}", "InitialRefiner", lane, 0, {}, tuple()),
+        {},
+    )
+
+    assert [item.spec.stage_id for item in result] == [f"refiner-{lane}" for lane in range(10)]
+    assert maximum == 5
+    assert starts.index("refiner-0") < starts.index("solver-5")
+
+
+def test_stage_artifacts_reuse_legacy_default_capacity_but_reject_nondefault(tmp_path: Path) -> None:
+    manifest = make_manifest(tmp_path, solver_count=2)
+    runtime = RUNTIME.WebMultiRuntime(manifest, state_root=tmp_path / "state")
+    evidence_map = runtime._source_evidence_map()
+    runtime.workflow_dir.mkdir(parents=True, exist_ok=True)
+    RUNTIME.write_immutable_json(runtime.evidence_map_path, evidence_map)
+    parent = runtime.store.create_parent_workflow(
+        project_root=runtime.manifest["project_root"],
+        manifest_path=runtime.manifest_path,
+        workflow_id=runtime.workflow_id,
+        agbrowse_contract=runtime.contract,
+    )
+    spec = RUNTIME.StageSpec("planner", "Planner", 0, 0, runtime.manifest["question"], tuple())
+    artifacts = runtime._stage_artifacts(spec, parent, evidence_map)
+    for path_key in ("context_path", "manifest_path"):
+        path = artifacts[path_key]
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value.pop("provider_parallel_limit")
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+    reused = runtime._stage_artifacts(spec, parent, evidence_map)
+    assert "provider_parallel_limit" not in reused["context"]
+
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_value["provider_parallel_limit"] = 4
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+    changed = RUNTIME.WebMultiRuntime(manifest, state_root=tmp_path / "state")
+    with pytest.raises(RUNTIME.WebMultiError) as failure:
+        changed._stage_artifacts(spec, parent, evidence_map)
+    assert failure.value.code == "STAGE_ARTIFACT_CONTEXT_MISMATCH"
+    runtime.store.finalize_parent(
+        parent["run_dir"],
+        "PARENT_FAILED_CLOSED",
+        failure={"code": "test-cleanup"},
+    )
 
 def test_transient_app_pre_send_failure_retries_same_child_five_bounded_times(
     tmp_path: Path,

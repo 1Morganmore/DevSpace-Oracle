@@ -6,3 +6,9 @@
 - The installed files under `%USERPROFILE%\.codex` are deployment copies, not the sole source of truth. Synchronize reusable fixes back into this repository instead of leaving them only in the global installation.
 - Public-safe reusable changes must be committed to the clean public `main`, pushed, and checked in CI. Never copy credentials, host-only values, sensitive artifacts, or private Git history into this repository.
 - Never push a private-history development branch to the public repository. If commit, push, or CI verification is blocked, report the exact dirty files and blocker and do not claim completion.
+
+## Comprehensive-mode ownership
+
+- New GPT comprehensive workflows use `codex.chatgpt.comprehensive-workflow/v4` with `relay.mode: web-native-v1`; v1/v2 are recovery-only and v3 remains the separate parallel-implementation contract.
+- The completing web GPT stage authors the next stage's semantic prompt. Local Codex may validate UTF-8, hashes, stage identity, immutable bindings, transport, recovery, and deterministic final tests, but must not rewrite the next prompt or take over expensive exploration/implementation.
+- A selected Web Multi advisory is genuine app-only multi-session ChatGPT work. Provider generation is limited to at most five concurrent children; larger accepted topologies run in capacity waves without reducing their logical lane count.

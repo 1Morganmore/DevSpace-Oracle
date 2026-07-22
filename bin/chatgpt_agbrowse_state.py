@@ -42,6 +42,7 @@ WEB_MULTI_V2_ALLOWED_KEYS = {
     "agbrowse_contract",
     "agbrowse_contract_sha256",
     "provider_failure_retry_limit",
+    "provider_parallel_limit",
     "app_decision_path",
     "chatgpt_app_server_url",
     "timeout_seconds",

@@ -15,7 +15,11 @@ Prompt cognition is versioned separately as `codex.chatgpt.prompt-architecture/v
 - New regular GPT, Deep Research, and Web Multi-GPT work selects the strongest declared regular-web level (`Very High` before `High`). Explicit `High` remains available for frozen comparison runs, and an existing run resumes its persisted level.
 - Pro remains attachment-only and cannot select an app.
 
-## Comprehensive workflow
+## Comprehensive workflow compatibility
+
+This document describes the v2 state/recovery topology. New comprehensive work
+uses v4 web-native relay; see `docs/ARCHITECTURE_V4.md`. V2 remains recoverable
+only when matching immutable workflow state already exists.
 
 The v2 pipeline is:
 
@@ -47,7 +51,7 @@ New comprehensive runs use workflow schema v2 and never silently rewrite a v1 ar
 
 For `skip`, `artifact` is exactly `null`; the descriptor itself still has a hash. Field absence is invalid. Plan binds the research descriptor hash. Review binds the plan, research descriptor, and advisory descriptor hashes. Orchestrator binds plan, research descriptor, advisory descriptor, and review hashes. The JSON schemas use `additionalProperties: false` for binding objects and reject absent-versus-null substitutions.
 
-The entry contract rejects a new v1 comprehensive manifest with `COMPREHENSIVE_V2_REQUIRED` before browser side effects. V1 comprehensive manifests are accepted only when the output directory already contains a matching immutable legacy state, valid stage checkpoint, source snapshot, and source archive proving that the same workflow is being recovered. A merely prepared v1 state has no recovery authority.
+The current entry contract rejects a new v1 or v2 comprehensive manifest with `COMPREHENSIVE_V4_REQUIRED` before browser side effects. Legacy comprehensive manifests are accepted only when the output directory already contains matching immutable state, a valid stage checkpoint, source snapshot, and source archive proving that the same workflow is being recovered. A merely prepared legacy state has no recovery authority.
 
 The durable state sequence is:
 

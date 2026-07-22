@@ -39,6 +39,7 @@ V2_ALLOWED_KEYS = frozenset(
         "agbrowse_contract",
         "agbrowse_contract_sha256",
         "provider_failure_retry_limit",
+        "provider_parallel_limit",
         "app_decision_path",
         "chatgpt_app_server_url",
         "timeout_seconds",
@@ -756,6 +757,13 @@ def validate_manifest(value: Mapping[str, Any], manifest_path: Path) -> dict[str
         if value.get("provider_failure_retry_limit") is not None
         else 1
     )
+    raw_provider_parallel_limit = value.get("provider_parallel_limit", 5)
+    if isinstance(raw_provider_parallel_limit, bool) or not isinstance(raw_provider_parallel_limit, int):
+        raise WebMultiError(
+            "PROVIDER_PARALLEL_LIMIT_INVALID",
+            "provider_parallel_limit must be an integer from 1 through 5",
+        )
+    provider_parallel_limit = raw_provider_parallel_limit
     if schema == V1_SCHEMA and solver_count not in {2, 3, 4}:
         raise WebMultiError("SOLVER_COUNT_UNSUPPORTED", "solver_count must be 2..4")
     if not 1 <= max_iterations <= 5:
@@ -764,6 +772,11 @@ def validate_manifest(value: Mapping[str, Any], manifest_path: Path) -> dict[str
         raise WebMultiError(
             "PROVIDER_FAILURE_RETRY_LIMIT_UNSUPPORTED",
             "provider_failure_retry_limit must be 0..2",
+        )
+    if not 1 <= provider_parallel_limit <= 5:
+        raise WebMultiError(
+            "PROVIDER_PARALLEL_LIMIT_UNSUPPORTED",
+            "provider_parallel_limit must be 1..5",
         )
     # New v2 work selects the strongest regular-web level declared available;
     # explicit High remains valid for frozen comparison arms. V1 keeps its
@@ -814,6 +827,7 @@ def validate_manifest(value: Mapping[str, Any], manifest_path: Path) -> dict[str
             "semantics_version": semantics_version,
             "max_iterations": max_iterations,
             "provider_failure_retry_limit": provider_failure_retry_limit,
+            "provider_parallel_limit": provider_parallel_limit,
             "mode_variant": mode_variant,
             "project_root": str(root),
             "source_snapshot_path": str(snapshot),
@@ -1127,6 +1141,7 @@ class WebMultiRuntime:
             "prompt_profile": profile.name,
             "prompt_profile_receipt": profile.receipt(),
             "context_policy": profile.context_policy,
+            "provider_parallel_limit": self.manifest["provider_parallel_limit"],
         }
         if self._is_v2:
             expected_context["planner_descriptor_sha256"] = (
@@ -1140,6 +1155,11 @@ class WebMultiRuntime:
             key: {"expected": value, "actual": context.get(key)}
             for key, value in expected_context.items()
             if context.get(key) != value
+            and not (
+                key == "provider_parallel_limit"
+                and key not in context
+                and value == 5
+            )
         }
         prompt_hash = sha256_file(prompt_path)
         nonce = str(context.get("challenge_nonce") or "")
@@ -1176,11 +1196,17 @@ class WebMultiRuntime:
             "agbrowse_contract": self.manifest["agbrowse_contract"],
             "provider_url": "https://chatgpt.com/",
             "send_limit": 1,
+            "provider_parallel_limit": self.manifest["provider_parallel_limit"],
         }
         manifest_mismatches = {
             key: {"expected": value, "actual": manifest.get(key)}
             for key, value in expected_manifest.items()
             if manifest.get(key) != value
+            and not (
+                key == "provider_parallel_limit"
+                and key not in manifest
+                and value == 5
+            )
         }
         correlation_expected = {
             "schema": "codex.chatgpt.workflow-correlation/v1",
@@ -1307,6 +1333,7 @@ class WebMultiRuntime:
             "prompt_profile": profile.name,
             "prompt_profile_receipt": profile.receipt(),
             "context_policy": profile.context_policy,
+            "provider_parallel_limit": self.manifest["provider_parallel_limit"],
         }
         if self._is_v2:
             context["planner_descriptor_sha256"] = (
@@ -1353,6 +1380,7 @@ class WebMultiRuntime:
             "agbrowse_contract": self.manifest["agbrowse_contract"],
             "provider_url": "https://chatgpt.com/",
             "send_limit": 1,
+            "provider_parallel_limit": self.manifest["provider_parallel_limit"],
             "parallel_lane_count": self._lane_count(spec),
             "timeout_seconds": int(self.manifest.get("timeout_seconds") or 3600),
             "send_timeout_seconds": int(self.manifest.get("send_timeout_seconds") or 600),
@@ -1900,32 +1928,45 @@ class WebMultiRuntime:
             "SEND_REJECTED",
         }
 
-    def _wave(self, specs: list[StageSpec], evidence_map: Mapping[str, Any]) -> list[StageResult]:
-        if len(specs) == 1:
-            return [self._execute_stage(specs[0], evidence_map)]
-        results: dict[str, StageResult] = {}
-        submission_stage_ids = {
-            spec.stage_id for spec in specs if self._stage_needs_wave_submission(spec)
-        }
-        submission_barrier = (
-            threading.Barrier(len(submission_stage_ids))
-            if self.stage_executor is None and len(submission_stage_ids) > 1
+    def _provider_parallel_limit(self) -> int:
+        """Bound active provider generations independently of topology size."""
+        return int(self.manifest["provider_parallel_limit"])
+
+    def _wave_chunks(self, specs: list[StageSpec]) -> Iterable[list[StageSpec]]:
+        limit = self._provider_parallel_limit()
+        for start in range(0, len(specs), limit):
+            yield specs[start:start + limit]
+
+    def _submission_barrier(self, specs: list[StageSpec]) -> tuple[threading.Barrier | None, set[str]]:
+        submission_ids = {spec.stage_id for spec in specs if self._stage_needs_wave_submission(spec)}
+        barrier = (
+            threading.Barrier(len(submission_ids))
+            if self.stage_executor is None and len(submission_ids) > 1
             else None
         )
-        with ThreadPoolExecutor(max_workers=len(specs), thread_name_prefix="web-multi-gpt") as pool:
-            futures = {
-                pool.submit(
-                    self._execute_stage,
-                    spec,
-                    evidence_map,
-                    submission_barrier=(
-                        submission_barrier if spec.stage_id in submission_stage_ids else None
-                    ),
-                ): spec.stage_id
-                for spec in specs
-            }
-            for future in as_completed(futures):
-                results[futures[future]] = future.result()
+        return barrier, submission_ids
+
+    def _wave(self, specs: list[StageSpec], evidence_map: Mapping[str, Any]) -> list[StageResult]:
+        results: dict[str, StageResult] = {}
+        for chunk in self._wave_chunks(specs):
+            if len(chunk) == 1:
+                results[chunk[0].stage_id] = self._execute_stage(chunk[0], evidence_map)
+                continue
+            submission_barrier, submission_stage_ids = self._submission_barrier(chunk)
+            with ThreadPoolExecutor(max_workers=len(chunk), thread_name_prefix="web-multi-gpt") as pool:
+                futures = {
+                    pool.submit(
+                        self._execute_stage,
+                        spec,
+                        evidence_map,
+                        submission_barrier=(
+                            submission_barrier if spec.stage_id in submission_stage_ids else None
+                        ),
+                    ): spec.stage_id
+                    for spec in chunk
+                }
+                for future in as_completed(futures):
+                    results[futures[future]] = future.result()
         return [results[spec.stage_id] for spec in specs]
 
     def _paired_wave(
@@ -1936,41 +1977,31 @@ class WebMultiRuntime:
     ) -> list[StageResult]:
         if not first_specs:
             return []
-        submission_ids = {
-            spec.stage_id for spec in first_specs if self._stage_needs_wave_submission(spec)
-        }
-        first_barrier = (
-            threading.Barrier(len(submission_ids))
-            if self.stage_executor is None and len(submission_ids) > 1
-            else None
-        )
         slots: list[StageResult | None] = [None] * len(first_specs)
         failures: list[BaseException | None] = [None] * len(first_specs)
+        for offset in range(0, len(first_specs), self._provider_parallel_limit()):
+            chunk = first_specs[offset:offset + self._provider_parallel_limit()]
+            first_barrier, submission_ids = self._submission_barrier(chunk)
 
-        def run_pair(index: int, first_spec: StageSpec) -> StageResult:
-            first = self._execute_stage(
-                first_spec,
-                evidence_map,
-                submission_barrier=(
-                    first_barrier if first_spec.stage_id in submission_ids else None
-                ),
-            )
-            return self._execute_stage(second_spec_factory(index, first), evidence_map)
+            def run_pair(index: int, first_spec: StageSpec) -> StageResult:
+                first = self._execute_stage(
+                    first_spec,
+                    evidence_map,
+                    submission_barrier=(first_barrier if first_spec.stage_id in submission_ids else None),
+                )
+                return self._execute_stage(second_spec_factory(index, first), evidence_map)
 
-        with ThreadPoolExecutor(
-            max_workers=len(first_specs),
-            thread_name_prefix="web-multi-gpt-pair",
-        ) as pool:
-            future_indexes = {
-                pool.submit(run_pair, index, spec): index
-                for index, spec in enumerate(first_specs)
-            }
-            for future in as_completed(future_indexes):
-                index = future_indexes[future]
-                try:
-                    slots[index] = future.result()
-                except BaseException as exc:
-                    failures[index] = exc
+            with ThreadPoolExecutor(max_workers=len(chunk), thread_name_prefix="web-multi-gpt-pair") as pool:
+                future_indexes = {
+                    pool.submit(run_pair, offset + index, spec): offset + index
+                    for index, spec in enumerate(chunk)
+                }
+                for future in as_completed(future_indexes):
+                    index = future_indexes[future]
+                    try:
+                        slots[index] = future.result()
+                    except BaseException as exc:
+                        failures[index] = exc
         for failure in failures:
             if failure is not None:
                 raise failure
@@ -1990,42 +2021,39 @@ class WebMultiRuntime:
         """Keep Solver→InitialRefiner lanes parallel while retaining upstream fallback."""
         if not solver_specs:
             return []
-        submission_ids = {spec.stage_id for spec in solver_specs if self._stage_needs_wave_submission(spec)}
-        barrier = (
-            threading.Barrier(len(submission_ids))
-            if self.stage_executor is None and len(submission_ids) > 1
-            else None
-        )
         slots: list[StageResult | None] = [None] * len(solver_specs)
         failures: list[BaseException | None] = [None] * len(solver_specs)
+        for offset in range(0, len(solver_specs), self._provider_parallel_limit()):
+            chunk = solver_specs[offset:offset + self._provider_parallel_limit()]
+            barrier, submission_ids = self._submission_barrier(chunk)
 
-        def run_pair(index: int, solver_spec: StageSpec) -> StageResult:
-            solver = self._execute_stage(
-                solver_spec,
-                evidence_map,
-                submission_barrier=(barrier if solver_spec.stage_id in submission_ids else None),
-            )
-            refiner_spec = refiner_factory(index, solver)
-            try:
-                return self._execute_stage(refiner_spec, evidence_map)
-            except BaseException as exc:
-                if not self._is_v2_fallback_error(exc):
-                    raise
-                self._record_v2_fallback(
-                    failed_spec=refiner_spec,
-                    replacement=solver,
-                    exc=exc,
+            def run_pair(index: int, solver_spec: StageSpec) -> StageResult:
+                solver = self._execute_stage(
+                    solver_spec,
+                    evidence_map,
+                    submission_barrier=(barrier if solver_spec.stage_id in submission_ids else None),
                 )
-                return solver
-
-        with ThreadPoolExecutor(max_workers=len(solver_specs), thread_name_prefix="web-multi-gpt-pair") as pool:
-            futures = {pool.submit(run_pair, index, spec): index for index, spec in enumerate(solver_specs)}
-            for future in as_completed(futures):
-                index = futures[future]
+                refiner_spec = refiner_factory(index, solver)
                 try:
-                    slots[index] = future.result()
+                    return self._execute_stage(refiner_spec, evidence_map)
                 except BaseException as exc:
-                    failures[index] = exc
+                    if not self._is_v2_fallback_error(exc):
+                        raise
+                    self._record_v2_fallback(
+                        failed_spec=refiner_spec,
+                        replacement=solver,
+                        exc=exc,
+                    )
+                    return solver
+
+            with ThreadPoolExecutor(max_workers=len(chunk), thread_name_prefix="web-multi-gpt-pair") as pool:
+                futures = {pool.submit(run_pair, offset + index, spec): offset + index for index, spec in enumerate(chunk)}
+                for future in as_completed(futures):
+                    index = futures[future]
+                    try:
+                        slots[index] = future.result()
+                    except BaseException as exc:
+                        failures[index] = exc
         for failure in failures:
             if failure is not None:
                 raise failure
@@ -2329,6 +2357,7 @@ class WebMultiRuntime:
             "fallback_provenance": list(self._fallback_provenance),
             "evidence_map_sha256": evidence_map["evidence_map_sha256"],
             "max_concurrent_child_generations": self._max_concurrency(),
+            "provider_parallel_limit": self._provider_parallel_limit(),
             "advisory_only": True,
             "mode_variant": self.manifest["mode_variant"],
             "manifest_schema": V2_SCHEMA,
@@ -2355,6 +2384,7 @@ class WebMultiRuntime:
                 "planner_solver_count_range": [minimum, 10],
                 "max_iterations": iterations,
                 "provider_failure_retry_limit": int(self.manifest["provider_failure_retry_limit"]),
+                "provider_parallel_limit": self._provider_parallel_limit(),
                 "worst_case_conversation_count": 1 + 10 + 10 + iterations * 17 + 9 + 1,
                 "evidence_map_sha256": evidence_map["evidence_map_sha256"],
                 "source_file_count": len(evidence_map["files"]),
@@ -2375,6 +2405,7 @@ class WebMultiRuntime:
             "solver_count": n,
             "max_iterations": iterations,
             "provider_failure_retry_limit": int(self.manifest["provider_failure_retry_limit"]),
+            "provider_parallel_limit": self._provider_parallel_limit(),
             "worst_case_conversation_count": worst_case,
             "evidence_map_sha256": evidence_map["evidence_map_sha256"],
             "source_file_count": len(evidence_map["files"]),
@@ -2712,6 +2743,7 @@ class WebMultiRuntime:
                 "provenance": [self._accepted[key].provenance for key in sorted(self._accepted)],
                 "evidence_map_sha256": evidence_map["evidence_map_sha256"],
                 "max_concurrent_child_generations": max_concurrency,
+                "provider_parallel_limit": self._provider_parallel_limit(),
                 "advisory_only": True,
                 "mode_variant": self.manifest["mode_variant"],
             }

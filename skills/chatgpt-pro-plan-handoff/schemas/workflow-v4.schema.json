@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex.chatgpt.comprehensive-workflow/v4",
+  "type": "object",
+  "required": ["schema", "workflow_mode", "workflow_id", "question", "workspace", "context", "gates", "relay"],
+  "properties": {
+    "schema": {"const": "codex.chatgpt.comprehensive-workflow/v4"},
+    "workflow_mode": {"const": "gpt-comprehensive"},
+    "workflow_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "question": {"type": "string", "minLength": 1, "maxLength": 2000000},
+    "workspace": {
+      "type": "object",
+      "required": ["root", "chatgpt_app_name", "allowed_write_paths"],
+      "properties": {
+        "root": {"type": "string", "minLength": 1},
+        "handoff_root": {"type": "string"},
+        "chatgpt_app_name": {"type": "string", "minLength": 1},
+        "allowed_write_paths": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "forbidden_paths": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": true
+    },
+    "context": {
+      "type": "object",
+      "required": ["candidate_paths"],
+      "properties": {
+        "candidate_paths": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "policy_paths": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": true
+    },
+    "gates": {
+      "type": "object",
+      "required": ["research", "advisory"],
+      "properties": {
+        "research": {
+          "type": "object",
+          "required": ["policy", "triggers"],
+          "properties": {
+            "policy": {"enum": ["auto", "require", "skip"]},
+            "triggers": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+          },
+          "additionalProperties": false
+        },
+        "advisory": {
+          "type": "object",
+          "required": ["policy", "triggers", "affected_components", "cross_component_interfaces", "contradiction_evidence"],
+          "properties": {
+            "policy": {"enum": ["auto", "require", "skip"]},
+            "triggers": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+            "affected_components": {"type": "integer", "minimum": 0},
+            "cross_component_interfaces": {"type": "integer", "minimum": 0},
+            "contradiction_evidence": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["path", "sha256"],
+                "properties": {
+                  "path": {"type": "string", "minLength": 1},
+                  "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "relay": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": {"mode": {"const": "web-native-v1"}},
+      "additionalProperties": false
+    },
+    "pro_plan": {
+      "type": "object",
+      "properties": {"max_attempts": {"type": "integer", "minimum": 1, "maximum": 5}},
+      "additionalProperties": false
+    },
+    "parallel_execution": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "workflow_v3_manifest": {"type": "string", "minLength": 1},
+        "implementation_graph": {"type": "string", "minLength": 1},
+        "capacity_receipt": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"enabled": {"const": true}}},
+          "then": {"required": ["workflow_v3_manifest", "implementation_graph"]},
+          "else": {
+            "not": {
+              "anyOf": [
+                {"required": ["workflow_v3_manifest"]},
+                {"required": ["implementation_graph"]},
+                {"required": ["capacity_receipt"]}
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "agbrowse_contract": {"type": "string", "minLength": 1},
+    "review": {"type": "object", "additionalProperties": false},
+    "stale_guard": {"type": "object", "additionalProperties": true},
+    "output_dir": {"type": "string"}
+  },
+  "additionalProperties": false
+}
