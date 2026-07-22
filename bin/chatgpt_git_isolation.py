@@ -417,12 +417,22 @@ def import_integration_ref(
     # duration of the synchronous fetch, then remove only that source ref.
     source_ref = f"{ref_name}/export"
     staging_env = isolated_git_env(staging.parent / ".git-host-home")
+    bundle = canonical.parent / f".codexpro-integration-{hashlib.sha256(ref_name.encode('utf-8')).hexdigest()[:16]}.bundle"
     _run_git(staging, ("cat-file", "-e", f"{target_oid}^{{commit}}"), env=staging_env, runner=runner)
     _run_git(staging, ("update-ref", source_ref, target_oid), env=staging_env, runner=runner)
     try:
-        _run_git(canonical, ("fetch", "--no-tags", "--no-write-fetch-head", "--", str(staging), f"{source_ref}:{ref_name}"), env=env, runner=runner)
+        # Fetching directly from a deeply nested non-bare repository launches
+        # upload-pack without reliably preserving core.longpaths on Windows.
+        # A bundle created by the already validated staging process avoids
+        # that child-path failure and is removed after the synchronous import.
+        if bundle.exists():
+            bundle.unlink()
+        _run_git(staging, ("bundle", "create", str(bundle), source_ref), env=staging_env, runner=runner)
+        _run_git(canonical, ("fetch", "--no-tags", "--no-write-fetch-head", "--", str(bundle), f"{source_ref}:{ref_name}"), env=env, runner=runner)
     finally:
         _run_git(staging, ("update-ref", "-d", source_ref, target_oid), env=staging_env, runner=runner, check=False)
+        if bundle.exists():
+            bundle.unlink()
     imported = _git_text(canonical, ("rev-parse", ref_name), env=env, runner=runner)
     if imported != target_oid:
         raise GitIsolationError("INTEGRATION_REF_IDENTITY_MISMATCH", "imported integration ref differs from the verified target")
