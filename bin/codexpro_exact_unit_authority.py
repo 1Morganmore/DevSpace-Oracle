@@ -120,12 +120,15 @@ def canonicalize_windows_path(
     logical = _logical(path)
     trusted = _logical(trusted_ancestor) if trusted_ancestor is not None else None
     if trusted is not None:
-        try:
-            logical.relative_to(trusted)
-        except ValueError as exc:
-            raise ExactUnitAuthorityError("EXACT_UNIT_TRUSTED_ANCESTOR_MISMATCH", "path is outside its trusted ancestor", {"path": str(logical), "trusted_ancestor": str(trusted)}) from exc
+        # Windows CI may spell the same existing ancestor once as an 8.3 path
+        # (RUNNER~1) and once as its long path (runneradmin).  Compare their
+        # resolved filesystem identities, not their lexical spellings.
+        trusted_compare = _final(trusted, require_exists=trusted.exists())
+        logical_compare = _final(logical, require_exists=logical.exists())
+        if _relation(trusted_compare, logical_compare) not in {"equal", "ancestor"}:
+            raise ExactUnitAuthorityError("EXACT_UNIT_TRUSTED_ANCESTOR_MISMATCH", "path is outside its trusted ancestor", {"path": str(logical), "trusted_ancestor": str(trusted)})
     if reject_reparse:
-        _assert_no_reparse_chain(logical, trusted)
+        _assert_no_reparse_chain(logical_compare if trusted is not None else logical, trusted_compare if trusted is not None else None)
     final = _final(logical, require_exists=require_exists)
     if trusted is not None:
         trusted_final = _final(trusted, require_exists=trusted.exists())
