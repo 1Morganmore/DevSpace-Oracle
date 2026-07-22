@@ -410,7 +410,19 @@ def import_integration_ref(
     if not ref_name.startswith("refs/codexpro/parallel/") or ".." in ref_name:
         raise GitIsolationError("INTEGRATION_REF_INVALID", "temporary integration ref is outside the reserved namespace")
     env = isolated_git_env(canonical_git_home(canonical))
-    _run_git(canonical, ("fetch", "--no-tags", "--no-write-fetch-head", "--", str(staging), f"{target_oid}:{ref_name}"), env=env, runner=runner)
+    # Do not fetch an otherwise-unadvertised raw OID from a non-bare staging
+    # repository.  Windows upload-pack can race the linked-worktree HEAD and
+    # fail to traverse the target's parent even though the object closure is
+    # present.  Pin the verified target under our reserved namespace for the
+    # duration of the synchronous fetch, then remove only that source ref.
+    source_ref = f"{ref_name}/export"
+    staging_env = isolated_git_env(staging.parent / ".git-host-home")
+    _run_git(staging, ("cat-file", "-e", f"{target_oid}^{{commit}}"), env=staging_env, runner=runner)
+    _run_git(staging, ("update-ref", source_ref, target_oid), env=staging_env, runner=runner)
+    try:
+        _run_git(canonical, ("fetch", "--no-tags", "--no-write-fetch-head", "--", str(staging), f"{source_ref}:{ref_name}"), env=env, runner=runner)
+    finally:
+        _run_git(staging, ("update-ref", "-d", source_ref, target_oid), env=staging_env, runner=runner, check=False)
     imported = _git_text(canonical, ("rev-parse", ref_name), env=env, runner=runner)
     if imported != target_oid:
         raise GitIsolationError("INTEGRATION_REF_IDENTITY_MISMATCH", "imported integration ref differs from the verified target")
