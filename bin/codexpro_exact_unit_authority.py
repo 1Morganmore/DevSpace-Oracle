@@ -76,8 +76,15 @@ def _assert_no_reparse_chain(path: Path, stop: Path | None = None) -> None:
     while True:
         if _is_reparse(current):
             raise ExactUnitAuthorityError("EXACT_UNIT_REPARSE_ESCAPE", "reparse point in exact-unit authority path", {"path": str(current)})
-        if stop_key is not None and _path_key(current) == stop_key:
-            return
+        if stop_existing is not None:
+            same_stop = _path_key(current) == stop_key
+            if not same_stop and current.exists() and stop_existing.exists():
+                try:
+                    same_stop = os.path.samefile(current, stop_existing)
+                except OSError:
+                    same_stop = False
+            if same_stop:
+                return
         parent = current.parent
         if parent == current:
             if stop_key is not None:
@@ -119,6 +126,11 @@ def canonicalize_windows_path(
 ) -> dict[str, str]:
     logical = _logical(path)
     trusted = _logical(trusted_ancestor) if trusted_ancestor is not None else None
+    if reject_reparse:
+        # Inspect the lexical chain before resolving it. Resolving first can
+        # hide an escaping symlink or junction as a generic ancestor mismatch.
+        # The walker uses samefile so Windows 8.3 and long paths still match.
+        _assert_no_reparse_chain(logical, trusted)
     if trusted is not None:
         # Windows CI may spell the same existing ancestor once as an 8.3 path
         # (RUNNER~1) and once as its long path (runneradmin).  Compare their
@@ -127,8 +139,6 @@ def canonicalize_windows_path(
         logical_compare = _final(logical, require_exists=logical.exists())
         if _relation(trusted_compare, logical_compare) not in {"equal", "ancestor"}:
             raise ExactUnitAuthorityError("EXACT_UNIT_TRUSTED_ANCESTOR_MISMATCH", "path is outside its trusted ancestor", {"path": str(logical), "trusted_ancestor": str(trusted)})
-    if reject_reparse:
-        _assert_no_reparse_chain(logical_compare if trusted is not None else logical, trusted_compare if trusted is not None else None)
     final = _final(logical, require_exists=require_exists)
     if trusted is not None:
         trusted_final = _final(trusted, require_exists=trusted.exists())

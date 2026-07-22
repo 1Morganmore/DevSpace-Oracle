@@ -9,6 +9,7 @@ node_modules/
 .global-policy-staging/
 .ai-bridge/
 .pytest_tmp*/
+.pytest*/
 
 # Runtime / browser state
 data/

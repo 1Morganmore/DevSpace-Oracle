@@ -53,6 +53,8 @@ def _dry_run_process(tmp_path: Path, decision: dict, *args: str) -> subprocess.C
     )
     fake_npx = tmp_path / "npx.cmd"
     fake_npx.write_text("@echo off\r\n", encoding="utf-8")
+    fake_ngrok = tmp_path / "ngrok.cmd"
+    fake_ngrok.write_text("@echo off\r\n", encoding="utf-8")
     env = os.environ.copy()
     env["USERPROFILE"] = str(user_profile)
     env["CODEXPRO_TEST_DECISION_JSON"] = json.dumps(decision)
@@ -66,6 +68,8 @@ def _dry_run_process(tmp_path: Path, decision: dict, *args: str) -> subprocess.C
             str(bootstrap),
             "-NpxPath",
             str(fake_npx),
+            "-NgrokPath",
+            str(fake_ngrok),
             "-DryRun",
             *args,
         ],

@@ -17,9 +17,19 @@ RUNTIME = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = RUNTIME
 SPEC.loader.exec_module(RUNTIME)
 
-
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.fixture(autouse=True)
+def hermetic_contract_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Runtime behavior is under test here; installation validation has its own
+    # contract suite. The scoped patch cannot leak into neighboring modules.
+    monkeypatch.setattr(
+        RUNTIME.BRIDGE,
+        "read_contract",
+        lambda path: json.loads(Path(path).read_text(encoding="utf-8")),
+    )
 
 
 def make_manifest(tmp_path: Path, *, solver_count: int, max_iterations: int = 1, large: bool = False) -> Path:
@@ -37,6 +47,8 @@ def make_manifest(tmp_path: Path, *, solver_count: int, max_iterations: int = 1,
         ),
         encoding="utf-8",
     )
+    contract = tmp_path / "agbrowse-contract.json"
+    contract.write_text("{}\n", encoding="utf-8")
     manifest = tmp_path / "web-multi.json"
     manifest.write_text(
         json.dumps(
@@ -52,7 +64,7 @@ def make_manifest(tmp_path: Path, *, solver_count: int, max_iterations: int = 1,
                 "solver_count": solver_count,
                 "max_iterations": max_iterations,
                 "mode_variant": "Very High",
-                "agbrowse_contract": str(Path.home() / ".codex" / "contracts" / "agbrowse-0.1.18.json"),
+                "agbrowse_contract": str(contract),
             }
         ),
         encoding="utf-8",

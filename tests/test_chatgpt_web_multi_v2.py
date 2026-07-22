@@ -19,9 +19,19 @@ RUNTIME = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = RUNTIME
 SPEC.loader.exec_module(RUNTIME)
 
-
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.fixture(autouse=True)
+def hermetic_contract_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Runtime behavior is under test here; installation validation has its own
+    # contract suite. The scoped patch cannot leak into neighboring modules.
+    monkeypatch.setattr(
+        RUNTIME.BRIDGE,
+        "read_contract",
+        lambda path: json.loads(Path(path).read_text(encoding="utf-8")),
+    )
 
 
 def make_v2_manifest(
@@ -50,6 +60,8 @@ def make_v2_manifest(
         ),
         encoding="utf-8",
     )
+    contract = tmp_path / "agbrowse-contract.json"
+    contract.write_text("{}\n", encoding="utf-8")
     value = {
         "schema": "codex.chatgpt.web-multi/v2",
         "workflow_id": f"v2-{tmp_path.name}",
@@ -64,9 +76,7 @@ def make_v2_manifest(
         "max_iterations": 1,
         "mode_variant": "High",
         "provider_failure_retry_limit": 0,
-        "agbrowse_contract": str(
-            Path.home() / ".codex" / "contracts" / "agbrowse-0.1.18.json"
-        ),
+        "agbrowse_contract": str(contract),
     }
     value.update(extra or {})
     manifest = tmp_path / "manifest.json"
