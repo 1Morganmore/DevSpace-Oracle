@@ -1804,29 +1804,44 @@ class Bridge:
         return cleanup
 
     def settle_exact_terminal(self, run_dir: str) -> dict[str, Any]:
-        """Adjudicate one known exact URL and immediately settle completed cleanup."""
-        with exclusive_composer_lock(GLOBAL_BROWSER_MUTATION_LOCK):
-            _, record = self.store.load(run_dir)
-            if record.get("phase") == "COMPLETE":
-                if bool(record.get("cleanup_pending")):
-                    self.cleanup_completed(run_dir, explicit_user_request=False)
-                return self.store.load(run_dir)[1]
+        """Read-only exact completion precedes the cross-project composer lock.
+
+        A known canonical conversation is a stronger authority than a stale
+        session, PID, or global composer lease.  Capturing a terminal answer
+        only reads that exact owned target, so it must never wait behind a
+        different project's composer preparation.  Tab cleanup remains the
+        separately serialized mutation step and is retried explicitly.
+        """
+        _, record = self.store.load(run_dir)
+        if record.get("phase") != "COMPLETE":
             direct = self._try_exact_url_terminal_now(run_dir)
             if direct.get("phase") != "COMPLETE":
                 return direct
-            try:
-                self.cleanup_completed(run_dir, explicit_user_request=False)
-            except Exception as exc:
-                self.store.record_terminal_cleanup(
-                    run_dir,
-                    {
-                        "ok": False,
-                        "state": "cleanup-pending",
-                        "error_code": str(getattr(exc, "code", type(exc).__name__)),
-                        "target_id": direct.get("current_target_id"),
-                        "conversation_url": direct.get("conversation_url"),
-                    },
-                )
+            # Completion is durable now.  Do not make its caller wait for a
+            # global mutation lock merely to close the already-captured tab.
+            return direct
+
+        if not bool(record.get("cleanup_pending")):
+            return record
+
+        with exclusive_composer_lock(GLOBAL_BROWSER_MUTATION_LOCK):
+            # Reload inside the mutation lock: a concurrent exact observer
+            # may already have completed the cleanup retry.
+            _, record = self.store.load(run_dir)
+            if record.get("phase") == "COMPLETE" and bool(record.get("cleanup_pending")):
+                try:
+                    self.cleanup_completed(run_dir, explicit_user_request=False)
+                except Exception as exc:
+                    self.store.record_terminal_cleanup(
+                        run_dir,
+                        {
+                            "ok": False,
+                            "state": "cleanup-pending",
+                            "error_code": str(getattr(exc, "code", type(exc).__name__)),
+                            "target_id": record.get("current_target_id"),
+                            "conversation_url": record.get("conversation_url"),
+                        },
+                    )
             return self.store.load(run_dir)[1]
 
     def abandon_uncertain(
@@ -6858,14 +6873,17 @@ class Bridge:
             )
         deadline = time.monotonic() + max(1, timeout)
         while True:
+            # Exact terminal capture is read-only and must not queue behind
+            # another project's composer mutation.  Only target-scoped
+            # polling/diagnostic activation below takes the global lock.
+            direct = self._try_exact_url_terminal_now(run_dir)
+            if direct.get("phase") in {
+                "COMPLETE",
+                "PROVIDER_FAILED_TERMINAL",
+                "BLOCKED_TARGET_AMBIGUOUS",
+            }:
+                return direct
             with exclusive_composer_lock(GLOBAL_BROWSER_MUTATION_LOCK):
-                direct = self._try_exact_url_terminal_now(run_dir)
-                if direct.get("phase") in {
-                    "COMPLETE",
-                    "PROVIDER_FAILED_TERMINAL",
-                    "BLOCKED_TARGET_AMBIGUOUS",
-                }:
-                    return direct
                 _, record = self.store.load(run_dir)
                 try:
                     tabs, tabs_evidence = self._recovery_tabs(
@@ -6940,6 +6958,19 @@ class Bridge:
             time.sleep(min(3.0, max(0.1, deadline - time.monotonic())))
 
     def recover(self, run_dir: str) -> dict[str, Any]:
+        # Known canonical URLs get one read-only terminal adjudication before
+        # recovery competes for the composer mutation lock.  This prevents an
+        # already-finished answer from being held by unrelated work.
+        store = getattr(self, "store", None)
+        if store is not None:
+            _, record = store.load(run_dir)
+            if (
+                record.get("phase") != "COMPLETE"
+                and STATE.CANONICAL_CHAT_RE.fullmatch(str(record.get("conversation_url") or ""))
+            ):
+                direct = self._try_exact_url_terminal_now(run_dir)
+                if direct.get("phase") in {"COMPLETE", "PROVIDER_FAILED_TERMINAL", "BLOCKED_TARGET_AMBIGUOUS"}:
+                    return direct
         with exclusive_composer_lock(GLOBAL_BROWSER_MUTATION_LOCK):
             return self._recover_locked(run_dir)
 

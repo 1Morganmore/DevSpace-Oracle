@@ -478,6 +478,25 @@ def test_recover_complete_cleanup_pending_retries_only_exact_owned_tab_cleanup(t
     assert [command[1] for command in commands] == ["tabs", "tab-close", "tabs", "tabs"]
 
 
+def test_settle_exact_terminal_captures_before_global_composer_lock(monkeypatch, tmp_path: Path) -> None:
+    module = load_bridge("exact_job_settle_before_global_lock_test")
+    runtime = module.Bridge(
+        state_root=tmp_path / "state",
+        runner=lambda command, env, timeout: (_ for _ in ()).throw(AssertionError(command)),
+        headed_runtime_preflight=False,
+    )
+    run_dir = make_run(tmp_path, runtime, phase="RESPONSE_IN_PROGRESS")
+    runtime._try_exact_url_terminal_now = lambda path: {"phase": "COMPLETE", "conversation_url": "https://chatgpt.com/c/exact-job"}
+
+    def forbidden_lock(*args, **kwargs):
+        raise AssertionError("terminal capture must not wait for the global composer lock")
+
+    monkeypatch.setattr(module, "exclusive_composer_lock", forbidden_lock)
+    result = runtime.settle_exact_terminal(run_dir)
+
+    assert result["phase"] == "COMPLETE"
+
+
 def test_bound_recovery_never_runs_navigating_doctor(tmp_path: Path) -> None:
     module = load_bridge("exact_job_recovery_no_doctor_test")
     commands: list[list[str]] = []

@@ -308,6 +308,14 @@ def observe_exact_run(run_dir: str, state_root: Path | None = None) -> dict[str,
     elif mismatches:
         state = "IDENTITY_MISMATCH"
         next_action = "run exact-session recovery/history adjudication; do not stop any helper or mutate any tab"
+    # A durable result must never be downgraded to ``EXACT_ACTIVE`` merely
+    # because an agbrowse session row was left at ``sent``.  Normally
+    # ``settle_exact_terminal`` above has already promoted this record to
+    # COMPLETE; keep the observation safe as well when a caller supplied a
+    # captured result during a partial-state repair.
+    elif isinstance(record.get("result"), dict) and str(record["result"].get("sha256") or ""):
+        state = "EXACT_TERMINAL_PENDING_CAPTURE"
+        next_action = "verify the already captured exact result and settle this run; stale session status is diagnostic only"
     elif active_session_id == str(expected["session_id"]) or provider_status in active_statuses:
         state = "EXACT_ACTIVE"
         next_action = "continue polling only this recorded run/session; elapsed time or empty text is not terminal evidence"

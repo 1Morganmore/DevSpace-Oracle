@@ -196,6 +196,80 @@ def test_live_exact_target_outweighs_temporary_session_web_url(monkeypatch, tmp_
     assert result["observed"]["effective_canonical_url"] == record["conversation_url"]
 
 
+def test_live_exact_target_outweighs_stale_root_session_status(monkeypatch, tmp_path: Path) -> None:
+    _, record = _record(tmp_path)
+    state_file = tmp_path / "run.json"
+    fake = Bridge(Store(state_file, record))
+    monkeypatch.setattr(RUN.BRIDGE, "Bridge", lambda state_root=None: fake)
+    monkeypatch.setattr(RUN.BRIDGE, "read_contract", lambda path: {})
+    monkeypatch.setattr(RUN.BRIDGE, "contract_executable", lambda contract: "agbrowse")
+    monkeypatch.setattr(RUN.BRIDGE, "bridge_env", lambda manifest: {})
+
+    def runner(command, env, timeout):
+        if "sessions" in command:
+            payload = {
+                "sessionId": "SESSION-1",
+                "targetId": "TARGET-1",
+                "conversationUrl": "https://chatgpt.com/",
+                "status": "sent",
+            }
+        else:
+            payload = [{
+                "targetId": "TARGET-1",
+                "url": "https://chatgpt.com/c/conversation-1",
+                "activeCommand": {"sessionId": "SESSION-1"},
+            }]
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(RUN.BRIDGE, "default_runner", runner)
+    result = RUN.observe_exact_run(str(tmp_path))
+
+    assert result["state"] == "EXACT_ACTIVE"
+    assert result["identity_mismatches"] == []
+    assert result["observed"]["effective_canonical_url"] == record["conversation_url"]
+    assert result["observed"]["canonical_url"] == "https://chatgpt.com/"
+
+
+def test_terminal_capture_outweighs_stale_sent_provider_status(monkeypatch, tmp_path: Path) -> None:
+    _, record = _record(tmp_path)
+    state_file = tmp_path / "run.json"
+
+    class TerminalBridge(Bridge):
+        def settle_exact_terminal(self, run_dir: str):
+            self.store.record.update(
+                {
+                    "phase": "COMPLETE",
+                    "result": {"sha256": "b" * 64, "bytes": 23},
+                    "cleanup_pending": True,
+                }
+            )
+            return self.store.load(run_dir)[1]
+
+    fake = TerminalBridge(Store(state_file, record))
+    monkeypatch.setattr(RUN.BRIDGE, "Bridge", lambda state_root=None: fake)
+    monkeypatch.setattr(RUN.BRIDGE, "read_contract", lambda path: {})
+    monkeypatch.setattr(RUN.BRIDGE, "contract_executable", lambda contract: "agbrowse")
+    monkeypatch.setattr(RUN.BRIDGE, "bridge_env", lambda manifest: {})
+
+    def runner(command, env, timeout):
+        if "sessions" in command:
+            payload = {
+                "sessionId": "SESSION-1",
+                "targetId": "TARGET-1",
+                "conversationUrl": "https://chatgpt.com/",
+                "status": "sent",
+            }
+        else:
+            payload = [{"targetId": "TARGET-1", "url": "https://chatgpt.com/c/conversation-1"}]
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(RUN.BRIDGE, "default_runner", runner)
+    result = RUN.observe_exact_run(str(tmp_path))
+
+    assert result["state"] == "EXACT_COMPLETE"
+    assert result["observed"]["provider_status"] == "sent"
+
+
 def test_retry_completed_cleanup_command_retries_only_pending_exact_cleanup(monkeypatch, tmp_path: Path, capsys) -> None:
     _, record = _record(tmp_path)
     record.update({"phase": "COMPLETE", "cleanup_pending": True})
