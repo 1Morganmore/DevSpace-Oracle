@@ -292,3 +292,87 @@ def test_retry_completed_cleanup_command_retries_only_pending_exact_cleanup(monk
     assert RUN.main(["--retry-completed-cleanup", str(tmp_path)]) == 0
     assert bridge.cleaned is True
     assert json.loads(capsys.readouterr().out)["result"]["cleanup_pending"] is False
+
+
+def test_compact_envelope_returns_bounded_terminal_receipt(tmp_path: Path) -> None:
+    state_file = tmp_path / "run.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "phase": "COMPLETE",
+                "run_id": "RUN-1",
+                "session_id": "SESSION-1",
+                "current_target_id": "TARGET-1",
+                "conversation_url": "https://chatgpt.com/c/conversation-1",
+                "result": {"path": str(tmp_path / "answer.md"), "sha256": "a" * 64},
+                "cleanup_pending": False,
+                "recovery_events": [{"large": "x" * 10000}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    compact = RUN.compact_envelope(
+        {
+            "ok": True,
+            "result": {
+                "state": "EXACT_COMPLETE",
+                "state_file": str(state_file),
+                "expected_identity": {"run_id": "RUN-1"},
+                "observed": {"provider_status": "complete"},
+                "identity_mismatches": ["x" * 10000],
+            },
+        }
+    )
+
+    assert compact == {
+        "ok": True,
+        "receipt": {
+            "state": "EXACT_COMPLETE",
+            "phase": "COMPLETE",
+            "run_id": "RUN-1",
+            "session_id": "SESSION-1",
+            "target_id": "TARGET-1",
+            "canonical_url": "https://chatgpt.com/c/conversation-1",
+            "provider_status": "complete",
+            "result_path": str(tmp_path / "answer.md"),
+            "result_sha256": "a" * 64,
+            "cleanup_pending": False,
+            "terminal_block_code": None,
+            "run_dir": str(tmp_path),
+            "state_file": str(state_file),
+        },
+    }
+
+
+def test_compact_envelope_normalizes_execute_and_direct_run_records(tmp_path: Path) -> None:
+    record = {
+        "phase": "RECOVERY_REQUIRED",
+        "run_id": "RUN-2",
+        "session_id": "SESSION-2",
+        "current_target_id": "TARGET-2",
+        "conversation_url": "https://chatgpt.com/c/conversation-2",
+        "terminal_block_code": "MODE_SELECTION_UNENFORCED_AFTER_SEND",
+    }
+    execute_receipt = RUN.compact_envelope(
+        {"ok": True, "run_dir": str(tmp_path), "result": record}
+    )["receipt"]
+    direct_receipt = RUN.compact_envelope({"ok": True, "result": record})["receipt"]
+
+    for receipt in (execute_receipt, direct_receipt):
+        assert receipt["phase"] == "RECOVERY_REQUIRED"
+        assert receipt["run_id"] == "RUN-2"
+        assert receipt["session_id"] == "SESSION-2"
+        assert receipt["target_id"] == "TARGET-2"
+        assert receipt["canonical_url"] == "https://chatgpt.com/c/conversation-2"
+        assert receipt["terminal_block_code"] == "MODE_SELECTION_UNENFORCED_AFTER_SEND"
+
+
+def test_compact_envelope_keeps_actionable_failure() -> None:
+    compact = RUN.compact_envelope(
+        {"ok": False, "error": {"code": "RECOVERY_PHASE_INVALID", "message": "not recoverable"}}
+    )
+    assert compact == {
+        "ok": False,
+        "error": {"code": "RECOVERY_PHASE_INVALID", "message": "not recoverable"},
+    }

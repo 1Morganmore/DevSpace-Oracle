@@ -373,7 +373,69 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--abandon-uncertain-run")
     parser.add_argument("--explicit-user-request", action="store_true")
     parser.add_argument("--reason")
+    parser.add_argument(
+        "--compact",
+        action="store_true",
+        help="emit a bounded receipt instead of the full run/evidence payload",
+    )
     return parser
+
+
+def compact_envelope(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return only decision-relevant identity and durable result fields.
+
+    Full evidence remains on disk.  This prevents routine host monitoring from
+    reinjecting large run records and immutable evidence into the local model.
+    """
+    if not payload.get("ok"):
+        error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+        return {
+            "ok": False,
+            "error": {
+                "code": error.get("code") or payload.get("code") or "AGBROWSE_RUN_FAILED",
+                "message": error.get("message") or payload.get("message") or "run failed; inspect on-disk evidence",
+            },
+        }
+    value = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    # Observation commands wrap identity under expected_identity, whereas
+    # execute() wraps a durable run record under result and show/poll/recover
+    # return that run record directly.  Normalize all three without rereading
+    # large evidence payloads into the caller.
+    nested = value.get("result") if isinstance(value.get("result"), dict) else None
+    direct_record = nested or (value if value.get("phase") and value.get("run_id") else {})
+    expected = value.get("expected_identity") if isinstance(value.get("expected_identity"), dict) else {}
+    observed = value.get("observed") if isinstance(value.get("observed"), dict) else {}
+    run_dir = str(payload.get("run_dir") or value.get("run_dir") or direct_record.get("run_dir") or "")
+    state_file = str(value.get("state_file") or direct_record.get("state_file") or "")
+    if not state_file and run_dir:
+        state_file = str(Path(run_dir) / "run.json")
+    record: dict[str, Any] = dict(direct_record)
+    if state_file:
+        try:
+            loaded = json.loads(Path(state_file).read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                record = loaded
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            pass
+    durable = record.get("result") if isinstance(record.get("result"), dict) else {}
+    return {
+        "ok": True,
+        "receipt": {
+            "state": value.get("state") or record.get("phase"),
+            "phase": record.get("phase"),
+            "run_id": expected.get("run_id") or record.get("run_id"),
+            "session_id": expected.get("session_id") or record.get("session_id"),
+            "target_id": expected.get("target_id") or record.get("current_target_id"),
+            "canonical_url": expected.get("canonical_url") or record.get("conversation_url"),
+            "provider_status": observed.get("provider_status"),
+            "result_path": durable.get("path"),
+            "result_sha256": durable.get("sha256"),
+            "cleanup_pending": bool(record.get("cleanup_pending")),
+            "terminal_block_code": record.get("terminal_block_code"),
+            "run_dir": run_dir or (str(Path(state_file).parent) if state_file else None),
+            "state_file": state_file or None,
+        },
+    }
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -430,7 +492,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             manifest_path = manifest_path.expanduser().resolve()
             manifest = load_manifest(manifest_path)
             result = dry_run(manifest, args.contract) if args.dry_run else execute(manifest_path, args.contract, args.state_root)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        output = compact_envelope(result) if args.compact else result
+        print(json.dumps(output, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 2
     except Exception as exc:
         if isinstance(exc, BRIDGE.BridgeError):
@@ -439,7 +502,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             payload = exc.envelope()
         else:
             payload = {"ok": False, "error": {"code": "AGBROWSE_RUN_FAILED", "message": str(exc)}}
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        output = compact_envelope(payload) if args.compact else payload
+        print(json.dumps(output, ensure_ascii=False, indent=2))
         return 2
 
 

@@ -65,6 +65,20 @@ def test_manifest_covers_runtime_and_schemas() -> None:
     assert not any('*' in path for path in includes if not (path.endswith('/schemas/*.json') or path == 'contracts/install/*.json'))
 
 
+def test_quiescent_app_trace_fixtures_never_authorize_replacement_work() -> None:
+    expected = {
+        'planner-v7-app-trace-quiescent-incident.json': ('v7', 'preserve the parent lock'),
+        'planner-v8-app-trace-quiescent-incident.json': ('v8', 'exact persisted parent/child/session/target/canonical URL tuple'),
+    }
+    for filename, (planner_version, recovery_guard) in expected.items():
+        fixture = json.loads((ROOT / 'tests' / 'fixtures' / filename).read_text(encoding='utf-8'))
+        assert fixture['schema'] == 'codexpro.web-multi.app-trace-incident/v1'
+        assert fixture['planner_version'] == planner_version
+        assert fixture['state'] == 'quiescent'
+        assert recovery_guard in fixture['expected_recovery']
+        assert 'new' not in fixture['expected_recovery'].casefold()
+
+
 def test_public_install_and_npm_surface_exclude_legacy_browser_engines() -> None:
     manifest = json.loads((ROOT / 'install-manifest.json').read_text(encoding='utf-8'))
     package = json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))

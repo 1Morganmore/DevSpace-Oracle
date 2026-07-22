@@ -533,7 +533,7 @@ class FakeWebMultiRuntime:
                     "manifest_schema": "codex.chatgpt.web-multi/v2",
                     "semantics_version": "upstream-parity-v1",
                     "planner_policy": "upstream-nonempty-prefix10",
-                    "mode_variant": "Very High",
+                    "mode_variant": manifest["mode_variant"],
                     "role_session_target_url_provenance": [
                         {
                             "stage_id": "planner",
@@ -629,8 +629,8 @@ def test_comprehensive_plan_uses_regular_gpt_and_app(tmp_path):
     binding = driver._binding(state, "gpt-plan", 1)
     manifest = driver._manifest(state, binding, "plan")
     assert manifest["mode_label"] == "GPT-5.6"
-    assert manifest["mode_variant"] == "Very High"
-    assert manifest["regular_mode_selection"]["selected_mode_variant"] == "Very High"
+    assert manifest["mode_variant"] == "High"
+    assert manifest["regular_mode_selection"]["selected_mode_variant"] == "High"
     assert manifest["app_policy"] == "required"
     assert manifest["files"] == [manifest["prompt_file"]]
 
@@ -1013,7 +1013,7 @@ def test_v2_research_trigger_runs_app_backed_deep_stage_at_high(tmp_path: Path) 
     stage_manifest = json.loads(
         (driver.stages_dir / "deep-research-attempt-1" / "stage.manifest.json").read_text(encoding="utf-8")
     )
-    assert stage_manifest["mode_variant"] == "Very High"
+    assert stage_manifest["mode_variant"] == "High"
     assert stage_manifest["app_policy"] == "required"
     assert stage_manifest["chatgpt_app_name"] == "CodexPro-Test"
     assert stage_manifest["research_selection_transport"] == "preselected-research"

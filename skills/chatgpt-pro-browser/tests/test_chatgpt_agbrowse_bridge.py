@@ -1004,6 +1004,68 @@ def test_required_app_selection_warning_never_becomes_submitted(tmp_path: Path):
     assert result["recovery_events"][-1]["kind"] == "prepared-target-send-target-mismatch"
 
 
+def test_unenforced_reasoning_warning_preserves_original_run_for_recovery(tmp_path: Path):
+    def runner(command, env, timeout):
+        return completed({
+            "ok": True,
+            "status": "sent",
+            "sessionId": "session-mode-warning",
+            "targetId": "target-composer",
+            "conversationUrl": "https://chatgpt.com/c/mode-warning",
+            "warnings": [
+                "reasoning effort high was not enforced: ChatGPT reasoning effort selector not found for thinking"
+            ],
+        })
+
+    bridge, record = prepared_bridge(
+        tmp_path,
+        runner,
+        app_policy="required",
+        app_name="CodexPro-Test",
+        chatgpt_app_server_url="https://example.test/mcp",
+        mode_variant="High",
+    )
+
+    result = bridge.send(record["run_dir"])
+
+    assert result["phase"] == "RECOVERY_REQUIRED"
+    assert result["session_id"] == "session-mode-warning"
+    assert result["current_target_id"] == "target-composer"
+    assert result["conversation_url"] == "https://chatgpt.com/c/mode-warning"
+    assert result["recovery_events"][-1]["kind"] == "requested-reasoning-level-not-enforced"
+    assert result["recovery_events"][-1]["requested_mode_variant"] == "High"
+
+
+def test_unavailable_reasoning_fails_before_app_or_browser_side_effects(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", raising=False)
+    calls = []
+
+    def runner(*args, **kwargs):
+        calls.append("runner")
+        raise AssertionError("browser runner must not start")
+
+    def connector(*args, **kwargs):
+        calls.append("connector")
+        raise AssertionError("app connector must not start")
+
+    bridge, record = prepared_bridge(
+        tmp_path,
+        runner,
+        app_connector_factory=connector,
+        app_policy="required",
+        mode_label="GPT-5.6",
+        app_name="CodexPro-Test",
+        chatgpt_app_server_url="https://example.test/mcp",
+        mode_variant="Very High",
+    )
+
+    with pytest.raises(BRIDGE.BridgeError) as failure:
+        bridge.send(record["run_dir"])
+
+    assert failure.value.code == "MODE_VARIANT_UNAVAILABLE"
+    assert calls == []
+
+
 def test_app_transaction_exception_blocks_project_before_submission(tmp_path: Path):
     decision = tmp_path / "decision.json"
     project = tmp_path / "project"

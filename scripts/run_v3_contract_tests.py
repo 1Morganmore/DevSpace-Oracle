@@ -190,10 +190,18 @@ def run_git(root: Path) -> None:
 
 def run_compatibility() -> None:
     assert BRIDGE._mode_args({"mode_label": "GPT-5.6", "mode_variant": "High"})[-1] == "high"
-    assert BRIDGE._mode_args({"mode_label": "GPT-5.6", "mode_variant": "Very High"})[-1] == "xhigh"
-    deep = BRIDGE._mode_args({"mode_label": "Deep Research", "mode_variant": "Very High"})
-    assert deep[deep.index("--effort") + 1] == "xhigh"
-    assert deep[deep.index("--research") + 1] == "deep"
+    previous = os.environ.get("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES")
+    os.environ["CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES"] = "Very High,High"
+    try:
+        assert BRIDGE._mode_args({"mode_label": "GPT-5.6", "mode_variant": "Very High"})[-1] == "xhigh"
+        deep = BRIDGE._mode_args({"mode_label": "Deep Research", "mode_variant": "Very High"})
+        assert deep[deep.index("--effort") + 1] == "xhigh"
+        assert deep[deep.index("--research") + 1] == "deep"
+    finally:
+        if previous is None:
+            os.environ.pop("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", None)
+        else:
+            os.environ["CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES"] = previous
     assert BRIDGE.app_decision_scope_matches(Path("C:/unit"), Path("C:/unit"), "parallel-exact-unit")
     assert not BRIDGE.app_decision_scope_matches(Path("C:/unit"), Path("C:/"), "parallel-exact-unit")
 

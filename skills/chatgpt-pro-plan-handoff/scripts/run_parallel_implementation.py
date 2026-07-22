@@ -44,6 +44,7 @@ AUTH = load_module("parallel_driver_authority", BIN / "codexpro_exact_unit_autho
 GITISO = load_module("parallel_driver_git", BIN / "chatgpt_git_isolation.py")
 RUNTIME = load_module("parallel_driver_runtime", BIN / "chatgpt_parallel_implementation_runtime.py")
 STATE = load_module("parallel_driver_state", BIN / "chatgpt_agbrowse_state.py")
+PROMPTS = load_module("parallel_driver_prompt_profiles", BIN / "chatgpt_prompt_profiles.py")
 
 
 class DriverError(RuntimeError):
@@ -429,7 +430,7 @@ def dispatch_ready(parent_run_dir: Path, manifest: Mapping[str, Any], capacity_r
             "prompt_file_sha256": sha256_file(prompt_path),
             "files": [str(prompt_path)],
             "mode": "GPT-5.6",
-            "mode_variant": "Very High",
+            "mode_variant": str(PROMPTS.resolve_regular_mode_selection()["selected_mode_variant"]),
             "app_policy": "required",
             "app_scope_mode": "parallel-exact-unit",
             "topology_receipt_sha256": materialized["topology_receipt_sha256"],

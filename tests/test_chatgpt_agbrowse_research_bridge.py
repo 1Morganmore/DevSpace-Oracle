@@ -53,7 +53,8 @@ def test_deep_research_command_reuses_exact_preselected_target_at_high(tmp_path:
     assert "--plugin" not in command
 
 
-def test_deep_research_very_high_uses_xhigh_without_downgrade(tmp_path: Path) -> None:
+def test_deep_research_very_high_uses_xhigh_without_downgrade(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", "Very High,High")
     command = BRIDGE.build_send_command(
         {"requested": {"app_policy": "required"}},
         manifest(tmp_path, mode_variant="Very High"),
@@ -139,7 +140,10 @@ def test_restart_retry_consumes_saved_research_evidence_not_app_evidence(tmp_pat
 
 
 @pytest.mark.parametrize("variant", ["Very High", "xhigh", "매우 높음"])
-def test_new_regular_very_high_aliases_select_xhigh_without_fallback(tmp_path: Path, variant: str) -> None:
+def test_new_regular_very_high_aliases_select_xhigh_without_fallback(
+    tmp_path: Path, variant: str, monkeypatch
+) -> None:
+    monkeypatch.setenv("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", "Very High,High")
     value = manifest(tmp_path, mode_label="GPT-5.6", mode_variant=variant)
     value.pop("research_selection_transport")
     value.pop("research_selection_contract")
@@ -152,6 +156,26 @@ def test_new_regular_very_high_aliases_select_xhigh_without_fallback(tmp_path: P
     )
 
     assert command[command.index("--effort") + 1] == "xhigh"
+
+
+def test_new_regular_very_high_is_rejected_when_account_receipt_is_high_only(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.delenv("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", raising=False)
+    value = manifest(tmp_path, mode_label="GPT-5.6", mode_variant="Very High")
+    value.pop("research_selection_transport")
+    value.pop("research_selection_contract")
+
+    with pytest.raises(BRIDGE.BridgeError) as failure:
+        BRIDGE.build_send_command(
+            {"requested": {"app_policy": "required"}},
+            value,
+            "agbrowse",
+            preselected_app=True,
+        )
+
+    assert failure.value.code == "MODE_VARIANT_UNAVAILABLE"
+    assert failure.value.evidence == {"requested": "Very High", "available": ["High"]}
 
 
 @pytest.mark.parametrize("variant", ["Medium", "Instant"])

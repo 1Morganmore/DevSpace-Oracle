@@ -778,19 +778,30 @@ def validate_manifest(value: Mapping[str, Any], manifest_path: Path) -> dict[str
             "PROVIDER_PARALLEL_LIMIT_UNSUPPORTED",
             "provider_parallel_limit must be 1..5",
         )
-    # New v2 work selects the strongest regular-web level declared available;
-    # explicit High remains valid for frozen comparison arms. V1 keeps its
-    # historical Very High default for recovery compatibility.
-    default_mode_variant = (
-        str(PROMPTS.resolve_regular_mode_selection()["selected_mode_variant"])
-        if schema == V2_SCHEMA
-        else "Very High"
-    )
+    # Every newly compiled manifest selects from the explicit account
+    # capability receipt. Persisted legacy V1 state retains its already stored
+    # mode_variant when resumed, but a new V1 manifest no longer invents Very
+    # High when the public-safe capability is High.
+    regular_mode_selection = dict(PROMPTS.resolve_regular_mode_selection())
+    default_mode_variant = str(regular_mode_selection["selected_mode_variant"])
     mode_variant = str(value.get("mode_variant") or default_mode_variant)
     if schema == V2_SCHEMA and mode_variant not in {"High", "Very High"}:
         raise WebMultiError(
             "MANIFEST_V2_MODE_VARIANT_INVALID",
             "upstream-parity v2 supports exact mode_variant High or Very High",
+        )
+    if (
+        schema == V2_SCHEMA
+        and regular_mode_selection is not None
+        and mode_variant not in regular_mode_selection["available_regular_reasoning"]
+    ):
+        raise WebMultiError(
+            "MODE_VARIANT_UNAVAILABLE",
+            f"requested web reasoning level is not available: {mode_variant}",
+            {
+                "requested": mode_variant,
+                "available": regular_mode_selection["available_regular_reasoning"],
+            },
         )
     if schema == V1_SCHEMA and mode_variant not in {"Very High", "High"}:
         raise WebMultiError("MODE_VARIANT_UNSUPPORTED", "web Multi-GPT supports Very High or High")
@@ -829,6 +840,7 @@ def validate_manifest(value: Mapping[str, Any], manifest_path: Path) -> dict[str
             "provider_failure_retry_limit": provider_failure_retry_limit,
             "provider_parallel_limit": provider_parallel_limit,
             "mode_variant": mode_variant,
+            "regular_mode_selection": regular_mode_selection,
             "project_root": str(root),
             "source_snapshot_path": str(snapshot),
             "output_dir": str(output),

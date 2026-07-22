@@ -72,6 +72,19 @@ def make_manifest(tmp_path: Path, *, solver_count: int, max_iterations: int = 1,
     return manifest
 
 
+def test_new_v1_without_mode_variant_uses_safe_high_default(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", raising=False)
+    path = make_manifest(tmp_path, solver_count=2)
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value.pop("mode_variant")
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    manifest = RUNTIME.validate_manifest(json.loads(path.read_text(encoding="utf-8")), path)
+
+    assert manifest["mode_variant"] == "High"
+    assert manifest["regular_mode_selection"]["selected_mode_variant"] == "High"
+
+
 class FakeStageExecutor:
     def __init__(self, solver_count: int, *, duplicate_identity: bool = False, bad_receipt_role: str | None = None):
         self.solver_count = solver_count

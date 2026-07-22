@@ -70,6 +70,24 @@ def test_windows_cmd_wrapper_budget_boundary_is_inclusive() -> None:
     assert budget_for(exact_prompt_chars + 1)["within_budget"] is False
 
 
+def test_default_runner_schedules_foreground_restoration_before_spawn(monkeypatch) -> None:
+    bridge = load_bridge()
+    events: list[str] = []
+
+    monkeypatch.setattr(bridge, "_schedule_windows_foreground_restore", lambda: events.append("restore"))
+
+    def fake_run(command, **kwargs):
+        events.append("run")
+        return subprocess.CompletedProcess(command, 0, "{}", "")
+
+    monkeypatch.setattr(bridge.subprocess, "run", fake_run)
+
+    result = bridge.default_runner(["agbrowse", "status"], {}, 5)
+
+    assert result.returncode == 0
+    assert events == ["restore", "run"]
+
+
 def test_app_decision_scope_allows_exact_project_or_drive_root_only() -> None:
     bridge = load_bridge()
     run_root = Path(r"C:\projects\sample-app").resolve()

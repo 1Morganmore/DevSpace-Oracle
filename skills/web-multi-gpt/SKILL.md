@@ -43,7 +43,7 @@ Resume only the exact parent and immutable manifest:
 python "$env:USERPROFILE\.codex\bin\chatgpt_web_multi_runtime.py" --manifest <web-multi.manifest.json> --resume-parent <parent-run-dir>
 ```
 
-The default compatibility manifest schema remains `codex.chatgpt.web-multi/v1`. Required fields are:
+The default compatibility manifest schema remains `codex.chatgpt.web-multi/v1`. Newly compiled V1 and V2 manifests both select the strongest explicitly attested regular-web capability, with `High` as the safe public default. Required fields are:
 
 - `workflow_id`
 - exact normalized `project_root`
@@ -56,13 +56,13 @@ The default compatibility manifest schema remains `codex.chatgpt.web-multi/v1`. 
 - `provider_failure_retry_limit` in `0..2` (default `1`)
 - optional `provider_parallel_limit` as an integer in `1..5` (default `5`); this is the hard provider-generation cap, not a topology reduction
 
-V1 retains `mode_variant: Very High` by default; `High` remains available for its frozen comparison arm. V2 upstream-parity manifests accept the exact values `High` and `Very High`; when omitted, the strongest declared regular-web capability is selected (`Very High` before `High`). Any other value is rejected before any output, state, app, or browser side effect.
+Legacy V1 state may retain its persisted `mode_variant`. New V1 and V2 manifests select the strongest explicitly declared regular-web capability when `mode_variant` is omitted. New V2 upstream-parity manifests accept the exact values `High` and `Very High`; the safe public default is `High`, and `Very High` is available only when the host supplies an account-verified capability receipt. Any unavailable or unknown value is rejected before output, state, app, or browser side effects.
 
 For an opt-in dynamic upstream-parity run, use schema `codex.chatgpt.web-multi/v2` with the same common required fields plus:
 
 - `semantics_version: upstream-parity-v1`
 - `planner_policy: upstream-nonempty-prefix10` for literal nonempty-prefix-10 acceptance, or `strict-6-10` for the operating policy that requires 6 through 10 approaches
-- exact `mode_variant: High` or `mode_variant: Very High` (strongest declared level when omitted)
+- exact `mode_variant: High` or an explicitly capability-attested `mode_variant: Very High` (safe default `High`)
 - optional `agbrowse_contract_sha256`, exactly 64 lowercase hexadecimal characters matching the SHA-256 of the resolved `agbrowse_contract` file; when omitted, the existing contract-resolution compatibility path remains supported
 - no `solver_count` key at all, including `null`
 
@@ -133,6 +133,8 @@ The exact order is:
 
 ## Verification
 
+Detailed child and synthesis output remains in run-owned result files. Host-facing progress and completion use bounded descriptors (stage, exact URL identity, path, SHA-256, terminal state) rather than printing or reinjecting full child answers into local Codex. Unchanged child state is waited by the runtime, not polled through repeated local-model turns.
+
 Before treating the runtime as usable, require:
 
 - deterministic 2-Solver and 4-Solver runs with `max_concurrent_child_generations >= 2`
@@ -147,4 +149,4 @@ Before treating the runtime as usable, require:
 - terminal `owned_open_tabs=0`
 - the installed-only v7 and v8 quiescent app-trace incidents, proving that no recovery path creates a replacement send
 
-For comparison, freeze exactly three arms: Pro attachment-only, web Multi-GPT Very High app-only, and web Multi-GPT High app-only. Freeze the same question, evidence, rubric, solver count, and iteration count, then record quality, time, recovery, context, and tab-cleanup evidence.
+For comparison, use Pro attachment-only and web Multi-GPT High app-only; add a Very High arm only when the account capability receipt explicitly proves it is available. Freeze the same question, evidence, rubric, solver count, and iteration count, then record quality, time, recovery, context, and tab-cleanup evidence.

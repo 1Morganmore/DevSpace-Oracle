@@ -25,7 +25,7 @@ Resource pressure may delay a helper but must not invent a fallback backend, kil
 - 즉시: instant.
 - 중간: thinking medium.
 - 높음 / Expanded: thinking high.
-- 매우 높음 / Heavy: thinking xhigh.
+- 매우 높음 / Heavy: thinking xhigh only when an explicit account capability receipt proves it is available; otherwise fail before send. The safe public default is High.
 - Deep Research is handled by its owning skill but retains this agbrowse-only transport.
 - Pro is handled by `chatgpt-pro-browser`; never reinterpret Pro as regular GPT.
 
@@ -110,6 +110,13 @@ python "$env:USERPROFILE\.codex\skills\chatgpt-thinking-browser\scripts\run_chat
 The execution path is `chatgpt_agbrowse_run.py -> chatgpt_agbrowse_bridge.py -> agbrowse`.
 
 ## Ownership, recovery, and tabs
+
+### Local Codex token budget
+
+- Launch one background runner and let it own the wait. Do not create a local-model turn for unchanged periodic polling. Re-enter only on terminal output, a bounded deadline, a user status request, or a new decision-relevant error.
+- Use `chatgpt_agbrowse_run.py --observe-run <run-dir> --compact` for routine checks. Full evidence remains on disk; the receipt contains only state, exact identity, result path/hash, cleanup state, and terminal block.
+- Do not paste or reread full run records, snapshots, answer bodies, recovery events, or stage output merely to report progress. Read the smallest descriptor needed for the next decision.
+- Web stages write detailed results and semantic continuation prompts to immutable files. Local Codex passes paths and hashes and does not restate or semantically rewrite those bodies unless deterministic verification requires it.
 
 - Save immutable manifest/prompt hashes, owner nonce/epoch, agbrowse session ID, target ID, and canonical `https://chatgpt.com/c/<id>` URL.
 - Diagnose or report a persisted run with `chatgpt_agbrowse_run.py --observe-run <exact-run-dir>`. Job identity is the exact canonical conversation URL plus the run-owned `prompt-<run_id>.txt` filename. Project key, run/session/target IDs, PID, heartbeat, lock, and poll state are diagnostic only; they never authorize mixing another URL/run into this job or overriding the exact URL's terminal state. Never infer the run from the visible screen, answer topic, tab title, currently active target, elapsed time, or another task's pasted URL.

@@ -23,7 +23,10 @@ def resolve_regular_mode_selection() -> dict[str, object]:
     requesting a lower mode when a stronger available mode exists is rejected.
     This keeps a transient UI downgrade from becoming a silent workflow change.
     """
-    raw = os.environ.get("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", "Very High,High")
+    # The public web surface currently guarantees High, not Very High.  A
+    # stronger level is usable only when the host supplies an explicit,
+    # account-verified capability receipt for this process.
+    raw = os.environ.get("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", "High")
     available = tuple(item.strip() for item in raw.split(",") if item.strip())
     unsupported = sorted(set(available) - set(REGULAR_REASONING_ORDER))
     supported = tuple(mode for mode in REGULAR_REASONING_ORDER if mode in available)

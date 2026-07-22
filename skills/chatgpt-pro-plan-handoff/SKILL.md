@@ -23,6 +23,8 @@ Pro never uses an app. Every non-Pro stage—including plan, review, orchestrato
 
 Every new comprehensive workflow uses `codex.chatgpt.comprehensive-workflow/v4` with `relay.mode: web-native-v1`. V1 and v2 are recovery-only for already persisted matching legacy workflow state. V3 remains the separate parallel-implementation contract and is never repurposed as the relay workflow.
 
+Local Codex token use is a hard efficiency invariant. Detailed plan, review, advisory, mission, and implementation content stays in immutable handoff files authored by the completing web stage. The host consumes only schemas, paths, hashes, verdicts, and bounded receipts; it must not rehydrate entire answer bodies or repeatedly poll unchanged state into the local model.
+
 1. Validate the structured v4 manifest, web-native relay mode, and both deterministic gates before browser work.
 2. Run Deep Research only when its `auto` triggers select it or the user/policy requires it; otherwise persist an immutable skip descriptor.
 3. Fresh regular GPT plans constructively from the original task with the project app context and research descriptor hash. It also authors the complete semantic prompt for the next review or Web Multi stage; local Codex validates and materializes those exact UTF-8 bytes without rewriting them.
@@ -52,7 +54,7 @@ Use this path only for a new `codex.chatgpt.comprehensive-workflow/v3` manifest 
 
 1. A Pro planner produces the approved plan and strict `implementation-graph-result-v1`.
 2. `run_parallel_implementation.py prepare` acquires the sole `parallel-implementation` parent lease, captures canonical baseline identity, creates an independent staging clone with `--no-local --no-hardlinks --no-checkout`, binds every dependency/conflict edge into deterministic components, and emits exact unit missions.
-3. Each Very High implementer receives one `execution-mission-v2`, one exact unit root, immutable `input_base_oid`, explicit claimed paths, registered test IDs, and no Git authority. Start it only through `codexpro_exact_unit_cloudflare_bootstrap.ps1` after topology, singleton roots, listener, tunnel, server, and app identity attestations pass.
+3. Each implementer uses the strongest explicitly account-attested regular reasoning level (safe default `High`) and receives one `execution-mission-v2`, one exact unit root, immutable `input_base_oid`, explicit claimed paths, registered test IDs, and no Git authority. Start it only through `codexpro_exact_unit_cloudflare_bootstrap.ps1` after topology, singleton roots, listener, tunnel, server, and app identity attestations pass.
 4. Persist `child-send-claim/v2` before provider invocation. A mutation-possible or confirmed attempt is never resubmitted; recover only the exact session/history. A durable zero-mutation proof may retry the same claim only.
 5. `record-unit` derives the actual diff and rejects out-of-scope, reparse, gitlink, and common Git metadata mutation. The host runs registered tests and creates the deterministic commit.
 6. Only independent components run in parallel. One component has at most one active unit, and its next unit starts from the current component integration head.

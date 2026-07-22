@@ -195,7 +195,8 @@ def test_invalid_v2_is_rejected_before_output_or_state_side_effects(
     assert not state_root.exists()
 
 
-def test_v2_accepts_very_high_mode(tmp_path: Path) -> None:
+def test_v2_accepts_very_high_mode(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", "Very High,High")
     manifest = make_v2_manifest(tmp_path, extra={"mode_variant": "Very High"})
 
     runtime = RUNTIME.WebMultiRuntime(manifest, state_root=tmp_path / "state")
@@ -211,7 +212,18 @@ def test_v2_missing_mode_variant_selects_highest_available_regular_level(tmp_pat
 
     runtime = RUNTIME.WebMultiRuntime(manifest, state_root=tmp_path / "state")
 
-    assert runtime.manifest["mode_variant"] == "Very High"
+    assert runtime.manifest["mode_variant"] == "High"
+
+
+def test_v2_rejects_unattested_very_high_before_output(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", raising=False)
+    manifest = make_v2_manifest(tmp_path, extra={"mode_variant": "Very High"})
+
+    with pytest.raises(RUNTIME.WebMultiError) as failure:
+        RUNTIME.WebMultiRuntime(manifest, state_root=tmp_path / "state")
+
+    assert failure.value.code == "MODE_VARIANT_UNAVAILABLE"
+    assert not (tmp_path / "output").exists()
     assert not (tmp_path / "output").exists()
 
 

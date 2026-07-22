@@ -78,3 +78,12 @@ def test_regular_reasoning_selection_chooses_strongest_and_fails_closed(monkeypa
     monkeypatch.setenv("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", "")
     with pytest.raises(PROFILES.PromptProfileError, match="REGULAR_MODE_UNAVAILABLE"):
         PROFILES.resolve_regular_mode_selection()
+
+
+def test_regular_reasoning_selection_defaults_to_guaranteed_high(monkeypatch) -> None:
+    monkeypatch.delenv("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", raising=False)
+
+    selection = PROFILES.resolve_regular_mode_selection()
+
+    assert selection["selected_mode_variant"] == "High"
+    assert selection["available_regular_reasoning"] == ["High"]

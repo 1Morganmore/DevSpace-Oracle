@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from contextlib import contextmanager, nullcontext
@@ -1068,6 +1069,36 @@ def _mode_args(manifest: dict[str, Any]) -> list[str]:
     variant = str(manifest.get("mode_variant") or "High").strip().lower().replace("_", " ")
     if label == "pro":
         return ["--model", "pro"]
+    raw_capabilities = os.environ.get("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", "High")
+    capability_aliases = {
+        "high": "High",
+        "높음": "High",
+        "very high": "Very High",
+        "매우 높음": "Very High",
+        "xhigh": "Very High",
+        "extra high": "Very High",
+        "heavy": "Very High",
+    }
+    available: list[str] = []
+    for item in raw_capabilities.split(","):
+        normalized = item.strip().lower().replace("_", " ")
+        if not normalized:
+            continue
+        canonical = capability_aliases.get(normalized)
+        if canonical is None:
+            raise BridgeError(
+                "REGULAR_CAPABILITY_UNSUPPORTED",
+                f"unsupported regular GPT capability: {item.strip()}",
+            )
+        if canonical not in available:
+            available.append(canonical)
+    requested_capability = capability_aliases.get(variant)
+    if requested_capability is not None and requested_capability not in available:
+        raise BridgeError(
+            "MODE_VARIANT_UNAVAILABLE",
+            f"requested web reasoning level is not available: {requested_capability}",
+            {"requested": requested_capability, "available": available},
+        )
     if label in {"deep research", "deep-research"}:
         research_efforts = {
             "high": "high",
@@ -1225,6 +1256,37 @@ def composer_lock_timeout_seconds(manifest: Mapping[str, Any]) -> int:
 Runner = Callable[[list[str], dict[str, str], int], subprocess.CompletedProcess[str]]
 
 
+def _schedule_windows_foreground_restore(delay_seconds: float = 0.35) -> None:
+    """Best-effort restore of the user's foreground window after browser CLI spawn.
+
+    Headed agbrowse may briefly foreground its automation Chrome while a command
+    starts.  Capture the user's window before spawning and restore it shortly
+    afterwards without changing any browser target or tab ownership.
+    """
+    if os.name != "nt" or os.environ.get("CODEX_CHATGPT_PRESERVE_FOREGROUND", "1") == "0":
+        return
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        foreground = int(user32.GetForegroundWindow())
+        if not foreground:
+            return
+
+        def restore() -> None:
+            try:
+                if user32.IsWindow(foreground) and int(user32.GetForegroundWindow()) != foreground:
+                    user32.SetForegroundWindow(foreground)
+            except Exception:
+                pass
+
+        timer = threading.Timer(max(0.05, delay_seconds), restore)
+        timer.daemon = True
+        timer.start()
+    except Exception:
+        return
+
+
 def pre_send_command_budget(command: list[str], *, platform_name: str | None = None) -> dict[str, Any]:
     """Return a redacted command-line budget check before the mutation boundary."""
     platform = platform_name or os.name
@@ -1252,6 +1314,7 @@ def default_runner(command: list[str], env: dict[str, str], timeout: int) -> sub
             creationflags=subprocess.CREATE_NO_WINDOW,
             startupinfo=startupinfo,
         )
+    _schedule_windows_foreground_restore()
     return subprocess.run(
         command,
         text=True,
@@ -6091,6 +6154,10 @@ class Bridge:
         if record["phase"] in {"SUBMISSION_UNCERTAIN_IDENTITY_MISSING", "BLOCKED_RECOVERY_EXHAUSTED"}:
             record = self._reclassify_mutation_disallowed(run_dir, record)
         initial_manifest = _load_manifest(record)
+        # Capability validation is a zero-side-effect preflight.  Reject an
+        # unavailable reasoning level before runtime, app, target, or composer
+        # preparation can mutate browser state.
+        _mode_args(initial_manifest)
         mode_label = str(initial_manifest.get("mode_label") or "GPT-5.6").strip().casefold()
         app_policy = str(
             record.get("requested", {}).get("app_policy")
@@ -6644,6 +6711,12 @@ class Bridge:
         warnings = payload.get("warnings") if isinstance(payload, dict) else []
         warnings = warnings if isinstance(warnings, list) else []
         app_selection_failed = any("plugin not selected" in str(item).casefold() for item in warnings)
+        reasoning_selection_failed = [
+            str(item)
+            for item in warnings
+            if "reasoning effort" in str(item).casefold()
+            and "not enforced" in str(item).casefold()
+        ]
         if required_app and selection_transport == "legacy-plugin-parallel" and app_selection_failed:
             return self.store.transition(
                 run_dir,
@@ -6667,6 +6740,36 @@ class Bridge:
                 url = url if url and STATE.CANONICAL_CHAT_RE.fullmatch(str(url)) else shown_url
             except Exception as exc:
                 session_identity_evidence = {"error": str(exc)}
+        if envelope["ok"] and session_id and reasoning_selection_failed:
+            if target_id and not use_prepared_target:
+                tab_lifecycle.record_owned(
+                    run_dir,
+                    target_id=str(target_id),
+                    url=str(url or composer_url),
+                    stage="send-created-target-reasoning-unenforced",
+                )
+            if target_id:
+                tab_lifecycle.record_protected(
+                    run_dir,
+                    target_id=str(target_id),
+                    conversation_url=str(url or ""),
+                    stage="reasoning-unenforced-after-send",
+                )
+            return self.store.transition(
+                run_dir,
+                "RECOVERY_REQUIRED",
+                session_id=session_id,
+                target_id=target_id,
+                conversation_url=(str(url) if url and STATE.CANONICAL_CHAT_RE.fullmatch(str(url)) else None),
+                block_code="MODE_SELECTION_UNENFORCED_AFTER_SEND",
+                recovery_event={
+                    "kind": "requested-reasoning-level-not-enforced",
+                    "requested_mode_variant": manifest.get("mode_variant"),
+                    "warnings": reasoning_selection_failed,
+                    "send_evidence": evidence,
+                    "session_identity_evidence": session_identity_evidence,
+                },
+            )
         if envelope["ok"] and session_id and use_prepared_target and target_id != prepared_target_id:
             return self.store.transition(
                 run_dir,
