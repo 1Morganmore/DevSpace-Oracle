@@ -2,6 +2,8 @@
 
 This is the global operating runbook for non-Pro GPT-5.6 runs. Serial v1/v2 and Web Multi advisory work use at most one drive-root CodexPro Developer App per Windows drive; projects on that drive share it while each prompt narrows `working_scope`, `allowed_paths`, `forbidden_paths`, and write authority. Explicit parallel implementation v3 is the sole exception: every child uses a separately attested exact-unit app and Cloudflare tunnel with no drive/home fallback. Distribution installs use dynamic Cloudflare URLs by default. A registered stable CDrive ngrok hostname may be reused locally only for legacy-drive work. The filename retains `gpt55` only to preserve existing references.
 
+Public installs require only PowerShell, Python 3.11+, Node.js 20+ with npm, and the external `agbrowse` package selected by `install-manifest.json`; CodexPro remains `codexpro@latest` at bootstrap and is not vendored. Installed-only recovery evidence is deliberately narrow: a quiescent utility/app trace cannot authorize a new workflow or send, and recovery must use the exact durable identity tuple or fail closed.
+
 ## Normal Path
 
 0. Require ChatGPT Developer Mode before any non-Pro app transaction.

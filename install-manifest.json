@@ -1,6 +1,6 @@
 {
   "schema": "codexpro.install-manifest/v1",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "include": [
     "bin/chatgpt_agbrowse_bridge.py",
     "bin/chatgpt_agbrowse_composer.py",
@@ -41,6 +41,10 @@
     "skills/chatgpt-pro-plan-handoff/scripts/workspace_guard.py",
     "skills/chatgpt-pro-plan-handoff/schemas/*.json",
     "scripts/run_v3_contract_tests.py",
+    "scripts/run_v4_contract_tests.py",
+    "contracts/install/*.json",
+    "tests/fixtures/planner-v7-app-trace-quiescent-incident.json",
+    "tests/fixtures/planner-v8-app-trace-quiescent-incident.json",
     "skills/chatgpt-question-designer/SKILL.md",
     "skills/chatgpt-question-designer/agents/openai.yaml"
   ],

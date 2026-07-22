@@ -15,6 +15,8 @@ DENY_PATTERNS = [
     "택톡",
     "BB-torres",
     "문제출제",
+    "planner-v7-app-trace-quiescent-incident",
+    "planner-v8-app-trace-quiescent-incident",
 ]
 
 SKIP_DIRS = {
@@ -47,6 +49,8 @@ SKIP_SUFFIXES = {
 ALLOWLIST = {
     Path("scripts/check_portability.py"),
     Path("install-manifest.json"),
+    Path("tests/fixtures/planner-v7-app-trace-quiescent-incident.json"),
+    Path("tests/fixtures/planner-v8-app-trace-quiescent-incident.json"),
 }
 
 

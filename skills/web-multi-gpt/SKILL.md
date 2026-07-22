@@ -90,6 +90,7 @@ V1 remains byte-compatible: omitted `solver_count` means 3 and explicit values r
 - Each child has one durable O_EXCL `send.claim`, one session, one target, one canonical URL, and at most one public send.
 - A transient app utility failure before any send/session/URL evidence may retry the same child only under the durable same-claim authority, bounded by both count and wall-clock deadline; it never creates a replacement child or claim.
 - Recover only the recorded child run/session/target/URL while execution is active or uncertain. Never submit a replacement for an active or uncertain stage.
+- Installed recovery state is evidence, not authority: a quiescent app/utility trace (including the v7/v8 incident fixtures) cannot create a Planner, child, session, target, or send. Resume only a durable exact identity tuple; otherwise preserve the parent lock and fail closed for manager adjudication.
 - Diagnose a child only through its persisted project/parent/child/session/target/canonical-URL identity. Never use the currently visible tab, response subject, or another child/session as identity evidence. A matching `activeCommand.sessionId` protects the exact child helper as active; empty text, apparent stall, and elapsed time never authorize terminating it.
 - A timeout or exception after the send boundary retains the parent lock until exact adjudication finishes.
 - A ChatGPT stream-error banner must never count as a completed answer even when agbrowse reports `status=complete`. Preserve its immutable bytes, classify the exact child `PROVIDER_FAILED_TERMINAL`, close only its exact owned target, fail-close and release the clean parent, then let the runtime supervisor make at most the manifest's bounded fresh-workflow retry. This is permitted only after explicit terminal-failure proof; it is never an uncertainty fallback.
@@ -142,5 +143,6 @@ Before treating the runtime as usable, require:
 - exact recovery and no sibling/foreign mutation
 - utility-target success/failure/interruption cleanup
 - terminal `owned_open_tabs=0`
+- the installed-only v7 and v8 quiescent app-trace incidents, proving that no recovery path creates a replacement send
 
 For comparison, freeze exactly three arms: Pro attachment-only, web Multi-GPT Very High app-only, and web Multi-GPT High app-only. Freeze the same question, evidence, rubric, solver count, and iteration count, then record quality, time, recovery, context, and tab-cleanup evidence.

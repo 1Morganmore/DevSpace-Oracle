@@ -1,7 +1,7 @@
 # Release checklist
 
-- Run `python scripts/check_portability.py --root .` and the offline lifecycle tests.
-- Confirm `install-manifest.json` expands to every shipped `bin` and skill runtime/schema file, including web-multi runtime/upstream and composer additions.
+- Run `python scripts/check_portability.py --root .`, `python scripts/run_v4_contract_tests.py --focused`, `python scripts/run_v3_contract_tests.py`, and `python scripts/run_v4_contract_tests.py --full`.
+- Confirm `install-manifest.json` and `package.json` inventory every shipped runtime/schema file, the v4 runner, and both v7/v8 quiescent app-trace incident fixtures.
 - Confirm MIT copyright is `2026 ventianima-lab` and third-party notices retain the multi-gpt commit/hash attribution.
 - Do not vendor agbrowse, Codex, CodexPro, browser binaries, or account data.
 - Verify no workflow has `schedule`; CI must use Windows and mocked/offline lifecycle checks.
@@ -10,6 +10,7 @@
 - Before a normal install, verify its read-only dependency preflight completes before any managed file mutation. The returned token binds selected version/integrity, prior dependency identity, and observed unlocked state; the subsequent update must reacquire the lock and reject drift. Before an explicit update, confirm no active or uncertain run state exists. The update receipt must preserve the prior npm version/integrity, executable and contract hashes, then capture and validate the reviewed public-command contract before replacing it.
 - Future agbrowse versions must be explicit resolved semvers. Pass their exact registry integrity to contract capture/validation, retain 0.1.18 only as the tested baseline, and require the invoking agent/workflow to select the resulting versioned contract explicitly.
 - Exercise both file-only install rollback and mocked normal install rollback. Receipt v3 must restore the prior agbrowse package, selected contract bytes, and prior update receipt; the exact inverse must prove registry integrity, installed version, and executable SHA-256 after npm reports success. Dependency drift must fail in preflight before installed files change, and any late inverse failure must report `PARTIAL`.
+- Verify install WAL behavior: per file, durable `INTENT` precedes mutation; the file is flushed, `replacement.json` is written, hashes are verified, and only then is the entry `COMPLETE`. A later install resumes an interrupted WAL by restoring only receipt-owned bytes; a modified destination remains a conflict.
 
 ## Parallel implementation v3
 

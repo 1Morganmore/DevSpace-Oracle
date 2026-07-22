@@ -56,9 +56,13 @@ def test_manifest_covers_runtime_and_schemas() -> None:
         'skills/chatgpt-pro-browser/scripts/run_chatgpt_pro.py',
         'skills/chatgpt-pro-plan-handoff/scripts/run_pro_plan_handoff.py',
         'skills/chatgpt-pro-plan-handoff/schemas/*.json',
+        'scripts/run_v4_contract_tests.py',
+        'contracts/install/*.json',
+        'tests/fixtures/planner-v7-app-trace-quiescent-incident.json',
+        'tests/fixtures/planner-v8-app-trace-quiescent-incident.json',
     }
     assert required <= includes
-    assert not any('*' in path for path in includes if not path.endswith('/schemas/*.json'))
+    assert not any('*' in path for path in includes if not (path.endswith('/schemas/*.json') or path == 'contracts/install/*.json'))
 
 
 def test_public_install_and_npm_surface_exclude_legacy_browser_engines() -> None:
@@ -95,11 +99,20 @@ def test_package_is_publishable_and_lockfile_matches() -> None:
         'skills/chatgpt-thinking-browser/SKILL.md',
         'install.ps1',
         'LICENSE',
+        'scripts/run_v4_contract_tests.py',
+        'contracts/install/',
     } <= set(package['files'])
 
 
-def test_release_workflow_installs_pytest_before_running_tests() -> None:
+def test_release_workflow_installs_pytest_before_running_contract_runner() -> None:
     workflow = (ROOT / '.github/workflows/release-portability.yml').read_text(encoding='utf-8')
     install = workflow.index('python -m pip install "pytest>=8,<10"')
-    run_tests = workflow.index('python -m pytest -q')
+    run_tests = workflow.index('python scripts/run_v4_contract_tests.py --focused')
     assert install < run_tests
+
+
+def test_release_workflow_runs_focused_and_full_contract_checks() -> None:
+    workflow = (ROOT / '.github/workflows/release-portability.yml').read_text(encoding='utf-8')
+    assert 'scripts/run_v4_contract_tests.py --focused' in workflow
+    assert 'scripts/run_v3_contract_tests.py' in workflow
+    assert 'scripts/run_v4_contract_tests.py --full' in workflow

@@ -57,6 +57,26 @@ def test_installer_uses_skip_dependency_switch_and_explicit_update() -> None:
     assert '-Preflight -AgbrowseVersion' in text
 
 
+def test_installer_wal_records_actual_per_file_transition_order() -> None:
+    with tempfile.TemporaryDirectory() as home:
+        installed = run_powershell(
+            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home, '-SkipDependencyInstall',
+        )
+        assert installed.returncode == 0, installed.stderr
+        receipt = json.loads(next((Path(home) / 'receipts').glob('codexpro-automation-*.json')).read_text(encoding='utf-8-sig'))
+        wal = json.loads(Path(receipt['wal']).read_text(encoding='utf-8'))
+        assert wal['schema'] == 'codexpro.install-wal/v1'
+        assert wal['status'] == 'COMPLETE'
+        assert wal['files']
+        for index, entry in enumerate(wal['files']):
+            assert entry['phase'] == 'COMPLETE'
+            assert entry['transitions'] == ['INTENT', 'MUTATED', 'VERIFIED', 'COMPLETE']
+            replacement = Path(entry['replacement'])
+            assert replacement.name == 'replacement.json'
+            assert replacement.parent.name == str(index)
+            assert replacement.is_file()
+
+
 def test_doctor_accepts_current_v3_install_receipt_schema() -> None:
     with tempfile.TemporaryDirectory() as home:
         root = Path(home)
