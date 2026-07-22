@@ -722,6 +722,8 @@ class ProPlanHandoffDriver:
             ):
                 return False
             archive = state.get("source_archive")
+            if self.comprehensive:
+                return archive is None
             if not isinstance(archive, Mapping):
                 return False
             archive_path = Path(str(archive.get("path") or "")).resolve(strict=True)
@@ -1099,7 +1101,7 @@ class ProPlanHandoffDriver:
         snapshot = self._source_snapshot()
         snapshot_path = self.handoff_dir / "source-snapshot.json"
         write_snapshot(snapshot_path, snapshot)
-        archive = build_source_archive(
+        archive = None if self.comprehensive else build_source_archive(
             workspace_root=self.workspace_root,
             snapshot=snapshot,
             output_zip=self.handoff_dir / "source-context.zip",
@@ -1276,6 +1278,21 @@ class ProPlanHandoffDriver:
         # manifest must therefore be byte-stable too, so a rerun cannot alter
         # the identity that agbrowse uses to locate the original submission.
         write_immutable_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True))
+        capture_path = stage_dir / "runtime-capture.json"
+        result_capture = stage_dir / "runtime-result.json"
+        transcript_capture = stage_dir / "runtime-transcript.raw.md"
+        if capture_path.is_file():
+            capture = load_mapping(capture_path)
+            if (
+                capture.get("schema") == "codex.chatgpt.handoff-runtime-capture/v1"
+                and capture.get("manifest_sha256") == file_sha256(manifest_path)
+                and result_capture.is_file()
+                and transcript_capture.is_file()
+                and capture.get("result_sha256") == file_sha256(result_capture)
+                and capture.get("transcript_sha256") == file_sha256(transcript_capture)
+            ):
+                return load_mapping(result_capture), transcript_capture.read_text(encoding="utf-8"), manifest_path
+            raise WorkflowError("STAGE_RUNTIME_CAPTURE_INVALID", str(capture_path))
         recovered = self.runtime.recover_run_ids(manifest_path)
         if len(recovered) > 1:
             raise WorkflowError("MULTIPLE_RUNTIME_RUNS_FOR_STAGE")
@@ -1311,6 +1328,23 @@ class ProPlanHandoffDriver:
         url = str(result.get("conversation_url") or "")
         if not url.startswith("https://chatgpt.com/c/"):
             raise WorkflowError("CANONICAL_CONVERSATION_URL_MISSING", url)
+        write_immutable_text(result_capture, json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        write_immutable_text(transcript_capture, transcript)
+        write_immutable_text(
+            capture_path,
+            json.dumps(
+                {
+                    "schema": "codex.chatgpt.handoff-runtime-capture/v1",
+                    "manifest_sha256": file_sha256(manifest_path),
+                    "result_sha256": file_sha256(result_capture),
+                    "transcript_sha256": file_sha256(transcript_capture),
+                    "canonical_url": url,
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+        )
         return result, transcript, manifest_path
 
     def _verify_runtime(self, result: Mapping[str, Any], manifest: Mapping[str, Any]) -> None:
