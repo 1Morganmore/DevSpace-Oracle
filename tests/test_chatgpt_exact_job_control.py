@@ -628,6 +628,93 @@ def test_known_url_is_reopened_once_when_recorded_target_is_absent(tmp_path: Pat
     assert not any(command[1:3] == ["web-ai", "sessions"] for command in commands)
 
 
+def test_history_utility_recovers_after_host_reboot_and_reuses_startup_blank(tmp_path: Path) -> None:
+    module = load_bridge("exact_job_history_runtime_restart_test")
+    commands: list[list[str]] = []
+    restarted = {"value": False}
+
+    def runner(command, env, timeout):
+        commands.append(command)
+        if command[1:] == ["tabs", "--json"]:
+            payload = (
+                [{"targetId": "T-UTILITY", "url": "about:blank", "lastActiveAt": None}]
+                if restarted["value"]
+                else []
+            )
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+        if command[1] == "new-tab":
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr="browserType.connectOverCDP: connect ECONNREFUSED 127.0.0.1:9222",
+            )
+        if command[1] == "start":
+            restarted["value"] = True
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"ok": True}), stderr="")
+        if command[1] in {"tab-switch", "navigate"}:
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"ok": True}), stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    runtime = module.Bridge(
+        state_root=tmp_path / "state",
+        runner=runner,
+        headed_runtime_preflight=False,
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    utility = runtime._open_recovery_utility_target(
+        run_dir=run_dir,
+        executable="agbrowse",
+        manifest={},
+        known_preexisting_target_ids=set(),
+    )
+
+    assert utility["target_id"] == "T-UTILITY"
+    assert utility["created_targets"] == ["T-UTILITY"]
+    assert sum(command[1] == "new-tab" for command in commands) == 1
+    assert sum(command[1] == "start" for command in commands) == 1
+    assert commands[-2][1:] == ["tab-switch", "T-UTILITY", "--json"]
+    assert commands[-1][1:3] == ["navigate", "https://chatgpt.com/"]
+
+
+def test_history_utility_does_not_restart_for_non_connection_failure(tmp_path: Path) -> None:
+    module = load_bridge("exact_job_history_nonconnection_failure_test")
+    commands: list[list[str]] = []
+
+    def runner(command, env, timeout):
+        commands.append(command)
+        if command[1:] == ["tabs", "--json"]:
+            return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
+        if command[1] == "new-tab":
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="permission denied")
+        raise AssertionError(f"unexpected command: {command}")
+
+    runtime = module.Bridge(
+        state_root=tmp_path / "state",
+        runner=runner,
+        headed_runtime_preflight=False,
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    try:
+        runtime._open_recovery_utility_target(
+            run_dir=run_dir,
+            executable="agbrowse",
+            manifest={},
+            known_preexisting_target_ids=set(),
+        )
+    except module.BridgeError as exc:
+        assert exc.code == "RECOVERY_UTILITY_TARGET_FAILED"
+        assert exc.evidence.get("evidence")
+    else:
+        raise AssertionError("expected recovery utility failure")
+
+    assert not any(command[1] == "start" for command in commands)
+
+
 def test_recorded_target_canonical_url_binds_before_doctor_or_history(tmp_path: Path) -> None:
     module = load_bridge("exact_job_visible_target_bind_test")
     commands: list[list[str]] = []

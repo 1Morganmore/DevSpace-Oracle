@@ -5217,21 +5217,12 @@ class Bridge:
     ) -> dict[str, Any]:
         env = bridge_env(manifest)
         initial_tabs: list[dict[str, Any]] = []
-        browser_started = False
         evidence: list[dict[str, Any]] = []
-        try:
-            initial_tabs, listed = self._recovery_tabs(
-                run_dir=run_dir,
-                name="history-tabs-before",
-                executable=executable,
-                env=env,
-            )
-            evidence.append(listed)
-        except BridgeError as first_error:
-            evidence.append({"initial_tabs_error": first_error.envelope()})
+
+        def start_headed_runtime(name: str) -> None:
             started, start_evidence = self._run_recovery_command(
                 run_dir=run_dir,
-                name="history-browser-start",
+                name=name,
                 command=[executable, "start", "--headed", "--json"],
                 env=env,
                 timeout=90,
@@ -5243,7 +5234,31 @@ class Bridge:
                     "headed agbrowse browser could not be started for read-only adjudication",
                     {"evidence": evidence},
                 )
-            browser_started = True
+
+        def runtime_connection_unavailable(completed: subprocess.CompletedProcess[str]) -> bool:
+            output = f"{completed.stdout or ''}\n{completed.stderr or ''}".lower()
+            return any(
+                marker in output
+                for marker in (
+                    "econnrefused",
+                    "connectovercdp",
+                    "browser is not running",
+                    "browser not running",
+                    "failed to connect to browser",
+                )
+            )
+
+        try:
+            initial_tabs, listed = self._recovery_tabs(
+                run_dir=run_dir,
+                name="history-tabs-before",
+                executable=executable,
+                env=env,
+            )
+            evidence.append(listed)
+        except BridgeError as first_error:
+            evidence.append({"initial_tabs_error": first_error.envelope()})
+            start_headed_runtime("history-browser-start")
 
         current_tabs, listed = self._recovery_tabs(
             run_dir=run_dir,
@@ -5286,11 +5301,62 @@ class Bridge:
             )
             evidence.append(open_evidence)
             if opened.returncode != 0:
-                raise BridgeError("RECOVERY_UTILITY_TARGET_FAILED", "agbrowse could not open a recovery utility target")
-            opened_payload = _json_output(opened.stdout)
+                if not runtime_connection_unavailable(opened):
+                    raise BridgeError(
+                        "RECOVERY_UTILITY_TARGET_FAILED",
+                        "agbrowse could not open a recovery utility target",
+                        {"evidence": evidence},
+                    )
+
+                # A successful empty `tabs` response does not prove that the CDP
+                # runtime will still be alive at the following `new-tab` boundary.
+                # Restart once only for a proven runtime connection failure, then
+                # prefer the newly-created blank startup target before opening one
+                # additional utility tab.
+                start_headed_runtime("history-browser-restart-after-new-tab")
+                current_tabs, relisted = self._recovery_tabs(
+                    run_dir=run_dir,
+                    name="history-tabs-after-runtime-restart",
+                    executable=executable,
+                    env=env,
+                )
+                evidence.append(relisted)
+                current_by_id = {_tab_id(tab): tab for tab in current_tabs if _tab_id(tab)}
+                created_targets = set(current_by_id) - known_preexisting
+                eligible = sorted(
+                    target_id
+                    for target_id in created_targets
+                    if target_id in current_by_id
+                    and _tab_url(current_by_id[target_id]) in {"", "about:blank"}
+                    and current_by_id[target_id].get("lastActiveAt") is None
+                )
+                utility_id = eligible[0] if eligible else ""
+                if not utility_id:
+                    opened, retry_evidence = self._run_recovery_command(
+                        run_dir=run_dir,
+                        name="history-new-tab-after-runtime-restart",
+                        command=[executable, "new-tab", "https://chatgpt.com/", "--json"],
+                        env=env,
+                        timeout=30,
+                    )
+                    evidence.append(retry_evidence)
+                    if opened.returncode != 0:
+                        raise BridgeError(
+                            "RECOVERY_UTILITY_TARGET_FAILED",
+                            "agbrowse could not open a recovery utility target after one runtime restart",
+                            {"evidence": evidence},
+                        )
+            if utility_id:
+                opened_payload = {"targetId": utility_id}
+            else:
+                opened_payload = _json_output(opened.stdout)
             utility_id = str(opened_payload.get("targetId") or opened_payload.get("target_id") or "")
             if not utility_id:
-                raise BridgeError("RECOVERY_UTILITY_TARGET_FAILED", "new-tab returned no exact target id")
+                raise BridgeError(
+                    "RECOVERY_UTILITY_TARGET_FAILED",
+                    "new-tab returned no exact target id",
+                    {"evidence": evidence},
+                )
             if utility_id in initial_by_id and utility_id in known_preexisting:
                 borrowed_original_url = _tab_url(initial_by_id[utility_id])
                 if borrowed_original_url not in {"", "about:blank"}:
