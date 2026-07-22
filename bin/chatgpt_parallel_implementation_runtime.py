@@ -24,6 +24,7 @@ PARENT_FAMILY = "parallel-implementation"
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 HASH_RE = re.compile(r"^[0-9a-f]{40,64}$")
 TERMINAL_UNIT_STATES = {"INTEGRATED", "SKIPPED", "FAILED_TERMINAL", "RECOVERY_REQUIRED"}
+CAPACITY_RECEIPT_SCHEMA = "codex.chatgpt.parallel-implementation-capacity/v1"
 
 
 class ParallelRuntimeError(RuntimeError):
@@ -259,6 +260,10 @@ def initial_runtime_state(bound_graph: Mapping[str, Any], *, parent_run_id: str,
         "canonical_baseline_identity_sha256": canonical_baseline_identity_sha256,
         "phase": "GRAPH_BOUND",
         "common_authority_status": "HEALTHY",
+        # Queue entries are assigned exactly once and selected by enqueue_seq.
+        # Strict FIFO deliberately gives every entry a bounded overtaking count of 0.
+        "scheduler": {"next_enqueue_seq": 1, "dispatch_round": 0, "capacity_receipt_sha256": None},
+        "queue": {},
         "units": {},
         "components": {},
         "events": [],
@@ -314,6 +319,77 @@ def dispatchable_units(state: Mapping[str, Any]) -> list[dict[str, str]]:
     return result
 
 
+def validate_capacity_receipt(
+    receipt: Mapping[str, Any], *, parent_run_id: str, canonical_baseline_identity_sha256: str
+) -> dict[str, Any]:
+    """Validate an externally observed, objective child-session capacity receipt.
+
+    Capacity is intentionally not a manifest knob: it is a per-resume observation
+    of available independent web sessions.  This avoids a static five-session (or
+    any other) assumption and keeps the receipt bound to this parent/workspace.
+    """
+    required = {"schema", "parent_run_id", "canonical_baseline_identity_sha256", "available_child_sessions", "observed_at", "source"}
+    extra = set(receipt) - (required | {"capacity_receipt_sha256"})
+    missing = required - set(receipt)
+    if extra or missing or receipt.get("schema") != CAPACITY_RECEIPT_SCHEMA:
+        raise ParallelRuntimeError("CAPACITY_RECEIPT_INVALID", "capacity receipt schema is invalid", {"extra": sorted(extra), "missing": sorted(missing)})
+    if _identifier("parent_run_id", receipt.get("parent_run_id")) != parent_run_id:
+        raise ParallelRuntimeError("CAPACITY_RECEIPT_PARENT_MISMATCH", "capacity receipt belongs to another parent")
+    if str(receipt.get("canonical_baseline_identity_sha256") or "") != canonical_baseline_identity_sha256:
+        raise ParallelRuntimeError("CAPACITY_RECEIPT_WORKSPACE_MISMATCH", "capacity receipt belongs to another canonical workspace")
+    available = receipt.get("available_child_sessions")
+    if not isinstance(available, int) or isinstance(available, bool) or available < 0 or available > 64:
+        raise ParallelRuntimeError("CAPACITY_RECEIPT_INVALID", "available_child_sessions must be 0..64")
+    if not isinstance(receipt.get("observed_at"), str) or not receipt["observed_at"] or not isinstance(receipt.get("source"), str) or not receipt["source"]:
+        raise ParallelRuntimeError("CAPACITY_RECEIPT_INVALID", "capacity receipt observation is incomplete")
+    unsigned = {key: receipt[key] for key in sorted(required)}
+    expected = canonical_sha256(unsigned)
+    supplied = receipt.get("capacity_receipt_sha256")
+    if supplied is not None and supplied != expected:
+        raise ParallelRuntimeError("CAPACITY_RECEIPT_HASH_INVALID", "capacity receipt hash does not match")
+    return {**unsigned, "capacity_receipt_sha256": expected}
+
+
+def serial_capacity_receipt(*, parent_run_id: str, canonical_baseline_identity_sha256: str) -> dict[str, Any]:
+    """Safe no-observation fallback: dispatch one unit, never speculative parallelism."""
+    receipt = {
+        "schema": CAPACITY_RECEIPT_SCHEMA,
+        "parent_run_id": _identifier("parent_run_id", parent_run_id),
+        "canonical_baseline_identity_sha256": canonical_baseline_identity_sha256,
+        "available_child_sessions": 1,
+        "observed_at": "serial-fallback",
+        "source": "safe-serial-fallback",
+    }
+    return {**receipt, "capacity_receipt_sha256": canonical_sha256(receipt)}
+
+
+def capacity_dispatchable_units(state: MutableMapping[str, Any], receipt: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Drain only objectively available slots in deterministic FIFO queue order."""
+    normalized = validate_capacity_receipt(
+        receipt,
+        parent_run_id=str(state.get("parent_run_id") or ""),
+        canonical_baseline_identity_sha256=str(state.get("canonical_baseline_identity_sha256") or ""),
+    )
+    scheduler = state.setdefault("scheduler", {"next_enqueue_seq": 1, "dispatch_round": 0, "capacity_receipt_sha256": None})
+    queue = state.setdefault("queue", {})
+    ready = {item["component_id"]: item for item in dispatchable_units(state)}
+    # A component can leave readiness only through an active/terminal transition.
+    for component_id in list(queue):
+        if component_id not in ready:
+            queue.pop(component_id, None)
+    for component_id in sorted(ready):
+        if component_id not in queue:
+            queue[component_id] = {"enqueue_seq": int(scheduler["next_enqueue_seq"]), "overtakes": 0}
+            scheduler["next_enqueue_seq"] = int(scheduler["next_enqueue_seq"]) + 1
+    scheduler["dispatch_round"] = int(scheduler.get("dispatch_round") or 0) + 1
+    scheduler["capacity_receipt_sha256"] = normalized["capacity_receipt_sha256"]
+    active = sum(1 for unit in state.get("units", {}).values() if unit.get("state") == "ACTIVE")
+    slots = max(0, int(normalized["available_child_sessions"]) - active)
+    selected = sorted((component_id for component_id in ready), key=lambda component_id: (int(queue[component_id]["enqueue_seq"]), component_id))[:slots]
+    _refresh_hash(state)
+    return [{**ready[component_id], "queue_enqueue_seq": str(queue[component_id]["enqueue_seq"]), "capacity_receipt_sha256": normalized["capacity_receipt_sha256"]} for component_id in selected]
+
+
 def start_unit(state: MutableMapping[str, Any], *, component_id: str, unit_id: str, attempt_id: str) -> None:
     component = state["components"].get(component_id)
     unit = state["units"].get(unit_id)
@@ -327,6 +403,7 @@ def start_unit(state: MutableMapping[str, Any], *, component_id: str, unit_id: s
     unit["input_base_oid"] = str(component["integration_head_oid"])
     unit["attempt_id"] = attempt_id
     component["active_unit_id"] = unit_id
+    state.get("queue", {}).pop(component_id, None)
     state["events"].append({"kind": "unit-started", "component_id": component_id, "unit_id": unit_id, "attempt_id": attempt_id, "input_base_oid": unit["input_base_oid"]})
     _refresh_hash(state)
 

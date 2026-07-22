@@ -343,14 +343,28 @@ def unit_spec(graph: Mapping[str, Any], unit_id: str) -> dict[str, Any]:
     raise DriverError("UNIT_UNKNOWN", "unit is not present in bound graph", {"unit_id": unit_id})
 
 
-def dispatch_ready(parent_run_dir: Path, manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
+def dispatch_ready(parent_run_dir: Path, manifest: Mapping[str, Any], capacity_receipt: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
     control, files, state, graph = load_control(parent_run_dir)
     staging = files["staging"]
     clone = read_json(files["clone"])
     common = str(clone["staging_common_git_dir"])
+    receipt = capacity_receipt or control.get("capacity_receipt")
+    if not isinstance(receipt, Mapping):
+        receipt = RUNTIME.serial_capacity_receipt(
+            parent_run_id=str(control["parent_run_id"]),
+            canonical_baseline_identity_sha256=str(control["canonical_baseline_identity_sha256"]),
+        )
+    receipt = RUNTIME.validate_capacity_receipt(
+        receipt,
+        parent_run_id=str(control["parent_run_id"]),
+        canonical_baseline_identity_sha256=str(control["canonical_baseline_identity_sha256"]),
+    )
     dispatched: list[dict[str, Any]] = []
     existing_roots = [str(item.get("unit_workspace_root") or "") for item in control.get("dispatches") or [] if item.get("unit_workspace_root")]
-    for item in RUNTIME.dispatchable_units(state):
+    # This mutates only durable scheduler state.  Each selected unit gets its
+    # own child manifest/worktree, so separate provider sessions can genuinely
+    # run concurrently when the current receipt exposes more than one slot.
+    for item in RUNTIME.capacity_dispatchable_units(state, receipt):
         component_id = item["component_id"]
         unit_id = item["unit_id"]
         attempt_id = f"a-{len(control.get('dispatches') or []) + len(dispatched) + 1:04d}"
@@ -384,6 +398,7 @@ def dispatch_ready(parent_run_dir: Path, manifest: Mapping[str, Any]) -> list[di
             "claimed_paths": spec["claimed_paths"],
             "test_ids": spec["test_ids"],
             "topology_receipt_sha256": materialized["topology_receipt_sha256"],
+            "capacity_receipt_sha256": item["capacity_receipt_sha256"],
             "instructions": str(spec.get("mission") or "Implement the assigned unit without changing unclaimed paths."),
         }
         mission_dir = files["missions"] / unit_id / attempt_id
@@ -426,6 +441,8 @@ def dispatch_ready(parent_run_dir: Path, manifest: Mapping[str, Any]) -> list[di
             "input_base_oid": item["input_base_oid"],
             "unit_workspace_root": str(unit_root),
             "topology_receipt_sha256": materialized["topology_receipt_sha256"],
+            "capacity_receipt_sha256": item["capacity_receipt_sha256"],
+            "queue_enqueue_seq": item["queue_enqueue_seq"],
             "mission_path": str(mission_path),
             "child_manifest_path": str(child_manifest_path),
             "state": "AWAITING_PROVIDER_RESULT",
@@ -433,6 +450,7 @@ def dispatch_ready(parent_run_dir: Path, manifest: Mapping[str, Any]) -> list[di
         dispatched.append(dispatch)
         existing_roots.append(str(unit_root))
     control.setdefault("dispatches", []).extend(dispatched)
+    control["capacity_receipt"] = receipt
     control["staging_common_metadata"] = GITISO.common_metadata_identity(staging)
     write_json(files["control"], control)
     write_json(files["runtime_state"], state)
@@ -632,7 +650,18 @@ def status(parent_run_dir: Path) -> dict[str, Any]:
         "apply_ready": RUNTIME.apply_ready(state),
         "units": state.get("units"),
         "components": state.get("components"),
+        "queue": state.get("queue"),
+        "capacity_receipt_sha256": (state.get("scheduler") or {}).get("capacity_receipt_sha256"),
     }
+
+
+def resume(parent_run_dir: Path, capacity_receipt_path: Path) -> dict[str, Any]:
+    """Record a fresh objective receipt and drain only its available slots."""
+    control, _, _, _ = load_control(parent_run_dir)
+    receipt = read_json(capacity_receipt_path)
+    manifest = read_json(Path(control["manifest_path"]))
+    dispatched = dispatch_ready(parent_run_dir, manifest, receipt)
+    return {"status": "RESUMED", "parent_run_id": control["parent_run_id"], "dispatches": dispatched}
 
 
 def main() -> int:
@@ -648,6 +677,9 @@ def main() -> int:
     finalize_parser.add_argument("--parent-run-dir", required=True)
     status_parser = sub.add_parser("status")
     status_parser.add_argument("--parent-run-dir", required=True)
+    resume_parser = sub.add_parser("resume")
+    resume_parser.add_argument("--parent-run-dir", required=True)
+    resume_parser.add_argument("--capacity-receipt", required=True)
     args = parser.parse_args()
     try:
         if args.command == "prepare":
@@ -656,6 +688,8 @@ def main() -> int:
             value = record_unit(Path(args.parent_run_dir).resolve(strict=True), Path(args.result).resolve(strict=True))
         elif args.command == "finalize":
             value = finalize(Path(args.parent_run_dir).resolve(strict=True))
+        elif args.command == "resume":
+            value = resume(Path(args.parent_run_dir).resolve(strict=True), Path(args.capacity_receipt).resolve(strict=True))
         else:
             value = status(Path(args.parent_run_dir).resolve(strict=True))
         print(json.dumps({"ok": True, "result": value}, ensure_ascii=False, sort_keys=True))

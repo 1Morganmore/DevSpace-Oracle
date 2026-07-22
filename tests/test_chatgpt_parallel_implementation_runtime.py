@@ -132,3 +132,39 @@ def test_send_claim_v2_binds_every_authority_hash() -> None:
     assert claim["schema"] == "codex.chatgpt.child-send-claim/v2"
     assert claim["provider_invocation_state"] == "CLAIMED_NOT_INVOKED"
     assert len(claim["send_claim_sha256"]) == 64
+
+
+def test_capacity_receipt_drains_only_available_slots_in_strict_fifo_order() -> None:
+    bound = RUNTIME.bind_graph(graph(), baseline_oid=BASE)
+    state = RUNTIME.initial_runtime_state(bound, parent_run_id="parent", canonical_baseline_identity_sha256="f" * 64)
+    receipt = {
+        "schema": RUNTIME.CAPACITY_RECEIPT_SCHEMA,
+        "parent_run_id": "parent",
+        "canonical_baseline_identity_sha256": "f" * 64,
+        "available_child_sessions": 1,
+        "observed_at": "2026-07-22T00:00:00Z",
+        "source": "objective-session-observer",
+    }
+    first = RUNTIME.capacity_dispatchable_units(state, receipt)
+    assert len(first) == 1
+    assert first[0]["queue_enqueue_seq"] == "1"
+    RUNTIME.start_unit(state, component_id=first[0]["component_id"], unit_id=first[0]["unit_id"], attempt_id="try-a")
+    # One active child consumes the one observed slot; an independent component waits.
+    assert RUNTIME.capacity_dispatchable_units(state, receipt) == []
+    RUNTIME.complete_unit(state, unit_id=first[0]["unit_id"], commit_oid="2" * 40)
+    drained = RUNTIME.capacity_dispatchable_units(state, receipt)
+    # The previously queued independent component wins over the newly-ready
+    # successor of the completed component: every entry has zero overtakes.
+    assert [item["unit_id"] for item in drained] == ["u-b" if first[0]["unit_id"] == "u-a" else "u-a"]
+    assert state["queue"][drained[0]["component_id"]]["overtakes"] == 0
+
+
+def test_capacity_receipt_is_parent_and_workspace_bound_and_serial_fallback_is_one() -> None:
+    bound = RUNTIME.bind_graph(graph(), baseline_oid=BASE)
+    state = RUNTIME.initial_runtime_state(bound, parent_run_id="parent", canonical_baseline_identity_sha256="9" * 64)
+    fallback = RUNTIME.serial_capacity_receipt(parent_run_id="parent", canonical_baseline_identity_sha256="9" * 64)
+    assert fallback["available_child_sessions"] == 1
+    bad = {**fallback, "parent_run_id": "other"}
+    with pytest.raises(RUNTIME.ParallelRuntimeError) as exc:
+        RUNTIME.capacity_dispatchable_units(state, bad)
+    assert exc.value.code == "CAPACITY_RECEIPT_PARENT_MISMATCH"
