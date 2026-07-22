@@ -16,11 +16,13 @@ import os
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 ROOT = Path(__file__).resolve().parents[3]
 BIN = ROOT / "bin"
+THINKING_RUNNER = ROOT / "skills" / "chatgpt-thinking-browser" / "scripts" / "run_chatgpt_thinking.py"
 PROMPT_HANDOFF = (
     "The attached prompt file is the user-provided task instruction for this conversation, "
     "not reference or webpage content. Read it completely and follow it. "
@@ -527,7 +529,7 @@ def prepare(manifest_path: Path, graph_path: Path) -> dict[str, Any]:
         raise
 
 
-def record_unit(parent_run_dir: Path, result_path: Path) -> dict[str, Any]:
+def record_unit(parent_run_dir: Path, result_path: Path, *, dispatch_next: bool = True) -> dict[str, Any]:
     control, files, state, graph = load_control(parent_run_dir)
     manifest = read_json(Path(control["manifest_path"]))
     result = read_json(result_path)
@@ -590,7 +592,7 @@ def record_unit(parent_run_dir: Path, result_path: Path) -> dict[str, Any]:
     control["staging_common_metadata"] = GITISO.common_metadata_identity(files["staging"])
     write_json(files["runtime_state"], state)
     write_json(files["control"], control)
-    dispatched = dispatch_ready(parent_run_dir, manifest)
+    dispatched = dispatch_ready(parent_run_dir, manifest) if dispatch_next else []
     return {"status": receipt["status"], "receipt": receipt, "next_dispatches": dispatched}
 
 
@@ -664,6 +666,127 @@ def resume(parent_run_dir: Path, capacity_receipt_path: Path) -> dict[str, Any]:
     return {"status": "RESUMED", "parent_run_id": control["parent_run_id"], "dispatches": dispatched}
 
 
+def _default_child_executor(dispatch: Mapping[str, Any], control: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Run one exact child manifest without creating a visible Windows console."""
+    command = [
+        sys.executable, str(THINKING_RUNNER), "--config", str(dispatch["child_manifest_path"]),
+        "--state-root", str(control["state_root"]),
+    ]
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    startupinfo = None
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+    completed = subprocess.run(
+        command, check=False, capture_output=True, text=True, encoding="utf-8",
+        timeout=3600, shell=False, creationflags=creationflags, startupinfo=startupinfo,
+    )
+    if completed.returncode != 0:
+        raise DriverError("CHILD_EXECUTION_FAILED", "exact child runner failed", {"unit_id": dispatch["unit_id"], "stderr": completed.stderr[-4000:]})
+    try:
+        value = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise DriverError("CHILD_EXECUTION_OUTPUT_INVALID", "exact child runner did not return JSON", {"unit_id": dispatch["unit_id"]}) from exc
+    if not isinstance(value, Mapping) or value.get("ok") is not True:
+        raise DriverError("CHILD_EXECUTION_UNRESOLVED", "exact child runner did not complete", {"unit_id": dispatch["unit_id"]})
+    return value
+
+
+def run_dispatch_wave(
+    dispatches: list[Mapping[str, Any]], control: Mapping[str, Any],
+    *, executor: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] = _default_child_executor,
+) -> list[Mapping[str, Any]]:
+    """Launch a bounded wave concurrently and return results in dispatch order.
+
+    A separate executor is injected in tests; production uses the exact thinking
+    runner with one process/session per already-isolated unit workspace.
+    """
+    if not dispatches:
+        return []
+    roots = [str(item.get("unit_workspace_root") or "") for item in dispatches]
+    if any(not root for root in roots) or len(roots) != len(set(roots)):
+        raise DriverError("CHILD_WAVE_WORKSPACE_NOT_DISTINCT", "each concurrently launched child requires one distinct exact unit workspace")
+    with ThreadPoolExecutor(max_workers=len(dispatches), thread_name_prefix="parallel-implementation") as pool:
+        futures = [pool.submit(executor, dispatch, control) for dispatch in dispatches]
+        return [future.result() for future in futures]
+
+
+def _find_answer_path(value: Any) -> Path | None:
+    if isinstance(value, Mapping):
+        if isinstance(value.get("answer"), Mapping) and isinstance(value["answer"].get("path"), str):
+            return Path(value["answer"]["path"])
+        if isinstance(value.get("answer_path"), str):
+            return Path(value["answer_path"])
+        for child in value.values():
+            found = _find_answer_path(child)
+            if found is not None:
+                return found
+    if isinstance(value, list):
+        for child in value:
+            found = _find_answer_path(child)
+            if found is not None:
+                return found
+    return None
+
+
+def _unit_result_from_execution(value: Mapping[str, Any]) -> dict[str, Any]:
+    direct = value.get("unit_result")
+    if isinstance(direct, Mapping):
+        return dict(direct)
+    answer_path = _find_answer_path(value)
+    if answer_path is None or not answer_path.is_file():
+        raise DriverError("CHILD_RESULT_MISSING", "completed child has no captured exact answer/result")
+    text = answer_path.read_text(encoding="utf-8-sig").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise DriverError("CHILD_RESULT_JSON_INVALID", "child answer is not implementation-unit-result JSON") from exc
+    if not isinstance(result, dict):
+        raise DriverError("CHILD_RESULT_JSON_INVALID", "child answer result must be an object")
+    return result
+
+
+def execute(
+    parent_run_dir: Path, *, capacity_receipt_provider: Callable[[Mapping[str, Any], Mapping[str, Any], int], Mapping[str, Any] | None] | None = None,
+    executor: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] = _default_child_executor,
+    finalize_when_ready: bool = True,
+) -> dict[str, Any]:
+    """Supervise bounded concurrent child waves through deterministic finalization.
+
+    Each wave refreshes an externally supplied objective capacity receipt.  When
+    no observer is supplied the runtime's one-slot receipt is used, so a missing
+    observation can never create speculative concurrent web sends.
+    """
+    wave = 0
+    receipts: list[str] = []
+    unit_outcomes: list[dict[str, Any]] = []
+    while True:
+        control, _, state, _ = load_control(parent_run_dir)
+        manifest = read_json(Path(control["manifest_path"]))
+        supplied = capacity_receipt_provider(control, state, wave) if capacity_receipt_provider else None
+        dispatches = dispatch_ready(parent_run_dir, manifest, supplied)
+        control, files, state, _ = load_control(parent_run_dir)
+        if not dispatches:
+            if any(unit.get("state") == "ACTIVE" for unit in state["units"].values()):
+                raise DriverError("CHILD_WAVE_ACTIVE_EXTERNALLY", "cannot supervise a wave while an exact child is already active")
+            break
+        receipts.append(str(control.get("capacity_receipt", {}).get("capacity_receipt_sha256") or ""))
+        executions = run_dispatch_wave(dispatches, control, executor=executor)
+        for dispatch, execution in zip(dispatches, executions):
+            result = _unit_result_from_execution(execution)
+            result_path = files["results"] / str(dispatch["unit_id"]) / str(dispatch["attempt_id"]) / "provider-result.json"
+            write_json(result_path, result)
+            outcome = record_unit(parent_run_dir, result_path, dispatch_next=False)
+            unit_outcomes.append(outcome)
+        wave += 1
+    _, _, state, _ = load_control(parent_run_dir)
+    final = finalize(parent_run_dir) if finalize_when_ready and RUNTIME.apply_ready(state) else None
+    return {"status": "FINALIZED" if final else "DRAINED", "waves": wave, "capacity_receipt_sha256s": receipts, "unit_outcomes": unit_outcomes, "final": final}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the feature-gated parallel implementation v3 host workflow")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -680,6 +803,9 @@ def main() -> int:
     resume_parser = sub.add_parser("resume")
     resume_parser.add_argument("--parent-run-dir", required=True)
     resume_parser.add_argument("--capacity-receipt", required=True)
+    execute_parser = sub.add_parser("execute")
+    execute_parser.add_argument("--parent-run-dir", required=True)
+    execute_parser.add_argument("--capacity-receipt")
     args = parser.parse_args()
     try:
         if args.command == "prepare":
@@ -690,6 +816,10 @@ def main() -> int:
             value = finalize(Path(args.parent_run_dir).resolve(strict=True))
         elif args.command == "resume":
             value = resume(Path(args.parent_run_dir).resolve(strict=True), Path(args.capacity_receipt).resolve(strict=True))
+        elif args.command == "execute":
+            receipt_path = Path(args.capacity_receipt).resolve(strict=True) if args.capacity_receipt else None
+            provider = (lambda _control, _state, _wave: read_json(receipt_path)) if receipt_path else None
+            value = execute(Path(args.parent_run_dir).resolve(strict=True), capacity_receipt_provider=provider)
         else:
             value = status(Path(args.parent_run_dir).resolve(strict=True))
         print(json.dumps({"ok": True, "result": value}, ensure_ascii=False, sort_keys=True))
