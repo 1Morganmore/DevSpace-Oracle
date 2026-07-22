@@ -1072,7 +1072,29 @@ class ProPlanHandoffDriver:
                 raise WorkflowError("AGBROWSE_CONTRACT_IDENTITY_CONFLICT")
             recorded_selection = state.get("regular_mode_selection")
             if recorded_selection is not None and recorded_selection != self.regular_mode_selection:
-                raise WorkflowError("REGULAR_MODE_SELECTION_IDENTITY_CONFLICT")
+                # A completed or persisted legacy stage keeps its own immutable
+                # stage.manifest receipt.  When the public account capability
+                # contracts from Very High down to High, preserve that old
+                # receipt for recovery but let *new* regular stages use High.
+                # This is a one-way safety migration, never an upgrade and
+                # never a rewrite of a submitted stage identity.
+                recorded_mode = str(recorded_selection.get("selected_mode_variant") or "") if isinstance(recorded_selection, Mapping) else ""
+                current_mode = str(self.regular_mode_selection.get("selected_mode_variant") or "")
+                if recorded_mode == "Very High" and current_mode == "High":
+                    history = state.setdefault("legacy_regular_mode_selections", [])
+                    if not isinstance(history, list):
+                        raise WorkflowError("REGULAR_MODE_SELECTION_IDENTITY_CONFLICT")
+                    if recorded_selection not in history:
+                        history.append(dict(recorded_selection))
+                    state["regular_mode_selection"] = self.regular_mode_selection
+                    state["regular_mode_selection_migration"] = {
+                        "kind": "capability-downgrade-preserve-existing-stage-receipts",
+                        "from": "Very High",
+                        "to": "High",
+                    }
+                    atomic_write_json(self.state_path, state)
+                else:
+                    raise WorkflowError("REGULAR_MODE_SELECTION_IDENTITY_CONFLICT")
             return state
         snapshot = self._source_snapshot()
         snapshot_path = self.handoff_dir / "source-snapshot.json"

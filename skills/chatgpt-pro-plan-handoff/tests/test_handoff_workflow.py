@@ -1045,7 +1045,7 @@ def test_v4_advisory_risk_gate_runs_app_only_web_multi_advisory(tmp_path: Path, 
     assert descriptor["decision"] == "run"
 
 
-def test_non_pro_selection_is_immutable_and_rejects_downgrade(tmp_path: Path, monkeypatch) -> None:
+def test_non_pro_selection_preserves_legacy_stage_receipt_on_capability_downgrade(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", "Very High,High")
     driver = ProPlanHandoffDriver(make_v2_manifest(tmp_path), runtime=ScriptedRuntime())
     state = driver.prepare()
@@ -1054,8 +1054,10 @@ def test_non_pro_selection_is_immutable_and_rejects_downgrade(tmp_path: Path, mo
     assert manifest["regular_mode_selection"]["selection_rule"] == "highest-supported:Very High>High"
 
     monkeypatch.setenv("CODEX_CHATGPT_REGULAR_MODE_CAPABILITIES", "High")
-    with pytest.raises(WorkflowError, match="REGULAR_MODE_SELECTION_IDENTITY_CONFLICT"):
-        ProPlanHandoffDriver(driver.manifest_path, runtime=ScriptedRuntime()).prepare()
+    migrated = ProPlanHandoffDriver(driver.manifest_path, runtime=ScriptedRuntime()).prepare()
+    assert migrated["regular_mode_selection"]["selected_mode_variant"] == "High"
+    assert migrated["legacy_regular_mode_selections"][-1]["selected_mode_variant"] == "Very High"
+    assert migrated["regular_mode_selection_migration"]["kind"] == "capability-downgrade-preserve-existing-stage-receipts"
 
 
 def test_v2_contradiction_evidence_hash_is_verified_before_runtime(tmp_path: Path) -> None:
