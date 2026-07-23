@@ -4857,6 +4857,7 @@ class Bridge:
         *,
         tabs: list[dict[str, Any]] | None = None,
         tabs_evidence: Mapping[str, Any] | None = None,
+        composer_lock_held: bool = False,
     ) -> dict[str, Any]:
         """Finish an exact, uniquely live conversation before waiting on stale session state."""
         state_file, record = self.store.load(run_dir)
@@ -4899,13 +4900,21 @@ class Bridge:
             )
             if record.get("phase") == "BLOCKED_TARGET_AMBIGUOUS":
                 return record
-        return self._recover_exact_bound_url_terminal(
-            run_dir,
-            doctor_evidence={
+        # agbrowse 0.1.18's terminal capture commands (`tab-switch`, status,
+        # snapshot, and text) are active-tab scoped.  This path is commonly
+        # entered concurrently by Web Multi-GPT child polls, so keep the whole
+        # switch-to-capture sequence atomic.  Otherwise one child can switch
+        # the active tab between another child's identity check and text read.
+        capture_kwargs = {
+            "doctor_evidence": {
                 "kind": "unique-exact-url-terminal-preflight",
                 "tabs_evidence": sanitize_evidence(dict(tabs_evidence or {})),
             },
-        )
+        }
+        if composer_lock_held:
+            return self._recover_exact_bound_url_terminal(run_dir, **capture_kwargs)
+        with exclusive_composer_lock(GLOBAL_BROWSER_MUTATION_LOCK):
+            return self._recover_exact_bound_url_terminal(run_dir, **capture_kwargs)
 
     def _restore_known_url_on_recorded_target(
         self,
@@ -7248,6 +7257,7 @@ class Bridge:
         direct = self._try_exact_url_terminal_now(
             run_dir,
             tabs=pre_doctor_tabs if "pre_doctor_tabs" in locals() else None,
+            composer_lock_held=True,
         )
         if direct.get("phase") in {"COMPLETE", "PROVIDER_FAILED_TERMINAL", "BLOCKED_TARGET_AMBIGUOUS"}:
             return direct

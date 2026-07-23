@@ -5,6 +5,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -495,6 +496,39 @@ def test_settle_exact_terminal_captures_before_global_composer_lock(monkeypatch,
     result = runtime.settle_exact_terminal(run_dir)
 
     assert result["phase"] == "COMPLETE"
+
+
+def test_exact_terminal_capture_serializes_active_tab_sequence(monkeypatch, tmp_path: Path) -> None:
+    module = load_bridge("exact_job_terminal_capture_lock_test")
+    runtime = module.Bridge(
+        state_root=tmp_path / "state",
+        runner=lambda command, env, timeout: (_ for _ in ()).throw(AssertionError(command)),
+        headed_runtime_preflight=False,
+    )
+    run_dir = make_run(tmp_path, runtime, phase="RESPONSE_IN_PROGRESS")
+    runtime._recovery_tabs = lambda **kwargs: (
+        [{"targetId": "T-1", "url": "https://chatgpt.com/c/exact-job"}],
+        {"kind": "tabs"},
+    )
+    lock_events: list[str] = []
+
+    @contextmanager
+    def tracked_lock(*args, **kwargs):
+        lock_events.append("entered")
+        yield
+        lock_events.append("exited")
+
+    def capture(path, **kwargs):
+        assert lock_events == ["entered"]
+        return {"phase": "COMPLETE", "conversation_url": "https://chatgpt.com/c/exact-job"}
+
+    monkeypatch.setattr(module, "exclusive_composer_lock", tracked_lock)
+    runtime._recover_exact_bound_url_terminal = capture
+
+    result = runtime._try_exact_url_terminal_now(run_dir)
+
+    assert result["phase"] == "COMPLETE"
+    assert lock_events == ["entered", "exited"]
 
 
 def test_bound_recovery_never_runs_navigating_doctor(tmp_path: Path) -> None:
