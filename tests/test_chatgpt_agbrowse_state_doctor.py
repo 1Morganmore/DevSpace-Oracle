@@ -977,6 +977,81 @@ def test_child_send_claim_is_durable_and_exactly_once(tmp_path: Path) -> None:
     assert duplicate.value.code == "SEND_ALREADY_ATTEMPTED"
 
 
+def test_parent_wide_stop_accepts_transition_child_receipt_without_legacy_challenge_nonce(
+    tmp_path: Path,
+) -> None:
+    state = load_state("chatgpt_agbrowse_state_parent_wide_stop_transition_receipt_test")
+    store = state.RunStore(tmp_path / "state")
+    project = tmp_path / "project"
+    project.mkdir()
+    parent_manifest = make_web_multi_parent_manifest(tmp_path / "parent.json", project)
+    parent = store.create_parent_workflow(
+        project_root=project,
+        manifest_path=parent_manifest,
+        workflow_id="wf-parent",
+        agbrowse_contract={"version": "0.1.18"},
+        owner_pid=2_147_483_647,
+    )
+    child_manifest = make_web_multi_child_manifest(
+        tmp_path / "child.json", project, "wf-parent", "solver-0"
+    )
+    child = store.create_child_run(
+        parent_run_dir=parent["run_dir"],
+        manifest_path=child_manifest,
+        agbrowse_contract={"version": "0.1.18"},
+        role="Solver",
+        lane=0,
+        iteration=0,
+        stage_id="solver-0",
+        owner_pid=2_147_483_647,
+    )
+    store.transition(child["run_dir"], "PREFLIGHTED")
+    store.transition(child["run_dir"], "LEASED", target_id="target-parent-wide-stop")
+    child_state = Path(child["run_dir"]) / "run.json"
+    partial_receipt = state.read_json(child_state)
+    partial_receipt.update(
+        {
+            "phase": "SUBMISSION_UNCERTAIN",
+            "session_id": "session-parent-wide-stop",
+            "conversation_url": "https://chatgpt.com/c/parent-wide-stop",
+        }
+    )
+    state.write_json_atomic(child_state, partial_receipt)
+
+    stopped = store.begin_user_stop(
+        child["run_dir"],
+        authorization={
+            "schema": "codex.chatgpt.user-stop-authorization/v1",
+            "explicit_user_request": True,
+            "mutation_may_have_occurred": True,
+            "duplicate_risk_acknowledged": True,
+            "run_id": child["run_id"],
+            "project_root": str(project.resolve()),
+            "session_id": "session-parent-wide-stop",
+            "target_id": "target-parent-wide-stop",
+            "conversation_url": "https://chatgpt.com/c/parent-wide-stop",
+            "reason": "confirm explicit user stop",
+        },
+    )
+    assert "challenge_nonce" not in stopped["user_stop"]
+
+    scope = store.establish_parent_wide_user_stop_scope(
+        parent["run_dir"],
+        manager_authorization={
+            "explicit_user_request": True,
+            "scope_kind": "exact-parent-and-listed-children",
+            "parent_run_id": parent["run_id"],
+            "target_child_run_id": child["run_id"],
+            "reason": "confirm explicit user stop",
+        },
+        target_child_run_id=child["run_id"],
+    )
+
+    persisted_scope = state.read_json(Path(scope["path"]))
+    assert persisted_scope["target_child_authorization"]["run_id"] == child["run_id"]
+    assert persisted_scope["target_child_authorization"]["challenge_nonce"] is None
+
+
 def test_mutation_disallowed_child_reuses_same_claim_under_exact_retry_authority(tmp_path: Path) -> None:
     state = load_state("chatgpt_agbrowse_state_child_retry_authority_test")
     store = state.RunStore(tmp_path / "state")

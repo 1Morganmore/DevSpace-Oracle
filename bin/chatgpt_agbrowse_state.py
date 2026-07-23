@@ -2619,7 +2619,6 @@ class RunStore:
                 or not auth_path.is_file()
                 or auth_path.is_symlink()
                 or sha256_file(auth_path) != str(stop.get("authorization_sha256") or "")
-                or not str(stop.get("challenge_nonce") or "")
             ):
                 raise StateError(
                     "PARENT_WIDE_STOP_TARGET_AUTH_INVALID",
