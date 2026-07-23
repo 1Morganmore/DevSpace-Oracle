@@ -357,7 +357,25 @@ def _json_output(stdout: str) -> dict[str, Any]:
     try:
         value = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise BridgeError("AGBROWSE_JSON_INVALID", "agbrowse returned non-JSON stdout", {"preview": text[:500]}) from exc
+        # Chrome lifecycle diagnostics can precede the actual JSON envelope on
+        # stderr.  Accept only one complete JSON object that consumes the
+        # final non-whitespace suffix; never treat a partial embedded fragment
+        # as a provider response.
+        decoder = json.JSONDecoder()
+        value = None
+        for offset, character in enumerate(text):
+            if character != "{":
+                continue
+            try:
+                candidate, end = decoder.raw_decode(text[offset:])
+            except json.JSONDecodeError:
+                continue
+            if text[offset + end:].strip():
+                continue
+            value = candidate
+            break
+        if value is None:
+            raise BridgeError("AGBROWSE_JSON_INVALID", "agbrowse returned non-JSON stdout", {"preview": text[:500]}) from exc
     if not isinstance(value, dict):
         raise BridgeError("AGBROWSE_JSON_INVALID", "agbrowse JSON must be an object")
     return value

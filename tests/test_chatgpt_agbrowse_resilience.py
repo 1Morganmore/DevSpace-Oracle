@@ -799,6 +799,22 @@ def test_stderr_mutation_disallowed_json_is_send_rejected(tmp_path: Path) -> Non
     assert result["terminal_block_code"] is None
 
 
+def test_completed_json_output_accepts_leading_browser_diagnostics() -> None:
+    bridge = load("chatgpt_agbrowse_bridge_prefixed_json_test", "chatgpt_agbrowse_bridge.py")
+    completed = subprocess.CompletedProcess(
+        ["agbrowse", "web-ai", "stop"],
+        1,
+        "",
+        "[browser] launching Chrome\n[browser] user-data-dir: profile\n"
+        '{"ok": false, "status": "error", "error": {"errorCode": "cdp.target-mismatch"}}\n',
+    )
+
+    payload = bridge._completed_json_output(completed)
+
+    assert payload["status"] == "error"
+    assert payload["error"]["errorCode"] == "cdp.target-mismatch"
+
+
 def test_session_store_lock_is_verified_pre_submit_rejection() -> None:
     bridge = load("chatgpt_agbrowse_bridge_session_store_lock_test", "chatgpt_agbrowse_bridge.py")
     envelope = bridge.normalize_envelope(
