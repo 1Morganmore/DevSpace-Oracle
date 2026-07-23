@@ -146,8 +146,42 @@ class LocalWebMultiRuntime:
         spec.loader.exec_module(module)
         self.module = module
 
+    @staticmethod
+    def _resume_parent_from_runtime_state(manifest_path: Path) -> Path | None:
+        """Reuse only the exact persisted Web Multi parent for this manifest.
+
+        A v4 handoff can be interrupted after a safe pre-submit rejection.  The
+        Web Multi runtime records that parent beneath the immutable output
+        identity; passing it back lets its state machine reopen only a proven
+        retryable child instead of creating a second parent workflow.
+        """
+        manifest = load_mapping(manifest_path)
+        workflow_id = manifest.get("workflow_id")
+        output_dir = manifest.get("output_dir")
+        if not isinstance(workflow_id, str) or not workflow_id or not isinstance(output_dir, str) or not output_dir:
+            return None
+        state_path = Path(output_dir) / workflow_id / "runtime-state.json"
+        if not state_path.is_file() or state_path.is_symlink():
+            return None
+        try:
+            state = load_mapping(state_path)
+        except (OSError, WorkflowError):
+            return None
+        if (
+            state.get("schema") != "codex.chatgpt.web-multi-runtime-state/v1"
+            or state.get("workflow_id") != workflow_id
+            or not isinstance(state.get("parent_run_dir"), str)
+            or not state["parent_run_dir"]
+        ):
+            return None
+        return Path(state["parent_run_dir"])
+
     def run(self, manifest_path: Path) -> Mapping[str, Any]:
-        return self.module.WebMultiRuntime(manifest_path).run()
+        resume_parent = self._resume_parent_from_runtime_state(manifest_path)
+        return self.module.run_with_provider_failure_retries(
+            manifest_path,
+            resume_parent=resume_parent,
+        )
 
 
 class LocalParallelImplementationRuntime:
@@ -722,8 +756,6 @@ class ProPlanHandoffDriver:
             ):
                 return False
             archive = state.get("source_archive")
-            if self.comprehensive:
-                return archive is None
             if not isinstance(archive, Mapping):
                 return False
             archive_path = Path(str(archive.get("path") or "")).resolve(strict=True)

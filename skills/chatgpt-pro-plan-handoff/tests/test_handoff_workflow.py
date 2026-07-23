@@ -17,6 +17,7 @@ from handoff_contract import ORCHESTRATOR_RESULT_SCHEMA, PLAN_RESULT_SCHEMA, REV
 from run_pro_plan_handoff import (
     AgbrowseRuntime,
     DEFAULT_CONTRACT_PATH,
+    LocalWebMultiRuntime,
     ProPlanHandoffDriver,
     STATE_SCHEMA,
     WorkflowError,
@@ -558,6 +559,44 @@ class FakeParallelImplementationRuntime:
             "prepared": {"status": "PREPARED", "parent_run_dir": "C:/parallel-parent"},
             "execution": {"status": "FINALIZED", "final": {"status": "IMPLEMENTED"}},
         }
+
+
+def test_local_web_multi_runtime_resumes_only_exact_persisted_parent(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "web-multi.json"
+    output_dir = tmp_path / "output"
+    workflow_id = "advisory-1"
+    manifest_path.write_text(
+        json.dumps({"workflow_id": workflow_id, "output_dir": str(output_dir)}),
+        encoding="utf-8",
+    )
+    parent_dir = tmp_path / "parent"
+    parent_dir.mkdir()
+    state_path = output_dir / workflow_id / "runtime-state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema": "codex.chatgpt.web-multi-runtime-state/v1",
+                "workflow_id": workflow_id,
+                "parent_run_dir": str(parent_dir),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class Module:
+        calls: list[tuple[Path, Path | None]] = []
+
+        @classmethod
+        def run_with_provider_failure_retries(cls, path: Path, *, resume_parent: Path | None):
+            cls.calls.append((path, resume_parent))
+            return {"status": "ok"}
+
+    runtime = object.__new__(LocalWebMultiRuntime)
+    runtime.module = Module
+
+    assert runtime.run(manifest_path) == {"status": "ok"}
+    assert Module.calls == [(manifest_path, parent_dir)]
 
 
 def test_manifest_rejects_backend_and_runtime_override(tmp_path):
