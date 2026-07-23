@@ -4553,6 +4553,10 @@ class Bridge:
             {**cleanup, "session_artifact": session_artifact},
         )
 
+    def retire_absent_pre_submit_retry_replacement(self, run_dir: str) -> dict[str, Any]:
+        """State-only retirement after an exact activation-failure absence proof."""
+        return self.store.retire_absent_child_pre_submit_retry_replacement(run_dir)
+
     def _parent_owned_target_ids(self, record: Mapping[str, Any]) -> set[str]:
         parent_run_id = str(record.get("parent_run_id") or "")
         if not parent_run_id:

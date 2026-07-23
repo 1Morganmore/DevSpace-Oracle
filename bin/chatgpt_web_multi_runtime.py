@@ -2434,6 +2434,18 @@ class WebMultiRuntime:
         unresolved: list[dict[str, Any]] = []
         for _, child in self.store._parent_children(paths.runs_dir, str(parent["run_id"])):
             phase = str(child.get("phase") or "")
+            if phase == "PREFLIGHT_BLOCKED":
+                authority = child.get("pre_submit_retry_authority")
+                events = child.get("recovery_events") if isinstance(child.get("recovery_events"), list) else []
+                latest = events[-1] if events and isinstance(events[-1], dict) else {}
+                if (
+                    str(parent.get("phase") or "") == "PARENT_ACTIVE" and bool(parent.get("recovery_required"))
+                    and isinstance(authority, dict) and authority.get("eligible") is True and authority.get("consumed_at") is None
+                    and str(authority.get("replacement_target_id") or "") == str(child.get("current_target_id") or "")
+                    and str(latest.get("kind") or "") == "app-composer-target-activation-failed"
+                ):
+                    self.bridge_factory().retire_absent_pre_submit_retry_replacement(str(paths.runs_dir / str(child["run_id"])))
+                continue
             if phase in {"CREATED", "PREFLIGHTED", "LEASED"}:
                 child_dir = paths.runs_dir / str(child["run_id"])
                 authority = child.get("pre_submit_retry_authority")

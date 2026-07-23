@@ -1196,7 +1196,15 @@ def test_child_retry_replacement_binds_immutable_deep_research_evidence(tmp_path
         with pytest.raises(state.StateError) as unsafe:
             store.clear_parent_runtime_recovery(parent["run_dir"])
         assert unsafe.value.code == "PARENT_RUNTIME_RECOVERY_PENDING"
-    state.write_json_atomic(state_file, pristine)
+    activation_failed = json.loads(json.dumps(pristine))
+    activation_failed["recovery_events"].append({
+        "kind": "app-composer-target-activation-failed", "cleanup": stale_cleanup,
+    })
+    state.write_json_atomic(state_file, activation_failed)
+    retired = store.retire_absent_child_pre_submit_retry_replacement(child["run_dir"])
+    assert retired["pre_submit_retry_authority"].get("replacement_target_id") is None
+    assert retired["pre_submit_retry_authority"]["retired_replacement_target_id"] == "TARGET-RESEARCH"
+    assert retired["recovery_events"][-1]["kind"] == "stale-pre-submit-retry-replacement-retired"
     cleared = store.clear_parent_runtime_recovery(parent["run_dir"])
     assert cleared["recovery_required"] is False
 

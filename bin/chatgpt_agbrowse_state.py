@@ -3489,6 +3489,80 @@ class RunStore:
             },
         )
 
+    def retire_absent_child_pre_submit_retry_replacement(
+        self, run_dir: str | os.PathLike[str]
+    ) -> dict[str, Any]:
+        """Retire only a replacement target proven absent after activation.
+
+        The immutable pre-submit claim remains usable once.  This does not
+        create a tab or submit anything; it removes the already-absent
+        replacement binding so the normal composer path may bind one fresh
+        replacement under the same authority.
+        """
+        state_file, record = self.load(run_dir)
+        if str(record.get("record_kind") or "") != "child" or str(record.get("phase") or "") != "PREFLIGHT_BLOCKED":
+            raise StateError("STALE_REPLACEMENT_PHASE_INVALID", "absent retry replacement requires PREFLIGHT_BLOCKED child")
+        _, lock = self._verify_lock(state_file, record)
+        parent_file = state_file.parent.parent / str(record.get("parent_run_id") or "") / "run.json"
+        parent = read_json(parent_file)
+        if not (
+            str(parent.get("phase") or "") == "PARENT_ACTIVE" and parent.get("recovery_required") is True
+            and str(lock.get("phase") or "") == "PARENT_ACTIVE" and lock.get("recovery_required") is True
+        ):
+            raise StateError("STALE_REPLACEMENT_PARENT_NOT_RECOVERING", "parent is not in exact active recovery")
+        candidate = self.pre_submit_retry_candidate(run_dir)
+        authority = record.get("pre_submit_retry_authority")
+        target_id = str(record.get("current_target_id") or "")
+        events = record.get("recovery_events") if isinstance(record.get("recovery_events"), list) else []
+        latest = events[-1] if events and isinstance(events[-1], dict) else {}
+        prior_reconciled = any(
+            isinstance(event, dict)
+            and str(event.get("kind") or "") == "stale-pre-submit-retry-target-reconciled"
+            and str(event.get("target_id") or "") == target_id
+            and str(event.get("send_claim_sha256") or "") == str(candidate.get("claim_sha256") or "")
+            for event in events[:-1]
+        )
+        cleanup = latest.get("cleanup") if isinstance(latest.get("cleanup"), dict) else {}
+        evidence = cleanup.get("evidence") if isinstance(cleanup.get("evidence"), dict) else {}
+        lifecycle_path = Path(str(evidence.get("path") or ""))
+        try:
+            lifecycle_path = lifecycle_path.expanduser().resolve(strict=True)
+            lifecycle_path.relative_to(state_file.parent)
+            absence_valid = lifecycle_path.is_file() and not lifecycle_path.is_symlink() and sha256_file(lifecycle_path) == str(evidence.get("sha256") or "")
+        except (OSError, RuntimeError, ValueError):
+            absence_valid = False
+        if not (
+            isinstance(authority, dict) and authority.get("eligible") is True and authority.get("consumed_at") is None
+            and str(authority.get("replacement_target_id") or "") == target_id
+            and str(authority.get("claim_sha256") or "") == str(candidate.get("claim_sha256") or "")
+            and str(latest.get("kind") or "") == "app-composer-target-activation-failed"
+            and cleanup.get("ok") is True
+            and str(cleanup.get("state") or "") in {"closed-and-absent", "already-absent"}
+            and str(cleanup.get("target_id") or "") == target_id
+            and absence_valid and prior_reconciled
+        ):
+            raise StateError("STALE_REPLACEMENT_ABSENCE_UNPROVEN", "replacement retirement requires exact absent activation failure")
+        authority = dict(authority)
+        authority.update({
+            "retired_replacement_target_id": target_id,
+            "retired_replacement_evidence_path": authority.get("replacement_evidence_path"),
+            "retired_replacement_evidence_sha256": authority.get("replacement_evidence_sha256"),
+            "retired_at": utc_now(),
+            "retirement_cleanup_lifecycle_sha256": sha256_file(lifecycle_path),
+        })
+        for key in ("replacement_target_id", "replacement_bound_at", "replacement_evidence_path", "replacement_evidence_sha256"):
+            authority.pop(key, None)
+        record["pre_submit_retry_authority"] = authority
+        write_json_atomic(state_file, record)
+        return self.transition(
+            run_dir, "PREFLIGHT_BLOCKED", block_code="STALE_PRE_SUBMIT_RETRY_REPLACEMENT_RETIRED",
+            recovery_event={
+                "kind": "stale-pre-submit-retry-replacement-retired", "target_id": target_id,
+                "send_claim_sha256": str(candidate.get("claim_sha256") or ""),
+                "cleanup_lifecycle_sha256": sha256_file(lifecycle_path),
+            },
+        )
+
     def confirm_child_retry_replacement(
         self,
         run_dir: str | os.PathLike[str],
@@ -4691,6 +4765,7 @@ class RunStore:
                 evidence = cleanup.get("evidence") if isinstance(cleanup.get("evidence"), dict) else {}
                 events = child.get("recovery_events") if isinstance(child.get("recovery_events"), list) else []
                 latest = events[-1] if events and isinstance(events[-1], dict) else {}
+                retired = str(latest.get("kind") or "") == "stale-pre-submit-retry-replacement-retired"
                 lifecycle_path = Path(str(evidence.get("path") or ""))
                 try:
                     lifecycle_path = lifecycle_path.expanduser().resolve(strict=True)
@@ -4703,15 +4778,36 @@ class RunStore:
                     )
                 except (OSError, RuntimeError, ValueError):
                     lifecycle_valid = False
-                replacement_path = Path(str(authority.get("replacement_evidence_path") or "")) if isinstance(authority, dict) else Path()
+                replacement_path = Path(str(
+                    authority.get("retired_replacement_evidence_path") if retired else authority.get("replacement_evidence_path")
+                    or ""
+                )) if isinstance(authority, dict) else Path()
                 try:
                     replacement_valid = (
                         replacement_path.is_file()
                         and not replacement_path.is_symlink()
-                        and sha256_file(replacement_path) == str(authority.get("replacement_evidence_sha256") or "")
+                        and sha256_file(replacement_path) == str(
+                            authority.get("retired_replacement_evidence_sha256") if retired else authority.get("replacement_evidence_sha256")
+                            or ""
+                        )
                     )
                 except OSError:
                     replacement_valid = False
+                prior_reconciled = any(
+                    isinstance(event, dict)
+                    and str(event.get("kind") or "") == "stale-pre-submit-retry-target-reconciled"
+                    and str(event.get("target_id") or "") == target_id
+                    and str(event.get("send_claim_sha256") or "") == str(candidate.get("claim_sha256") or "")
+                    for event in events[:-1]
+                )
+                prior_activation_failure = any(
+                    isinstance(event, dict)
+                    and str(event.get("kind") or "") == "app-composer-target-activation-failed"
+                    and isinstance(event.get("cleanup"), dict)
+                    and str(event["cleanup"].get("target_id") or "") == target_id
+                    and event["cleanup"].get("ok") is True
+                    for event in events[:-1]
+                )
                 return bool(
                     str(child.get("phase") or "") == "PREFLIGHT_BLOCKED"
                     and (child_state.parent / "send.claim").is_file()
@@ -4729,7 +4825,7 @@ class RunStore:
                     and str(authority.get("run_id") or "") == str(child.get("run_id") or "")
                     and str(authority.get("parent_run_id") or "") == str(record.get("run_id") or "")
                     and str(authority.get("claim_sha256") or "") == str(candidate.get("claim_sha256") or "")
-                    and str(authority.get("replacement_target_id") or "") == target_id
+                    and str(authority.get("retired_replacement_target_id") if retired else authority.get("replacement_target_id") or "") == target_id
                     and replacement_valid
                     and cleanup.get("ok") is True
                     and str(cleanup.get("state") or "") in {"closed-and-absent", "already-absent"}
@@ -4738,9 +4834,20 @@ class RunStore:
                     and str(child.get("owned_tab_state") or "") in {"closed-and-absent", "already-absent"}
                     and not bool(child.get("cleanup_pending"))
                     and int(child.get("owned_open_tabs") or 0) == 0
-                    and str(latest.get("kind") or "") == "stale-pre-submit-retry-target-reconciled"
+                    and (
+                        (
+                            not retired
+                            and str(latest.get("kind") or "") == "stale-pre-submit-retry-target-reconciled"
+                            and str(latest.get("cleanup_state") or "") == str(cleanup.get("state") or "")
+                        )
+                        or (
+                            retired
+                            and prior_reconciled
+                            and prior_activation_failure
+                            and str(latest.get("cleanup_lifecycle_sha256") or "") == str(evidence.get("sha256") or "")
+                        )
+                    )
                     and str(latest.get("target_id") or "") == target_id
-                    and str(latest.get("cleanup_state") or "") == str(cleanup.get("state") or "")
                     and str(latest.get("send_claim_sha256") or "") == str(candidate.get("claim_sha256") or "")
                 )
 
