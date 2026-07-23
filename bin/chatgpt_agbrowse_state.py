@@ -3251,7 +3251,7 @@ class RunStore:
             except (OSError, RuntimeError, ValueError):
                 cleanup_valid = retired_evidence_valid = False
             retired_retry = bool(
-                str(record.get("phase") or "") == "LEASED"
+                str(record.get("phase") or "") in {"PREFLIGHT_BLOCKED", "LEASED"}
                 and int(record.get("send_attempt_count") or 0) == 1
                 and not record.get("session_id") and not record.get("conversation_url")
                 and record.get("submission_receipt") is None and record.get("result") is None

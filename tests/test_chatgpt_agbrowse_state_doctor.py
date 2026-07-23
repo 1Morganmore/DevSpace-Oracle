@@ -1228,6 +1228,7 @@ def test_child_retry_replacement_binds_immutable_deep_research_evidence(tmp_path
     backfilled = store.backfill_retired_child_pre_submit_cleanup(child["run_dir"])
     assert backfilled["cleanup_evidence"]["evidence"]["sha256"] == stale_cleanup["evidence"]["sha256"]
     assert store.backfill_retired_child_pre_submit_cleanup(child["run_dir"]) == backfilled
+    assert store.assert_child_send_available(child["run_dir"])["phase"] == "PREFLIGHT_BLOCKED"
     cleared = store.clear_parent_runtime_recovery(parent["run_dir"])
     assert cleared["recovery_required"] is False
     store.transition(child["run_dir"], "PREFLIGHTED")
