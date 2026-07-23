@@ -3627,6 +3627,7 @@ class RunStore:
         cleanup = activation.get("cleanup") if isinstance(activation.get("cleanup"), dict) else {}
         evidence = cleanup.get("evidence") if isinstance(cleanup.get("evidence"), dict) else {}
         current_cleanup = record.get("cleanup_evidence") if isinstance(record.get("cleanup_evidence"), dict) else {}
+        current_cleanup_hash = str((current_cleanup.get("evidence") or {}).get("sha256") or "")
         try:
             path = Path(str(evidence.get("path") or "")).expanduser().resolve(strict=True)
             path.relative_to(state_file.parent)
@@ -3647,9 +3648,10 @@ class RunStore:
             and not record.get("session_id") and not record.get("conversation_url")
             and record.get("submission_receipt") is None and record.get("result") is None
             and str(current_cleanup.get("target_id") or "") == target_id
-            and str((current_cleanup.get("evidence") or {}).get("sha256") or "") != str(evidence.get("sha256") or "")
         ):
             raise StateError("RETIRED_CLEANUP_BACKFILL_UNPROVEN", "legacy retired cleanup evidence is not exact")
+        if current_cleanup_hash == str(evidence.get("sha256") or ""):
+            return record
         return self.record_child_cleanup(run_dir, cleanup)
 
     def confirm_child_retry_replacement(

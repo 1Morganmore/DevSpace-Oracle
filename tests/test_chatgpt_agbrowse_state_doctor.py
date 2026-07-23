@@ -1227,6 +1227,7 @@ def test_child_retry_replacement_binds_immutable_deep_research_evidence(tmp_path
     state.write_json_atomic(state_file, legacy)
     backfilled = store.backfill_retired_child_pre_submit_cleanup(child["run_dir"])
     assert backfilled["cleanup_evidence"]["evidence"]["sha256"] == stale_cleanup["evidence"]["sha256"]
+    assert store.backfill_retired_child_pre_submit_cleanup(child["run_dir"]) == backfilled
     cleared = store.clear_parent_runtime_recovery(parent["run_dir"])
     assert cleared["recovery_required"] is False
     store.transition(child["run_dir"], "PREFLIGHTED")
