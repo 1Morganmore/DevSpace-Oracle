@@ -1034,7 +1034,7 @@ def test_mutation_disallowed_child_reuses_same_claim_under_exact_retry_authority
     failed = store.finalize_parent(
         parent["run_dir"],
         "PARENT_FAILED_CLOSED",
-        failure={"code": "CHILD_NOT_COMPLETE", "message": "solver-0: SEND_REJECTED"},
+        failure={"code": "AGBROWSE_JSON_INVALID", "message": "agbrowse returned non-JSON stdout"},
     )
     failed_state = state.read_json(Path(parent["run_dir"]) / "run.json")
     failed_state["owner"]["pid"] = 2_147_483_647

@@ -4676,6 +4676,7 @@ class RunStore:
                 "APP_TRANSACTION_FAILED",
                 "APP_COMPOSER_PREP_FAILED",
                 "STAGE_ENVELOPE_INVALID_JSON",
+                "AGBROWSE_JSON_INVALID",
             }:
                 raise StateError(
                     "PARENT_REOPEN_FAILURE_UNSUPPORTED",
@@ -4825,6 +4826,17 @@ class RunStore:
                         {
                             "parent_failure": failure_code,
                             "reason": "parser reopen requires an exact local JSON decoder failure after fully cleaned completed children",
+                        }
+                    )
+            elif failure_code == "AGBROWSE_JSON_INVALID":
+                if (
+                    str(failure.get("message") or "") != "agbrowse returned non-JSON stdout"
+                    or len(retry_candidates) != 1
+                ):
+                    unsafe.append(
+                        {
+                            "parent_failure": failure_code,
+                            "reason": "agbrowse JSON reopen requires one exact retryable pre-submit child",
                         }
                     )
             elif retry_candidates:
