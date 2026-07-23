@@ -149,15 +149,15 @@ def test_new_comprehensive_workflows_are_v4_relayed_and_v1_v2_are_recovery_only(
     assert "routine plan does not pay the Web Multi-GPT latency cost" in text
 
 
-def test_comprehensive_waiting_uses_one_compact_check_per_five_minute_cycle() -> None:
+def test_comprehensive_waiting_stays_inside_one_runner_turn() -> None:
     text = _text(HANDOFF_SKILL)
     for phrase in (
-        "Thin five-minute wait cadence",
-        "wait 300 seconds at the tool/process layer",
-        "--observe-run <exact-run-dir> --compact",
-        "`EXACT_ACTIVE` starts another 300-second tool/process wait",
-        "`EXACT_COMPLETE` advances immediately in that same cycle",
-        "Any other observation state is actionable",
+        "Thin one-minute runner cadence",
+        "Invoke the existing hidden runner once",
+        "60-second sleep -> exact compact terminal check -> 60-second sleep",
+        "must not return `EXACT_ACTIVE` to Codex",
+        "the runner returns one terminal receipt",
+        "Any non-active observation state is actionable",
         "not a new detector, daemon, dashboard state machine",
     ):
         assert phrase in text

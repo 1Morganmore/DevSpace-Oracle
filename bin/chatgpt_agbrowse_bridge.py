@@ -21,6 +21,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 PINNED_VERSION = "0.1.18"
 WINDOWS_CMD_WRAPPER_SAFE_CHARS = 7000
+EXACT_POLL_CADENCE_SECONDS = 60.0
 GLOBAL_APP_CONTRACT_SCHEMA = "codex.chatgpt.global-app-contract-state/v1"
 GLOBAL_APP_CONTRACT_MAX_ENTRIES = 32
 GLOBAL_APP_CONTRACT_MAX_EVENTS = 20
@@ -7173,7 +7174,16 @@ class Bridge:
                         ),
                     },
                 )
-            time.sleep(min(3.0, max(0.1, deadline - time.monotonic())))
+            # Keep unchanged waiting entirely inside this runner process.
+            # The local Codex model receives no intermediate turn while the
+            # exact response remains active; the runner returns only when the
+            # run becomes terminal or otherwise actionable.
+            time.sleep(
+                min(
+                    EXACT_POLL_CADENCE_SECONDS,
+                    max(0.1, deadline - time.monotonic()),
+                )
+            )
 
     def recover(self, run_dir: str) -> dict[str, Any]:
         # Known canonical URLs get one read-only terminal adjudication before

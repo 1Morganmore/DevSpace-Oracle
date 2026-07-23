@@ -287,6 +287,40 @@ def test_bound_poll_uses_exact_url_read_only_checks_without_session_poll(tmp_pat
     assert all("--navigate" not in command for command in commands)
 
 
+def test_bound_poll_waits_inside_runner_at_sixty_second_cadence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_bridge("exact_job_internal_wait_cadence_test")
+    runtime = module.Bridge(
+        state_root=tmp_path / "state",
+        runner=lambda command, env, timeout: (_ for _ in ()).throw(AssertionError(command)),
+        headed_runtime_preflight=False,
+    )
+    runtime.exact_url_only_poll = True
+    run_dir = make_run(tmp_path, runtime, phase="RESPONSE_IN_PROGRESS")
+    observations = iter(
+        (
+            runtime.store.load(run_dir)[1],
+            {"phase": "COMPLETE", "run_id": "terminal"},
+        )
+    )
+    runtime._try_exact_url_terminal_now = lambda *args, **kwargs: next(observations)
+    runtime._recovery_tabs = lambda **kwargs: (
+        [{"targetId": "T-1", "url": "https://chatgpt.com/c/exact-job"}],
+        {"kind": "tabs"},
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(module.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(module.time, "sleep", sleeps.append)
+
+    result = runtime.poll(run_dir, timeout_seconds=120)
+
+    assert result["phase"] == "COMPLETE"
+    assert sleeps == [module.EXACT_POLL_CADENCE_SECONDS]
+    assert module.EXACT_POLL_CADENCE_SECONDS == 60.0
+
+
 def test_exact_url_timeout_records_long_running_app_work_instead_of_generic_recovery(
     tmp_path: Path,
     monkeypatch,

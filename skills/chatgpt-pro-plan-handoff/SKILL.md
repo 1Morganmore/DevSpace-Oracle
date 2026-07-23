@@ -25,15 +25,15 @@ Every new comprehensive workflow uses `codex.chatgpt.comprehensive-workflow/v4` 
 
 Local Codex token use is a hard efficiency invariant. Detailed plan, review, advisory, mission, and implementation content stays in immutable handoff files authored by the completing web stage. The host consumes only schemas, paths, hashes, verdicts, and bounded receipts; it must not rehydrate entire answer bodies or repeatedly poll unchanged state into the local model.
 
-#### Thin five-minute wait cadence
+#### Thin one-minute runner cadence
 
-After a comprehensive stage crosses the send boundary, unchanged waiting must not create repeated local-model turns. Let the existing hidden runner remain the sole workflow owner. Unless that runner returns a terminal or actionable receipt earlier, wait 300 seconds at the tool/process layer, then run exactly one `chatgpt_agbrowse_run.py --observe-run <exact-run-dir> --compact` check for that persisted run.
+After a comprehensive stage crosses the send boundary, unchanged waiting must not create repeated local-model turns. Invoke the existing hidden runner once and wait for its final response. The same runner process owns the entire `60-second sleep -> exact compact terminal check -> 60-second sleep` loop; it must not return `EXACT_ACTIVE` to Codex merely to schedule the next check.
 
-- `EXACT_ACTIVE` starts another 300-second tool/process wait. Do not emit a progress narrative, inspect logs/DOM, load the answer body, call a second observer, or start another browser helper in the same cycle.
-- `EXACT_COMPLETE` advances immediately in that same cycle through the existing immutable result, structured-contract, cleanup, and next-stage path. Do not add another five-minute delay.
-- Any other observation state is actionable. Surface one bounded receipt and stop the wait cycle; never convert identity mismatch, missing identity, absent target, terminal-pending-capture, uncertainty, or malformed observation into repeated waiting or a replacement submission.
-- A user status request may trigger one immediate compact observation. It does not change the next normal cadence or authorize full evidence injection.
-- The cadence is a skill-level host policy, not a new detector, daemon, dashboard state machine, manifest field, browser authority, or lifecycle schema. PID, heartbeat, lock, active tab, and elapsed time remain diagnostic only.
+- While the exact run remains active, the runner sleeps for 60 seconds and checks again internally. Do not end and restart the Codex turn, emit a progress narrative, inspect logs/DOM, load the answer body, call another observer, or start another browser helper.
+- When the exact run completes, the runner returns one terminal receipt and the workflow advances immediately through the existing immutable result, structured-contract, cleanup, and next-stage path.
+- Any non-active observation state is actionable. Return one bounded receipt and stop the internal wait loop; never convert identity mismatch, missing identity, absent target, terminal-pending-capture, uncertainty, or malformed observation into repeated waiting or a replacement submission.
+- A user status request may trigger one immediate compact observation without replacing or duplicating the existing runner.
+- This is the existing runner's wait policy, not a new detector, daemon, dashboard state machine, manifest field, browser authority, or lifecycle schema. PID, heartbeat, lock, active tab, and elapsed time remain diagnostic only.
 
 1. Validate the structured v4 manifest, web-native relay mode, and both deterministic gates before browser work.
 2. Run Deep Research only when its `auto` triggers select it or the user/policy requires it; otherwise persist an immutable skip descriptor.
