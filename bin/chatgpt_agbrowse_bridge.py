@@ -6937,6 +6937,15 @@ class Bridge:
                 )
                 or {"ok": True, "skipped": True, "reason": "no-unique-new-root-target"}
             )
+            if (
+                str(rejected.get("record_kind") or "") == "child"
+                and cleanup.get("ok") is True
+                and str(cleanup.get("state") or "") in {"closed-and-absent", "already-absent"}
+            ):
+                # Persist the exact pre-submit composer cleanup before the
+                # parent is allowed to reopen.  The lifecycle event alone is
+                # not sufficient for RunStore's retry identity proof.
+                self.store.record_child_cleanup(run_dir, cleanup)
             return self.store.transition(
                 run_dir,
                 "SEND_REJECTED",

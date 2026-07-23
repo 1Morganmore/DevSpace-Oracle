@@ -3324,14 +3324,25 @@ class RunStore:
         }
         if any(payload.get(key) not in (None, "", [], {}) for key in conflicting_keys):
             raise StateError("PRE_SUBMIT_RETRY_IDENTITY_CONFLICT", "failure envelope contains submission identity or result")
-        matching_events = [
-            event
-            for event in record.get("recovery_events") or []
-            if isinstance(event, dict)
-            and str(event.get("kind") or "") == "verified-mutation-disallowed-reclassification"
-            and str(event.get("error_code") or "") == error_code
-            and str(event.get("error_stage") or "") == error_stage
-        ]
+        def is_matching_pre_submit_event(event: object) -> bool:
+            if not isinstance(event, dict):
+                return False
+            kind = str(event.get("kind") or "")
+            if kind == "verified-mutation-disallowed-reclassification":
+                return (
+                    str(event.get("error_code") or "") == error_code
+                    and str(event.get("error_stage") or "") == error_stage
+                )
+            if kind == "pre-submit-rejection":
+                recorded = event.get("error") if isinstance(event.get("error"), dict) else {}
+                return (
+                    str(recorded.get("error_code") or "") == error_code
+                    and str(recorded.get("error_stage") or "") == error_stage
+                    and recorded.get("mutation_allowed") is False
+                )
+            return False
+
+        matching_events = [event for event in record.get("recovery_events") or [] if is_matching_pre_submit_event(event)]
         if not matching_events:
             raise StateError("PRE_SUBMIT_RETRY_RECLASSIFICATION_MISSING", "verified reclassification does not match send evidence")
         return {

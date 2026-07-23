@@ -1023,9 +1023,12 @@ def test_mutation_disallowed_child_reuses_same_claim_under_exact_retry_authority
         child["run_dir"],
         "SEND_REJECTED",
         recovery_event={
-            "kind": "verified-mutation-disallowed-reclassification",
-            "error_code": "provider.active-capacity",
-            "error_stage": "provider-capacity",
+            "kind": "pre-submit-rejection",
+            "error": {
+                "error_code": "provider.active-capacity",
+                "error_stage": "provider-capacity",
+                "mutation_allowed": False,
+            },
         },
     )
     failed = store.finalize_parent(
