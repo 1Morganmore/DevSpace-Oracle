@@ -4372,6 +4372,47 @@ class RunStore:
             },
         }
 
+    def pending_retired_retry_rebind_candidate(self, run_dir: str | os.PathLike[str]) -> bool:
+        """Read-only proof for a fresh replacement awaiting existing confirmation."""
+        state_file, record = self.load(run_dir)
+        try:
+            candidate = self.pre_submit_retry_candidate(run_dir)
+        except StateError:
+            return False
+        authority = record.get("pre_submit_retry_authority")
+        target = str(record.get("current_target_id") or "")
+        evidence_path = state_file.parent / "composer-app-evidence.json"
+        try:
+            evidence = read_json(evidence_path)
+            evidence_valid = (
+                evidence_path.is_file() and not evidence_path.is_symlink()
+                and str(evidence.get("state") or "") == "composer-app-mention-tab-confirmed"
+                and str(evidence.get("target_id") or "") == target
+                and evidence.get("new_target_proven") is True
+            )
+        except (OSError, StateError):
+            evidence_valid = False
+        rebind = any(
+            isinstance(event, dict)
+            and str(event.get("old_target_id") or "") == str(authority.get("retired_replacement_target_id") or "")
+            and str(event.get("new_target_id") or "") == target
+            and str(event.get("reason") or "") == "pre-submit-composer-retry"
+            for event in record.get("target_rebind_events") or []
+        ) if isinstance(authority, dict) else False
+        return bool(
+            str(record.get("phase") or "") == "LEASED"
+            and (state_file.parent / "send.claim").is_file()
+            and int(record.get("send_attempt_count") or 0) == 1
+            and not record.get("session_id") and not record.get("conversation_url")
+            and record.get("submission_receipt") is None and record.get("result") is None
+            and isinstance(authority, dict) and authority.get("eligible") is True and authority.get("consumed_at") is None
+            and not authority.get("replacement_target_id") and bool(authority.get("retired_replacement_target_id"))
+            and str(authority.get("claim_sha256") or "") == str(candidate.get("claim_sha256") or "")
+            and rebind and evidence_valid
+            and str(record.get("owned_tab_state") or "") in {"closed-and-absent", "already-absent"}
+            and not bool(record.get("cleanup_pending")) and int(record.get("owned_open_tabs") or 0) == 0
+        )
+
     def settle_parent_stopped_submission_uncertain_child(
         self,
         run_dir: str | os.PathLike[str],
@@ -4967,6 +5008,8 @@ class RunStore:
                         self.pre_submit_retry_candidate(child_state.parent)
                     except StateError as exc:
                         unsafe.append({**summary, "reason": exc.code})
+                    continue
+                if phase == "LEASED" and self.pending_retired_retry_rebind_candidate(child_state.parent):
                     continue
                 if phase == "PREFLIGHT_BLOCKED" and exact_reconciled_pre_submit_retry(child_state, child):
                     continue

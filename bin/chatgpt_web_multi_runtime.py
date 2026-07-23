@@ -2457,6 +2457,8 @@ class WebMultiRuntime:
             if phase in {"CREATED", "PREFLIGHTED", "LEASED"}:
                 child_dir = paths.runs_dir / str(child["run_id"])
                 authority = child.get("pre_submit_retry_authority")
+                if phase == "LEASED" and self.store.pending_retired_retry_rebind_candidate(child_dir):
+                    continue
                 stale_retry_target = bool(
                     phase == "LEASED"
                     and isinstance(authority, dict)
