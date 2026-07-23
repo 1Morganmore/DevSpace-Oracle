@@ -109,6 +109,54 @@ def test_false_sent_session_is_not_a_committed_send() -> None:
     assert bridge.session_send_not_committed(session) is False
 
 
+def test_exact_ready_zero_answer_after_bounded_waits_blocks_ambiguous_submission() -> None:
+    bridge = load_bridge("exact_job_ambiguous_submission_test")
+    record = {
+        "conversation_url": "https://chatgpt.com/c/exact-job",
+        "current_target_id": "T-1",
+        "recovery_events": [
+            {"kind": "exact-url-read-only-wait-timeout"},
+            {"kind": "exact-url-read-only-wait-timeout"},
+        ],
+    }
+    diagnostic = {
+        "ok": True,
+        "streaming": False,
+        "composer_visible": True,
+        "stop_control_present": False,
+        "conversation_url": "https://chatgpt.com/c/exact-job",
+        "target_id": "T-1",
+        "session": {
+            "status": "sent",
+            "answer": None,
+            "lastResponseCharCount": 0,
+            "trace": [{
+                "intentId": "send.click",
+                "status": "unresolved",
+                "errorCode": "TARGET_UNRESOLVED",
+            }],
+        },
+    }
+
+    assert bridge.exact_url_ambiguous_submission(record, diagnostic) is True
+
+    diagnostic["streaming"] = True
+    assert bridge.exact_url_ambiguous_submission(record, diagnostic) is False
+    diagnostic["streaming"] = False
+    diagnostic["session"]["answer"] = "current-run answer"
+    assert bridge.exact_url_ambiguous_submission(record, diagnostic) is False
+    diagnostic["session"]["answer"] = None
+    diagnostic["session"]["trace"][0]["status"] = "resolved"
+    assert bridge.exact_url_ambiguous_submission(record, diagnostic) is False
+    diagnostic["session"]["trace"][0]["status"] = "unresolved"
+    diagnostic["session"]["trace"][0]["errorCode"] = "TARGET_UNRESOLVED"
+    diagnostic["target_id"] = "other-target"
+    assert bridge.exact_url_ambiguous_submission(record, diagnostic) is False
+    diagnostic["target_id"] = "T-1"
+    record["recovery_events"] = [{"kind": "exact-url-read-only-wait-timeout"}]
+    assert bridge.exact_url_ambiguous_submission(record, diagnostic) is False
+
+
 def test_ax_snapshot_web_multi_payload_is_decoded_without_tree_markup() -> None:
     bridge = load_bridge("exact_job_ax_snapshot_decode_test")
     snapshot = (
@@ -393,6 +441,62 @@ def test_exact_url_timeout_records_long_running_app_work_instead_of_generic_reco
     assert event["diagnostic"]["stop_control_present"] is True
     assert "do not stop, close, or resubmit" in event["next_action"]
     assert not any(command[1] in {"click", "press", "type", "navigate", "new-tab", "tab-close"} for command in commands)
+
+
+def test_exact_ready_zero_answer_blocks_recovery_without_replacement(tmp_path: Path, monkeypatch) -> None:
+    module = load_bridge("exact_job_ambiguous_timeout_transition_test")
+    commands: list[list[str]] = []
+    runtime = module.Bridge(
+        state_root=tmp_path / "state",
+        runner=lambda command, env, timeout: commands.append(command),
+        headed_runtime_preflight=False,
+    )
+    runtime.exact_url_only_poll = True
+    run_dir = make_run(tmp_path, runtime, phase="RESPONSE_IN_PROGRESS")
+    state_file = Path(run_dir) / "run.json"
+    record = json.loads(state_file.read_text(encoding="utf-8"))
+    record["recovery_events"] = [
+        {"kind": "exact-url-read-only-wait-timeout"},
+        {"kind": "exact-url-read-only-wait-timeout"},
+    ]
+    record["recovery_count"] = 2
+    state_file.write_text(json.dumps(record), encoding="utf-8")
+    runtime._try_exact_url_terminal_now = lambda *args, **kwargs: runtime.store.load(run_dir)[1]
+    runtime._recovery_tabs = lambda **kwargs: (
+        [{"targetId": "T-1", "url": "https://chatgpt.com/c/exact-job"}],
+        {"kind": "tabs"},
+    )
+    runtime._exact_url_timeout_diagnostic = lambda *args, **kwargs: {
+        "ok": True,
+        "conversation_url": "https://chatgpt.com/c/exact-job",
+        "target_id": "T-1",
+        "streaming": False,
+        "composer_visible": True,
+        "stop_control_present": False,
+        "session": {
+            "status": "sent",
+            "answer": None,
+            "lastResponseCharCount": 0,
+            "trace": [{
+                "intentId": "send.click",
+                "status": "unresolved",
+                "errorCode": "TARGET_UNRESOLVED",
+            }],
+        },
+    }
+    ticks = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(ticks, 2.0))
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+
+    result = runtime.poll(run_dir, timeout_seconds=1)
+
+    assert result["phase"] == "BLOCKED_RECOVERY_EXHAUSTED"
+    assert result["conversation_url"] == "https://chatgpt.com/c/exact-job"
+    assert result["current_target_id"] == "T-1"
+    assert not result.get("cleanup_pending")
+    assert result["recovery_events"][-1]["kind"] == "exact-url-ambiguous-submission"
+    assert "do not resubmit" in result["recovery_events"][-1]["next_action"]
+    assert commands == []
 
 
 def test_exact_url_quiescent_trace_reconcile_is_non_mutating(tmp_path: Path) -> None:

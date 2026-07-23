@@ -22,6 +22,10 @@ from urllib.parse import urlsplit, urlunsplit
 PINNED_VERSION = "0.1.18"
 WINDOWS_CMD_WRAPPER_SAFE_CHARS = 7000
 EXACT_POLL_CADENCE_SECONDS = 60.0
+# A known exact conversation is normally protected indefinitely while its
+# provider response is active.  This is deliberately a *prior* timeout count:
+# the current timeout diagnostic supplies the third independent observation.
+EXACT_URL_AMBIGUOUS_SUBMISSION_MIN_PRIOR_TIMEOUTS = 2
 GLOBAL_APP_CONTRACT_SCHEMA = "codex.chatgpt.global-app-contract-state/v1"
 GLOBAL_APP_CONTRACT_MAX_ENTRIES = 32
 GLOBAL_APP_CONTRACT_MAX_EVENTS = 20
@@ -1022,6 +1026,53 @@ def session_send_not_committed(session: Mapping[str, Any]) -> bool:
         and int(summary.get("assistantCount") or 0) == 0
         and not_enabled
     )
+
+
+def exact_url_ambiguous_submission(
+    record: Mapping[str, Any],
+    diagnostic: Mapping[str, Any],
+) -> bool:
+    """Recognize a durable exact-URL send ambiguity without declaring no-send.
+
+    A ``sent`` session whose original send-click trace is unresolved may still
+    have reached ChatGPT, so this is never a pre-submit reclassification.  It
+    becomes actionable only after two prior bounded exact-URL waits and a new
+    exact diagnostic proves the page is ready, non-streaming, and has no
+    captured response.  The caller blocks recovery while retaining the exact
+    URL/target and project lock; it must not submit a replacement.
+    """
+    if not diagnostic.get("ok") or diagnostic.get("streaming") is not False:
+        return False
+    if (
+        str(diagnostic.get("conversation_url") or "") != str(record.get("conversation_url") or "")
+        or str(diagnostic.get("target_id") or "") != str(record.get("current_target_id") or "")
+    ):
+        return False
+    if not diagnostic.get("composer_visible") or diagnostic.get("stop_control_present"):
+        return False
+    session = diagnostic.get("session")
+    if not isinstance(session, Mapping):
+        return False
+    if str(session.get("status") or "").lower() != "sent":
+        return False
+    if session.get("answer") not in (None, "") or int(session.get("lastResponseCharCount") or 0) != 0:
+        return False
+    trace = session.get("trace")
+    if not isinstance(trace, list) or not any(
+        isinstance(item, Mapping)
+        and str(item.get("intentId") or "") == "send.click"
+        and str(item.get("status") or "") == "unresolved"
+        and str(item.get("errorCode") or "") == "TARGET_UNRESOLVED"
+        for item in trace
+    ):
+        return False
+    prior_timeouts = sum(
+        1
+        for event in record.get("recovery_events") or []
+        if isinstance(event, Mapping)
+        and str(event.get("kind") or "") == "exact-url-read-only-wait-timeout"
+    )
+    return prior_timeouts >= EXACT_URL_AMBIGUOUS_SUBMISSION_MIN_PRIOR_TIMEOUTS
 
 
 def exact_target_observation(tabs: Iterable[Mapping[str, Any]], target_id: str) -> dict[str, Any]:
@@ -4865,6 +4916,15 @@ class Bridge:
         snapshot_text = str(snapshot_payload.get("text") or "")
         page_text = str(completed["text"].stdout or "")
         visible = f"{snapshot_text}\n{page_text}"
+        composer_visible = bool(
+            any(
+                isinstance(capability, Mapping)
+                and str(capability.get("capabilityId") or "") == "chatgpt-composer-visible"
+                and isinstance(capability.get("evidence"), Mapping)
+                and capability["evidence"].get("visible") is True
+                for capability in (status_payload.get("capabilities") or [])
+            )
+        )
         get_answer_now = any(
             label in visible
             for label in ("지금 답변 받기", "Get answer now")
@@ -4881,6 +4941,8 @@ class Bridge:
             "target_id": target_id,
             "conversation_url": conversation_url,
             "streaming": _streaming_state(status_payload),
+            "composer_visible": composer_visible,
+            "session": sanitize_evidence(dict(session)),
             "trace_activity": trace_activity,
             "app_policy": str(manifest.get("app_policy") or ""),
             "get_answer_now_available": get_answer_now,
@@ -7189,6 +7251,18 @@ class Bridge:
                     isinstance(diagnostic.get("trace_activity"), Mapping)
                     and diagnostic["trace_activity"].get("state") == "provider_streaming_app_trace_quiescent"
                 )
+                if exact_url_ambiguous_submission(record, diagnostic):
+                    return self.store.transition(
+                        run_dir,
+                        "BLOCKED_RECOVERY_EXHAUSTED",
+                        recovery_event={
+                            "kind": "exact-url-ambiguous-submission",
+                            "conversation_url": saved_url,
+                            "target_id": target_id,
+                            "diagnostic": sanitize_evidence(diagnostic),
+                            "next_action": "preserve this exact target and project lock; send delivery remains ambiguous; do not resubmit, authorize a retry, or clean up the target",
+                        },
+                    )
                 return self.store.transition(
                     run_dir,
                     "RECOVERY_REQUIRED",
