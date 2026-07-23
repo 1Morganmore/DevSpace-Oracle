@@ -1958,6 +1958,120 @@ def test_parent_wide_same_target_virtual_descriptor_finalizes_with_real_store(
     assert descriptor["decision"] == "abandon-without-close-stale-sent-session"
     assert descriptor["preimages"]["child"]["sha256"]
     assert all(round_["stale_sent_session_valid"] for round_ in descriptor["proof_rounds"])
+    scan = runtime.store.finalize_user_stopped_parent(parent["run_dir"], dry_run=True)
+    assert scan["strict_terminal_scan_ready"] is True
+
+    reentry = bridge.Bridge(
+        state_root=state_root,
+        runner=runner,
+        headed_runtime_preflight=False,
+    )
+    returned = reentry.confirm_user_stop(child["run_dir"])
+
+    assert returned["phase"] == "ABANDONED_UNCERTAIN"
+    _, drained_parent = reentry.store.load(parent["run_dir"])
+    assert drained_parent["phase"] == "PARENT_FAILED_CLOSED"
+    assert not (
+        state_root
+        / "projects"
+        / drained_parent["project_key"]
+        / "active.lock"
+    ).exists()
+
+
+def test_parent_stop_complete_child_accepts_exact_url_terminal_capture(
+    tmp_path: Path,
+) -> None:
+    state = load(
+        "chatgpt_agbrowse_state_exact_url_parent_scan_test",
+        "chatgpt_agbrowse_state.py",
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    state_file = run_dir / "run.json"
+    state_file.write_text("{}", encoding="utf-8")
+    answer = run_dir / "answer.md"
+    answer.write_text("durable answer", encoding="utf-8")
+    record = {
+        "result": {
+            "path": str(answer),
+            "sha256": hashlib.sha256(answer.read_bytes()).hexdigest(),
+            "bytes": answer.stat().st_size,
+            "provider_status": "exact-url-adjudicated-terminal",
+            "evidence": {"kind": "unique-exact-url-terminal"},
+        }
+    }
+
+    assert state.RunStore._complete_result_capture_valid(state_file, record) is True
+
+
+def test_abandoned_child_reentry_reports_pending_parent_drain(
+    tmp_path: Path,
+) -> None:
+    bridge = load(
+        "chatgpt_agbrowse_bridge_parent_drain_pending_reentry_test",
+        "chatgpt_agbrowse_bridge.py",
+    )
+    child_dir = tmp_path / "runs" / "child"
+    parent_dir = tmp_path / "runs" / "parent"
+    child_dir.mkdir(parents=True)
+    parent_dir.mkdir()
+    child_file = child_dir / "run.json"
+    parent_file = parent_dir / "run.json"
+    lock_file = tmp_path / "active.lock"
+    child_file.write_text("{}", encoding="utf-8")
+    parent_file.write_text("{}", encoding="utf-8")
+    lock_file.write_text("{}", encoding="utf-8")
+    child = {
+        "record_kind": "child",
+        "run_id": "child",
+        "parent_run_id": "parent",
+        "phase": "ABANDONED_UNCERTAIN",
+    }
+    parent = {
+        "record_kind": "parent",
+        "run_id": "parent",
+        "project_root": str(tmp_path),
+        "phase": "USER_STOP_REQUESTED",
+    }
+
+    class Paths:
+        pass
+
+    paths = Paths()
+    paths.lock_file = lock_file
+
+    class Store:
+        @staticmethod
+        def load(run_dir):
+            return (child_file, child) if Path(run_dir) == child_dir else (parent_file, parent)
+
+        @staticmethod
+        def paths(_project_root, _run_id):
+            return paths
+
+        @staticmethod
+        def finalize_user_stopped_parent(_parent_dir, *, tab_absence_evidence):
+            return {
+                **parent,
+                "child_scan": [
+                    {
+                        "run_id": "child",
+                        "phase": "ABANDONED_UNCERTAIN",
+                        "safe": False,
+                    }
+                ],
+            }
+
+    runtime = object.__new__(bridge.Bridge)
+    runtime.store = Store()
+    runtime._settle_user_stop_send_rejected_siblings = lambda **_kwargs: []
+    runtime._parent_stop_final_tab_scan = lambda _parent_dir: {"path": "scan"}
+
+    with pytest.raises(bridge.BridgeError) as failure:
+        runtime.confirm_user_stop(str(child_dir))
+
+    assert failure.value.code == "USER_STOP_PARENT_DRAIN_PENDING"
 
 
 @pytest.mark.parametrize(

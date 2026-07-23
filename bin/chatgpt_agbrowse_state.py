@@ -1014,7 +1014,14 @@ class RunStore:
             and re.fullmatch(r"[0-9a-f]{64}", str(result.get("sha256") or ""))
             and actual_sha256 == str(result.get("sha256") or "")
             and str(result.get("provider_status") or "").lower()
-            in {"complete", "completed", "done", "response_ready", "history-adjudicated-terminal"}
+            in {
+                "complete",
+                "completed",
+                "done",
+                "response_ready",
+                "history-adjudicated-terminal",
+                "exact-url-adjudicated-terminal",
+            }
             and isinstance(result.get("evidence"), dict)
             and bool(result["evidence"])
         )
@@ -5638,6 +5645,42 @@ class RunStore:
                                 and stale.get("proven_absent") is True
                                 and not survivor
                             )
+                            proof_rounds = drift.get("proof_rounds")
+                            same_target_stale_sent_shape = bool(
+                                decision == "abandon-without-close-stale-sent-session"
+                                and isinstance(proof_rounds, list)
+                                and len(proof_rounds) == 2
+                                and stale_id == str(child.get("current_target_id") or "")
+                                and stale_id in historical
+                                and required_absent == historical
+                                and absence_union == required_absent
+                                and stale.get("ownership_adopted") is False
+                                and stale.get("close_authorized") is False
+                                and stale.get("tab_closed") is False
+                                and stale.get("proven_absent") is True
+                                and stale.get("classification")
+                                == "owned-reported-stale-target-absent"
+                                and not survivor
+                                and all(
+                                    isinstance(round_, dict)
+                                    and round_.get("valid") is True
+                                    and round_.get("stale_sent_session_valid") is True
+                                    and round_.get("session_virtual_url") is True
+                                    and round_.get("stored_target_absent") is True
+                                    and round_.get("status") == "sent"
+                                    and str(round_.get("survivor_target_id") or "")
+                                    == stale_id
+                                    and not round_.get("helper_values")
+                                    and re.fullmatch(
+                                        r"https://chatgpt\.com/c/WEB:[0-9A-Fa-f-]{16,}(?:[?#].*)?",
+                                        str(round_.get("session_url") or ""),
+                                    )
+                                    for round_ in proof_rounds
+                                )
+                                and str(proof_rounds[0].get("session_url") or "")
+                                == str(proof_rounds[1].get("session_url") or "")
+                                == str(stale.get("conversation_url") or "")
+                            )
                             drift_ok = bool(
                                 drift_path.is_file() and not drift_path.is_symlink()
                                 and sha256_file(drift_path) == str(drift_ref.get("sha256") or "")
@@ -5646,7 +5689,11 @@ class RunStore:
                                 and drift.get("recorded", {}).get("target_id") == child.get("current_target_id")
                                 and drift.get("recorded", {}).get("conversation_url") == child.get("conversation_url")
                                 and drift.get("historical_owned_target_ids") == historical
-                                and (live_shape or absent_shape)
+                                and (
+                                    live_shape
+                                    or absent_shape
+                                    or same_target_stale_sent_shape
+                                )
                             )
                         except (OSError, TypeError, ValueError, StateError):
                             drift_ok = False

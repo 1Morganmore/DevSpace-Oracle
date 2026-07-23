@@ -2304,9 +2304,24 @@ class Bridge:
                                 excluded_run_id=str(record.get("run_id") or ""),
                             )
                         final_tabs = self._parent_stop_final_tab_scan(parent_dir)
-                        self.store.finalize_user_stopped_parent(
+                        drained = self.store.finalize_user_stopped_parent(
                             parent_dir, tab_absence_evidence=final_tabs
                         )
+                        if str(drained.get("phase") or "") == "PARENT_DRAINING":
+                            retry_tabs = self._parent_stop_final_tab_scan(parent_dir)
+                            drained = self.store.finalize_user_stopped_parent(
+                                parent_dir, tab_absence_evidence=retry_tabs
+                            )
+                        if str(drained.get("phase") or "") != "PARENT_FAILED_CLOSED":
+                            raise BridgeError(
+                                "USER_STOP_PARENT_DRAIN_PENDING",
+                                "abandoned child is terminal but parent drain remains pending",
+                                {
+                                    "parent_run_dir": str(parent_dir),
+                                    "child_run_id": record.get("run_id"),
+                                    "child_scan": drained.get("child_scan"),
+                                },
+                            )
                 except (BridgeError, STATE.StateError):
                     raise
             return record
