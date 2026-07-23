@@ -3666,7 +3666,11 @@ class RunStore:
         authority = record.get("pre_submit_retry_authority")
         if not isinstance(authority, dict) or authority.get("eligible") is not True or authority.get("consumed_at") is not None:
             raise StateError("PRE_SUBMIT_RETRY_AUTHORITY_MISSING", "replacement target requires unconsumed retry authority")
-        cleanup_target = str(authority.get("cleanup_target_id") or "")
+        cleanup_target = str(
+            authority.get("retired_replacement_target_id")
+            or authority.get("cleanup_target_id")
+            or ""
+        )
         target_id = str(target_id or "")
         if not cleanup_target or not target_id or target_id == cleanup_target or target_id != str(record.get("current_target_id") or ""):
             raise StateError("PRE_SUBMIT_RETRY_REPLACEMENT_INVALID", "replacement target identity is not exact")

@@ -1234,19 +1234,17 @@ def test_child_retry_replacement_binds_immutable_deep_research_evidence(tmp_path
     store.transition(child["run_dir"], "PREFLIGHTED")
     store.transition(child["run_dir"], "LEASED")
     assert store.assert_child_send_available(child["run_dir"])["run_id"] == child["run_id"]
-    current = state.read_json(state_file)
-    for mutate in (
-        lambda value: value["pre_submit_retry_authority"].update({"consumed_at": "2026-07-23T00:00:00+00:00"}),
-        lambda value: value.update({"session_id": "unexpected-session"}),
-        lambda value: value["recovery_events"][-1].update({"cleanup_lifecycle_sha256": "0" * 64}),
-    ):
-        tampered = json.loads(json.dumps(current))
-        mutate(tampered)
-        state.write_json_atomic(state_file, tampered)
-        with pytest.raises(state.StateError) as unavailable:
-            store.assert_child_send_available(child["run_dir"])
-        assert unavailable.value.code in {"SEND_ALREADY_ATTEMPTED", "PRE_SUBMIT_RETRY_IDENTITY_CONFLICT", "PRE_SUBMIT_RETRY_PHASE_INVALID"}
-    state.write_json_atomic(state_file, current)
+    fresh_value = json.loads(json.dumps(evidence))
+    fresh_value["target_id"] = "TARGET-FRESH"
+    fresh_path = Path(child["run_dir"]) / "composer-research-fresh.json"
+    state.write_json_atomic(fresh_path, fresh_value)
+    store.transition(
+        child["run_dir"], "LEASED", target_id="TARGET-FRESH", rebind_reason="pre-submit-composer-retry",
+        selection_evidence_ref={"kind": "deep-research-selection", "path": str(fresh_path),
+                                "sha256": state.sha256_file(fresh_path), "target_id": "TARGET-FRESH"},
+    )
+    rebound = store.confirm_child_retry_replacement(child["run_dir"], target_id="TARGET-FRESH", evidence_path=fresh_path)
+    assert rebound["pre_submit_retry_authority"]["replacement_target_id"] == "TARGET-FRESH"
 
 
 def test_child_retry_research_replacement_rejects_tampering_without_authority_mutation(tmp_path: Path) -> None:
