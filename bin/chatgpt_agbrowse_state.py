@@ -6518,6 +6518,19 @@ class RunStore:
             if invalid_claim:
                 raise StateError("CHILD_SEND_CLAIM_INVALID", "child send claim identity is not exact")
             authority = record.get("pre_submit_retry_authority")
+            events = record.get("recovery_events") if isinstance(record.get("recovery_events"), list) else []
+            latest = events[-1] if events and isinstance(events[-1], dict) else {}
+            target_id = str(record.get("current_target_id") or "")
+            retired_claim_reuse = bool(
+                isinstance(authority, dict)
+                and not authority.get("replacement_target_id")
+                and str(authority.get("retired_replacement_target_id") or "") == target_id
+                and str(latest.get("kind") or "") == "stale-pre-submit-retry-replacement-retired"
+                and str(latest.get("target_id") or "") == target_id
+                and str(latest.get("send_claim_sha256") or "") == str(authority.get("claim_sha256") or "")
+                and not record.get("session_id") and not record.get("conversation_url")
+                and record.get("submission_receipt") is None and record.get("result") is None
+            )
             reuse_claim = bool(
                 int(record.get("send_attempt_count") or 0) == 1
                 and isinstance(authority, dict)
@@ -6526,6 +6539,10 @@ class RunStore:
                 and str(authority.get("claim_sha256") or "") == sha256_file(claim_file)
                 and str(authority.get("run_id") or "") == str(record.get("run_id") or "")
                 and str(authority.get("parent_run_id") or "") == str(record.get("parent_run_id") or "")
+                and (
+                    str(authority.get("replacement_target_id") or authority.get("cleanup_target_id") or "") == target_id
+                    or retired_claim_reuse
+                )
             )
             if reuse_claim:
                 authority = dict(authority)
