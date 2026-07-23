@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex.chatgpt.goal-cycle/v1",
+  "type": "object",
+  "required": ["schema", "goal_id", "cycle_index", "cycle_nonce", "source", "original_goal", "mission", "allowed_host_check_ids", "prior_cycle_result", "prior_host_gates", "created_at"],
+  "properties": {
+    "schema": {"const": "codex.chatgpt.goal-cycle/v1"},
+    "goal_id": {"type": "string", "minLength": 1},
+    "cycle_index": {"type": "integer", "minimum": 1, "maximum": 20},
+    "cycle_nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "source": {"enum": ["original-goal", "web-cycle-result"]},
+    "original_goal": {"type": "object"},
+    "mission": {"type": "object"},
+    "allowed_host_check_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "prior_cycle_result": {"type": ["object", "null"]},
+    "prior_host_gates": {"type": ["object", "null"]},
+    "created_at": {"type": "string"}
+  },
+  "additionalProperties": false
+}

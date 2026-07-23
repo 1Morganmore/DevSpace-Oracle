@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex.chatgpt.goal-cycle-result/v1",
+  "type": "object",
+  "required": ["schema", "workflow_id", "goal_id", "cycle_index", "stage", "attempt_index", "nonce", "question_sha256", "source_snapshot_sha256", "original_goal_sha256", "mission_sha256", "input_plan_sha256", "input_research_descriptor_sha256", "input_advisory_descriptor_sha256", "input_review_sha256", "implementation_status", "decision", "summary", "criterion_claims", "remaining_work", "changed_files", "commands", "blockers", "requested_host_check_ids", "next_mission_body", "next_mission_on_gate_failure", "user_action"],
+  "properties": {
+    "schema": {"const": "codex.chatgpt.goal-cycle-result/v1"},
+    "workflow_id": {"type": "string", "minLength": 1},
+    "goal_id": {"type": "string", "minLength": 1},
+    "cycle_index": {"type": "integer", "minimum": 1, "maximum": 20},
+    "stage": {"const": "gpt-orchestrator"},
+    "attempt_index": {"const": 1},
+    "nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "question_sha256": {"$ref": "#/$defs/sha"},
+    "source_snapshot_sha256": {"$ref": "#/$defs/sha"},
+    "original_goal_sha256": {"$ref": "#/$defs/sha"},
+    "mission_sha256": {"$ref": "#/$defs/sha"},
+    "input_plan_sha256": {"$ref": "#/$defs/nullableSha"},
+    "input_research_descriptor_sha256": {"$ref": "#/$defs/nullableSha"},
+    "input_advisory_descriptor_sha256": {"$ref": "#/$defs/nullableSha"},
+    "input_review_sha256": {"$ref": "#/$defs/nullableSha"},
+    "implementation_status": {"enum": ["complete", "blocked", "stale-or-conflicted"]},
+    "decision": {"enum": ["CONTINUE", "GOAL_COMPLETE", "USER_ACTION_REQUIRED"]},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "criterion_claims": {"type": "array", "items": {"type": "object"}},
+    "remaining_work": {"type": "array", "items": {"type": "string"}},
+    "changed_files": {"type": "array", "items": {"type": "string"}},
+    "commands": {"type": "array", "items": {"type": "string"}},
+    "blockers": {"type": "array", "items": {"type": "string"}},
+    "requested_host_check_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "next_mission_body": {"type": ["string", "null"]},
+    "next_mission_on_gate_failure": {"type": ["string", "null"]},
+    "user_action": {"type": ["object", "null"]}
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullableSha": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

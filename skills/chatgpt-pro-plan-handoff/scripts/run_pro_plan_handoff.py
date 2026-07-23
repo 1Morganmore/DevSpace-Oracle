@@ -425,6 +425,32 @@ def validate_manifest(
                     raise WorkflowError("GATE_EVIDENCE_REQUIRED")
     if value.get("runtime_run_identity") or value.get("browser_backend"):
         raise WorkflowError("MANIFEST_CANNOT_OVERRIDE_RUNTIME_OR_BACKEND")
+    goal_binding = value.get("goal_supervisor")
+    if goal_binding is not None:
+        expected_keys = {
+            "schema", "goal_id", "cycle_index", "original_goal_sha256", "mission_sha256",
+            "cycle_nonce", "criteria", "allowed_host_check_ids",
+        }
+        if (
+            schema != WORKFLOW_V4_SCHEMA
+            or not isinstance(goal_binding, Mapping)
+            or set(goal_binding) != expected_keys
+            or goal_binding.get("schema") != "codex.chatgpt.goal-cycle-binding/v1"
+        ):
+            raise WorkflowError("GOAL_SUPERVISOR_BINDING_INVALID")
+        if not re.fullmatch(r"[0-9a-f]{32}", str(goal_binding.get("cycle_nonce") or "")):
+            raise WorkflowError("GOAL_SUPERVISOR_BINDING_INVALID", "cycle_nonce")
+        for field in ("original_goal_sha256", "mission_sha256"):
+            if not re.fullmatch(r"[0-9a-f]{64}", str(goal_binding.get(field) or "")):
+                raise WorkflowError("GOAL_SUPERVISOR_BINDING_INVALID", field)
+        if not isinstance(goal_binding.get("cycle_index"), int) or isinstance(goal_binding.get("cycle_index"), bool) or not 1 <= goal_binding["cycle_index"] <= 20:
+            raise WorkflowError("GOAL_SUPERVISOR_BINDING_INVALID", "cycle_index")
+        for field in ("criteria", "allowed_host_check_ids"):
+            items = goal_binding.get(field)
+            if not isinstance(items, list) or any(not isinstance(item, str) or not item.strip() for item in items):
+                raise WorkflowError("GOAL_SUPERVISOR_BINDING_INVALID", field)
+        if not goal_binding["criteria"] or len(set(goal_binding["criteria"])) != len(goal_binding["criteria"]):
+            raise WorkflowError("GOAL_SUPERVISOR_BINDING_INVALID", "criteria")
     allowed = workspace.get("allowed_write_paths") or []
     if not allowed:
         raise WorkflowError("ALLOWED_WRITE_PATHS_REQUIRED")
@@ -2026,18 +2052,48 @@ class ProPlanHandoffDriver:
                 return final
             binding = self._binding(state, "gpt-orchestrator", 1, plan_hash=plan_hash, review_hash=review_hash, research_descriptor_sha256=research_descriptor_hash, advisory_descriptor_sha256=advisory_descriptor_hash)
             if self.v2:
-                orchestrator_template = self._v2_envelope_template(
-                    binding,
-                    "codex.chatgpt.orchestrator-result/v2",
-                    input_plan_sha256=plan_hash,
-                    input_research_descriptor_sha256=research_descriptor_hash,
-                    input_advisory_descriptor_sha256=advisory_descriptor_hash,
-                    input_review_sha256=review_hash,
-                    status="complete",
-                    changed_files=[],
-                    commands=[],
-                    blockers=[],
-                )
+                goal_binding = self.manifest.get("goal_supervisor")
+                if goal_binding is not None:
+                    orchestrator_template = self._v2_envelope_template(
+                        binding,
+                        "codex.chatgpt.goal-cycle-result/v1",
+                        goal_id=goal_binding["goal_id"],
+                        cycle_index=goal_binding["cycle_index"],
+                        original_goal_sha256=goal_binding["original_goal_sha256"],
+                        mission_sha256=goal_binding["mission_sha256"],
+                        input_plan_sha256=plan_hash,
+                        input_research_descriptor_sha256=research_descriptor_hash,
+                        input_advisory_descriptor_sha256=advisory_descriptor_hash,
+                        input_review_sha256=review_hash,
+                        implementation_status="complete",
+                        decision="<CONTINUE|GOAL_COMPLETE|USER_ACTION_REQUIRED>",
+                        summary="<bounded factual summary>",
+                        criterion_claims=[
+                            {"criterion": item, "status": "<satisfied|unsatisfied|unknown>", "evidence_refs": []}
+                            for item in goal_binding["criteria"]
+                        ],
+                        remaining_work=[],
+                        changed_files=[],
+                        commands=[],
+                        blockers=[],
+                        requested_host_check_ids=list(goal_binding["allowed_host_check_ids"]),
+                        next_mission_body=None,
+                        next_mission_on_gate_failure=None,
+                        user_action=None,
+                    )
+                else:
+                    orchestrator_template = self._v2_envelope_template(
+                        binding,
+                        "codex.chatgpt.orchestrator-result/v2",
+                        input_plan_sha256=plan_hash,
+                        input_research_descriptor_sha256=research_descriptor_hash,
+                        input_advisory_descriptor_sha256=advisory_descriptor_hash,
+                        input_review_sha256=review_hash,
+                        status="complete",
+                        changed_files=[],
+                        commands=[],
+                        blockers=[],
+                    )
                 if self.web_native_relay:
                     if passed_review_relay is None or not passed_review_relay.get("mission"):
                         raise WorkflowError("ORCHESTRATOR_RELAY_MISSING")
@@ -2101,7 +2157,32 @@ class ProPlanHandoffDriver:
             self._verify_runtime(result, manifest)
             if str(result["conversation_url"]) in seen_urls:
                 raise WorkflowError("CONVERSATION_REUSED")
-            envelope = (validate_orchestrator_envelope_v2 if self.v2 else validate_orchestrator_envelope)(parse_final_envelope(transcript), binding)
+            parsed_envelope = parse_final_envelope(transcript)
+            goal_binding = self.manifest.get("goal_supervisor")
+            if goal_binding is not None:
+                expected_common = {
+                    "schema": "codex.chatgpt.goal-cycle-result/v1",
+                    "workflow_id": binding.workflow_id,
+                    "stage": binding.stage,
+                    "attempt_index": binding.attempt_index,
+                    "nonce": binding.nonce,
+                    "question_sha256": binding.question_sha256,
+                    "source_snapshot_sha256": binding.source_snapshot_sha256,
+                    "goal_id": goal_binding["goal_id"],
+                    "cycle_index": goal_binding["cycle_index"],
+                    "original_goal_sha256": goal_binding["original_goal_sha256"],
+                    "mission_sha256": goal_binding["mission_sha256"],
+                    "input_plan_sha256": plan_hash,
+                    "input_research_descriptor_sha256": research_descriptor_hash,
+                    "input_advisory_descriptor_sha256": advisory_descriptor_hash,
+                    "input_review_sha256": review_hash,
+                }
+                for key, expected_value in expected_common.items():
+                    if parsed_envelope.get(key) != expected_value:
+                        raise WorkflowError("GOAL_CYCLE_RESULT_BINDING_MISMATCH", key)
+                envelope = dict(parsed_envelope)
+            else:
+                envelope = (validate_orchestrator_envelope_v2 if self.v2 else validate_orchestrator_envelope)(parsed_envelope, binding)
             final = {
                 **state,
                 "status": "LOCAL_VERIFY_REQUIRED",
@@ -2122,6 +2203,8 @@ class ProPlanHandoffDriver:
                 "relay_receipt_sha256": str(passed_review_relay["receipt_sha256"]) if passed_review_relay else None,
                 "orchestrator_envelope": envelope,
             }
+            if goal_binding is not None:
+                final["goal_cycle_result"] = envelope
             atomic_write_json(self.workflow_dir / "final.json", final)
             # Preserve durable stage checkpoints even if a future final-state
             # writer adds fields based on an older state snapshot.

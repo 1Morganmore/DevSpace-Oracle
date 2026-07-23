@@ -133,6 +133,8 @@ GPT 지휘 모드로 이 기능을 구현하고 테스트까지 완료해줘
 GPT 종합모드로 이 프로젝트를 공개 배포 가능한 수준까지 정리해줘
 ```
 
+한 번의 종합모드 사이클로 끝나지 않는 장기 목표는 `codex.chatgpt.goal-supervisor/v1`로 감쌀 수 있습니다. 웹 GPT가 각 사이클의 다음 임무와 완료 여부를 작성하고, 로컬은 UTF-8·해시·고정 검사만 수행하므로 Codex 대화를 5분마다 다시 깨우지 않습니다. 기본은 포커스를 빼앗지 않는 headless 실행이며 `status` 명령은 모델이나 브라우저를 호출하지 않고 저장된 진행 상태만 보여줍니다. 동일한 허용 자동화 장애가 재발할 때만 명시적으로 활성화된 숨김 Codex CLI 수리 경로가 작동합니다. 사용법과 manifest 계약은 [지속형 목표 supervisor](docs/ARCHITECTURE_GOAL_SUPERVISOR_V1.md)를 참고하세요.
+
 ### 병렬 구현 v3
 
 승인된 구현 그래프를 실제 소스에 적용하는 선택적 실행 모드입니다. 하나의 `parallel-implementation` parent만 canonical 프로젝트 잠금과 staging/finalizer 권한을 가지며, 독립 컴포넌트는 `parallel-runtime-v1/worktrees/u-<24hex>` 아래 exact-unit 작업공간에서만 병렬 실행됩니다. 의존 또는 파일 경로 충돌이 있는 unit은 같은 컴포넌트로 합쳐져 결정론적 순서로 직렬화됩니다.

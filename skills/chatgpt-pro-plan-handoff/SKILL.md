@@ -88,6 +88,21 @@ The driver itself does not create a browser submission. It prepares exact child 
 - Automatically close every stage tab after that exact stage reaches durable `COMPLETE`, its immutable result is captured, its canonical URL has one unique live match, no foreign owner exists, and absence is re-verified. Active, uncertain, manual/unowned, foreign, and ambiguous tabs remain protected; cleanup failure records `cleanup_pending` and blocks only unsafe stage advancement.
 - Never use resource pressure as authority to skip review, kill another project, or switch browser engines.
 
+## Durable comprehensive goal supervisor
+
+For one continuing goal, use `codex.chatgpt.goal-supervisor/v1` and `run_comprehensive_goal.py`. The additive outer supervisor seals exact UTF-8 mission bytes, runs existing comprehensive-v4 cycles, accepts only `CONTINUE`, `GOAL_COMPLETE`, or `USER_ACTION_REQUIRED`, executes only registered deterministic check IDs, and requires both web completion and host gates before final acceptance. Restarting reuses the same cycle manifest and existing v4 exact-run recovery; status reads durable JSON only and never starts a browser observer or model call.
+
+The default is headless. A visible persistent console was deliberately not added because it would add Windows focus and lifecycle risk without improving authority. Mechanical status is available through the same CLI and renders from `goal-state.json`, immutable cycle results, gate receipts, and boundaries.
+
+Normal waiting remains inside the existing hidden comprehensive runner at its 60-second cadence. The outer supervisor invokes one inner v4 cycle and receives one terminal/actionable result; it does not create intermediate Codex wakeups. Automatic repair is disabled unless both the immutable goal policy enables it and `CODEX_CHATGPT_AUTOMATIC_REPAIR=1`; only a second occurrence of an allowlisted deterministic automation fault can launch one hidden bounded Codex CLI repair transaction, with at most two attempts per family. The web cycle resumes only after the repair receipt proves exact-run preservation, no replacement submission, focused tests, installed synchronization, authoritative-source commit/push, and passing CI. Target-project commit and push are never implied by goal completion and require explicit original-goal policy grants.
+
+```powershell
+python "$env:USERPROFILE\.codex\skills\chatgpt-pro-plan-handoff\scripts\run_comprehensive_goal.py" prepare --manifest <goal.json>
+python "$env:USERPROFILE\.codex\skills\chatgpt-pro-plan-handoff\scripts\run_comprehensive_goal.py" run --manifest <goal.json>
+python "$env:USERPROFILE\.codex\skills\chatgpt-pro-plan-handoff\scripts\run_comprehensive_goal.py" resume --manifest <goal.json>
+python "$env:USERPROFILE\.codex\skills\chatgpt-pro-plan-handoff\scripts\run_comprehensive_goal.py" status --manifest <goal.json>
+```
+
 ## Run
 
 ```powershell
