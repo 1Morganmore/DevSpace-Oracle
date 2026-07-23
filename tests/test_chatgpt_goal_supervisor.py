@@ -13,6 +13,7 @@ BIN = ROOT / "bin"
 if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
+import chatgpt_goal_supervisor
 from chatgpt_goal_contract import GoalContractError, artifact_ref, file_sha256, load_json, validate_goal_cycle_result
 from chatgpt_goal_supervisor import GoalSupervisor, GoalSupervisorError
 
@@ -285,3 +286,24 @@ def test_repair_result_without_release_invariants_stops_for_user(tmp_path: Path,
     second = GoalSupervisor(path, cycle_runner=runner, repair_runner=repair_runner)
     assert second.resume()["phase"] == "WAITING_USER"
     assert second.status()["boundary_code"] == "AUTOMATIC_REPAIR_NOT_ACCEPTED"
+
+
+def test_automatic_repair_uses_sol_medium(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    schema_path = write_json(tmp_path / "repair-schema.json", {"type": "object"})
+    result_path = tmp_path / "repair-result.json"
+    packet_path = write_json(tmp_path / "incident.json", {"fault": "bounded"})
+    captured: dict[str, object] = {}
+
+    def command_runner(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        write_json(result_path, {"status": "COMPLETE"})
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(chatgpt_goal_supervisor, "REPAIR_RESULT_SCHEMA_PATHS", (schema_path,))
+    supervisor = GoalSupervisor(manifest(tmp_path), command_runner=command_runner)
+    assert supervisor._run_codex_repair(packet_path, ROOT, result_path) == {"status": "COMPLETE"}
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    assert argv[argv.index("-m") + 1] == "gpt-5.6-sol"
+    assert 'model_reasoning_effort="medium"' in argv

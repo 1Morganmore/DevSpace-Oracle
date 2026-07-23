@@ -573,6 +573,8 @@ class GoalSupervisor:
         write_immutable_bytes(prompt_path, strict_utf8_bytes(prompt, field="repair-prompt", max_bytes=32000))
         argv = [
             "codex", "exec", "--ephemeral", "--color", "never",
+            "-m", "gpt-5.6-sol",
+            "-c", 'model_reasoning_effort="medium"',
             "--output-schema", str(schema_path), "-o", str(result_path),
             "-C", str(repo_root), "-s", "danger-full-access",
             "-c", 'approval_policy="never"', "-",
