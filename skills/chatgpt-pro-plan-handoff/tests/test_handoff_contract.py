@@ -104,6 +104,15 @@ def test_agbrowse_rendered_json_code_block_rejects_trailing_text():
         parse_final_envelope(rendered)
 
 
+def test_agbrowse_rendered_json_accepts_only_known_korean_ui_footer():
+    rendered = (
+        "JSON\n"
+        + json.dumps(plan_payload())
+        + "\nChatGPT는 실수할 수 있습니다. 워크스페이스 데이터는 모델 학습에 사용되지 않습니다.\n\n높음\n"
+    )
+    assert parse_final_envelope(rendered) == plan_payload()
+
+
 def test_unlabeled_raw_json_is_not_accepted_as_rendered_code_block():
     with pytest.raises(ContractError, match="FINAL_ENVELOPE_MISSING"):
         parse_final_envelope(json.dumps(plan_payload()))

@@ -19,6 +19,12 @@ ORCHESTRATOR_RESULT_V2_SCHEMA = "codex.chatgpt.orchestrator-result/v2"
 
 _FINAL_JSON_BLOCK = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
 _RENDERED_JSON_PREFIX = re.compile(r"\AJSON[ \t]*\r?\n")
+# The ChatGPT Korean UI appends this fixed non-model footer after an otherwise
+# complete rendered JSON code block.  Keep this deliberately locale- and
+# label-specific: arbitrary trailing prose must remain a hard contract error.
+_KOREAN_RENDERED_JSON_FOOTER = re.compile(
+    r"\A\s*ChatGPT는 실수할 수 있습니다\. 워크스페이스 데이터는 모델 학습에 사용되지 않습니다\.\s*높음\s*\Z"
+)
 
 
 class ContractError(ValueError):
@@ -72,10 +78,14 @@ def parse_final_envelope(text: str) -> dict[str, Any]:
         rendered = _RENDERED_JSON_PREFIX.match(stripped)
         if rendered is None:
             raise ContractError("FINAL_ENVELOPE_MISSING")
+        rendered_json = stripped[rendered.end() :]
         try:
-            payload = json.loads(stripped[rendered.end() :])
+            payload, end = json.JSONDecoder().raw_decode(rendered_json)
         except json.JSONDecodeError as exc:
             raise ContractError("FINAL_ENVELOPE_INVALID_JSON", str(exc)) from exc
+        trailing = rendered_json[end:]
+        if trailing.strip() and not _KOREAN_RENDERED_JSON_FOOTER.fullmatch(trailing):
+            raise ContractError("FINAL_ENVELOPE_INVALID_JSON", "unexpected trailing rendered JSON content")
         if not isinstance(payload, dict):
             raise ContractError("FINAL_ENVELOPE_NOT_OBJECT")
         return payload
