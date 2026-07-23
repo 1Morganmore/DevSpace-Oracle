@@ -1205,6 +1205,7 @@ def test_child_retry_replacement_binds_immutable_deep_research_evidence(tmp_path
     assert retired["pre_submit_retry_authority"].get("replacement_target_id") is None
     assert retired["pre_submit_retry_authority"]["retired_replacement_target_id"] == "TARGET-RESEARCH"
     assert retired["recovery_events"][-1]["kind"] == "stale-pre-submit-retry-replacement-retired"
+    assert retired["cleanup_evidence"]["evidence"]["sha256"] == stale_cleanup["evidence"]["sha256"]
     cleared = store.clear_parent_runtime_recovery(parent["run_dir"])
     assert cleared["recovery_required"] is False
 

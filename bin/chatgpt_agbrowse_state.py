@@ -3554,6 +3554,9 @@ class RunStore:
             authority.pop(key, None)
         record["pre_submit_retry_authority"] = authority
         write_json_atomic(state_file, record)
+        # The retirement event is bound to the activation failure's fresh
+        # absence proof, not to an older reconciliation cleanup record.
+        self.record_child_cleanup(run_dir, cleanup)
         return self.transition(
             run_dir, "PREFLIGHT_BLOCKED", block_code="STALE_PRE_SUBMIT_RETRY_REPLACEMENT_RETIRED",
             recovery_event={
