@@ -1229,6 +1229,22 @@ def test_child_retry_replacement_binds_immutable_deep_research_evidence(tmp_path
     assert backfilled["cleanup_evidence"]["evidence"]["sha256"] == stale_cleanup["evidence"]["sha256"]
     cleared = store.clear_parent_runtime_recovery(parent["run_dir"])
     assert cleared["recovery_required"] is False
+    store.transition(child["run_dir"], "PREFLIGHTED")
+    store.transition(child["run_dir"], "LEASED")
+    assert store.assert_child_send_available(child["run_dir"])["run_id"] == child["run_id"]
+    current = state.read_json(state_file)
+    for mutate in (
+        lambda value: value["pre_submit_retry_authority"].update({"consumed_at": "2026-07-23T00:00:00+00:00"}),
+        lambda value: value.update({"session_id": "unexpected-session"}),
+        lambda value: value["recovery_events"][-1].update({"cleanup_lifecycle_sha256": "0" * 64}),
+    ):
+        tampered = json.loads(json.dumps(current))
+        mutate(tampered)
+        state.write_json_atomic(state_file, tampered)
+        with pytest.raises(state.StateError) as unavailable:
+            store.assert_child_send_available(child["run_dir"])
+        assert unavailable.value.code in {"SEND_ALREADY_ATTEMPTED", "PRE_SUBMIT_RETRY_IDENTITY_CONFLICT", "PRE_SUBMIT_RETRY_PHASE_INVALID"}
+    state.write_json_atomic(state_file, current)
 
 
 def test_child_retry_research_replacement_rejects_tampering_without_authority_mutation(tmp_path: Path) -> None:

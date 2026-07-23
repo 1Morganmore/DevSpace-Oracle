@@ -3233,6 +3233,47 @@ class RunStore:
             raise StateError("PARENT_USER_STOP_REQUESTED", "child send is forbidden after immutable parent stop intent")
         claim_file = state_file.parent / "send.claim"
         authority = record.get("pre_submit_retry_authority")
+        retired_retry = False
+        if claim_file.exists() and isinstance(authority, dict):
+            events = record.get("recovery_events") if isinstance(record.get("recovery_events"), list) else []
+            latest = events[-1] if events and isinstance(events[-1], dict) else {}
+            target_id = str(record.get("current_target_id") or "")
+            cleanup = record.get("cleanup_evidence") if isinstance(record.get("cleanup_evidence"), dict) else {}
+            evidence = cleanup.get("evidence") if isinstance(cleanup.get("evidence"), dict) else {}
+            activation = next((event for event in reversed(events[:-1]) if isinstance(event, dict) and str(event.get("kind") or "") == "app-composer-target-activation-failed"), {})
+            try:
+                cleanup_path = Path(str(evidence.get("path") or "")).expanduser().resolve(strict=True)
+                cleanup_path.relative_to(state_file.parent)
+                cleanup_valid = cleanup_path.is_file() and not cleanup_path.is_symlink() and sha256_file(cleanup_path) == str(evidence.get("sha256") or "")
+                retired_evidence = Path(str(authority.get("retired_replacement_evidence_path") or "")).expanduser().resolve(strict=True)
+                retired_evidence.relative_to(state_file.parent)
+                retired_evidence_valid = retired_evidence.is_file() and not retired_evidence.is_symlink() and sha256_file(retired_evidence) == str(authority.get("retired_replacement_evidence_sha256") or "")
+            except (OSError, RuntimeError, ValueError):
+                cleanup_valid = retired_evidence_valid = False
+            retired_retry = bool(
+                str(record.get("phase") or "") == "LEASED"
+                and int(record.get("send_attempt_count") or 0) == 1
+                and not record.get("session_id") and not record.get("conversation_url")
+                and record.get("submission_receipt") is None and record.get("result") is None
+                and authority.get("eligible") is True and authority.get("consumed_at") is None
+                and not authority.get("replacement_target_id")
+                and str(authority.get("retired_replacement_target_id") or "") == target_id
+                and str(authority.get("run_id") or "") == str(record.get("run_id") or "")
+                and str(authority.get("parent_run_id") or "") == str(record.get("parent_run_id") or "")
+                and retired_evidence_valid
+                and str(latest.get("kind") or "") == "stale-pre-submit-retry-replacement-retired"
+                and str(latest.get("target_id") or "") == target_id
+                and str(latest.get("send_claim_sha256") or "") == str(authority.get("claim_sha256") or "")
+                and str(latest.get("cleanup_lifecycle_sha256") or "") == str(evidence.get("sha256") or "")
+                and cleanup.get("ok") is True and str(cleanup.get("target_id") or "") == target_id
+                and cleanup_valid
+                and isinstance(activation.get("cleanup"), dict)
+                and str(activation["cleanup"].get("target_id") or "") == target_id
+                and activation["cleanup"].get("ok") is True
+            )
+            if retired_retry:
+                candidate = self.pre_submit_retry_candidate(run_dir)
+                retired_retry = str(authority.get("claim_sha256") or "") == str(candidate.get("claim_sha256") or "")
         if claim_file.exists() and isinstance(authority, dict):
             candidate = self.pre_submit_retry_candidate(run_dir)
             if (
@@ -3259,6 +3300,8 @@ class RunStore:
                 and int(record.get("owned_open_tabs") or 0) == 0
             ):
                 return record
+        if retired_retry:
+            return record
         if claim_file.exists() or int(record.get("send_attempt_count") or 0) >= int(record.get("send_limit") or 1):
             raise StateError(
                 "SEND_ALREADY_ATTEMPTED",
