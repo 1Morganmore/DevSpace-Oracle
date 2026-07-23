@@ -2089,6 +2089,12 @@ class Bridge:
             helper_values = [value for value in (wrapper.get("activeCommand"), session.get("activeCommand")) if value not in (None, {})]
             session_status = str(session.get("status") or "").casefold()
             last_streaming_state = session.get("lastStreamingState")
+            session_virtual_url = bool(
+                re.fullmatch(
+                    r"https://chatgpt\.com/c/WEB:[0-9A-Fa-f-]{16,}(?:[?#].*)?",
+                    session_url,
+                )
+            )
             streaming_observed = bool(
                 last_streaming_state is True
                 or str(last_streaming_state).casefold() in {"true", "streaming", "active"}
@@ -2120,9 +2126,9 @@ class Bridge:
                 and session_status == "sent"
                 and not streaming_observed
                 and survivor
-                and survivor != stored_target
-                and canonical(session_url)
-                and canonical(session_url) != canonical(stored_url)
+                and (survivor != stored_target or session_virtual_url)
+                and (canonical(session_url) or session_virtual_url)
+                and (session_virtual_url or canonical(session_url) != canonical(stored_url))
                 and not stored_live
                 and not matching_url
                 and len(matching_target) <= 1
@@ -2142,6 +2148,7 @@ class Bridge:
                 "stale_sent_session_valid": stale_sent_session_valid,
                 "survivor_target_id": survivor,
                 "session_url": session_url,
+                "session_virtual_url": session_virtual_url,
                 "last_streaming_state": last_streaming_state,
                 "status": session_status or None,
                 "completed_at": session.get("completedAt") or session.get("completed_at"),
@@ -2152,7 +2159,17 @@ class Bridge:
             }
 
         first = proof_round(1)
-        drift_observed = bool(first["stored_target_absent"] and first["survivor_target_id"] and first["survivor_target_id"] != stored_target)
+        drift_observed = bool(
+            first["stored_target_absent"]
+            and first["survivor_target_id"]
+            and (
+                first["survivor_target_id"] != stored_target
+                or (
+                    first["stale_sent_session_valid"]
+                    and first["session_virtual_url"]
+                )
+            )
+        )
         if not drift_observed:
             return None
         second = proof_round(2)
@@ -2162,8 +2179,16 @@ class Bridge:
         stale_sent_session_mode = bool(
             first["stale_sent_session_valid"] and second["stale_sent_session_valid"]
         )
+        same_target_virtual_mode = bool(
+            stale_sent_session_mode
+            and survivor_id == stored_target
+            and first["session_virtual_url"]
+            and second["session_virtual_url"]
+        )
         stable_session_url = (
-            canonical(second.get("session_url")) == canonical(first.get("session_url"))
+            str(second.get("session_url") or "") == str(first.get("session_url") or "")
+            if same_target_virtual_mode
+            else canonical(second.get("session_url")) == canonical(first.get("session_url"))
             if stale_sent_session_mode
             else canonical(second.get("session_url")) == canonical(stored_url)
         )
@@ -2174,7 +2199,10 @@ class Bridge:
             or not stable_session_url
             or second.get("status") != first.get("status")
             or stored_target not in candidate["historical_owned_target_ids"]
-            or survivor_id in candidate["historical_owned_target_ids"]
+            or (
+                survivor_id in candidate["historical_owned_target_ids"]
+                and not same_target_virtual_mode
+            )
             or self.store.user_stop_target_drift_candidate(run_dir) != candidate
         ):
             raise BridgeError("USER_STOP_TARGET_DRIFT_UNPROVEN", "target drift is not stable and unowned; no mutation authorized", {"commands": commands})
@@ -2228,8 +2256,8 @@ class Bridge:
                         "classification": "unowned-or-foreign-protected",
                     }
                 }
-                if live_survivor_mode or stale_sent_session_mode
-                else {"reported_stale_target": {"target_id": survivor_id, "conversation_url": stored_url, "ownership_adopted": False, "close_authorized": False, "tab_closed": False, "proven_absent": True, "classification": "unowned-reported-stale-target-absent"}}
+                if live_survivor_mode or (stale_sent_session_mode and not same_target_virtual_mode)
+                else {"reported_stale_target": {"target_id": survivor_id, "conversation_url": first["session_url"] if same_target_virtual_mode else stored_url, "ownership_adopted": False, "close_authorized": False, "tab_closed": False, "proven_absent": True, "classification": "owned-reported-stale-target-absent" if same_target_virtual_mode else "unowned-reported-stale-target-absent"}}
             ),
             "submission_outcome": "unknown",
             "provider_terminal_asserted": False,
