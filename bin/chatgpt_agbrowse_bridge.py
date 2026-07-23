@@ -2087,11 +2087,17 @@ class Bridge:
             matching_url = [row for row in tabs or [] if isinstance(row, dict) and canonical(row.get("url")) == canonical(stored_url)]
             stored_live = [row for row in tabs or [] if isinstance(row, dict) and str(row.get("targetId") or "") == stored_target]
             helper_values = [value for value in (wrapper.get("activeCommand"), session.get("activeCommand")) if value not in (None, {})]
+            session_status = str(session.get("status") or "").casefold()
+            last_streaming_state = session.get("lastStreamingState")
+            streaming_observed = bool(
+                last_streaming_state is True
+                or str(last_streaming_state).casefold() in {"true", "streaming", "active"}
+            )
             core_valid = bool(
                 tabs_completed.returncode == 0 and session_completed.returncode == 0
                 and isinstance(tabs, list) and all(isinstance(row, dict) for row in tabs)
                 and str(session.get("sessionId") or session.get("session_id") or "") == session_id
-                and str(session.get("status") or "").casefold() == "complete"
+                and session_status == "complete"
                 and bool(session.get("completedAt") or session.get("completed_at"))
                 and bool(str(session.get("answer") or "").strip())
                 and survivor and survivor != stored_target
@@ -2105,14 +2111,39 @@ class Bridge:
                 and canonical(matching_target[0].get("url")) == canonical(stored_url)
             )
             no_live_target_valid = bool(core_valid and not matching_target and not matching_url)
+            stale_sent_session_valid = bool(
+                tabs_completed.returncode == 0
+                and session_completed.returncode == 0
+                and isinstance(tabs, list)
+                and all(isinstance(row, dict) for row in tabs)
+                and str(session.get("sessionId") or session.get("session_id") or "") == session_id
+                and session_status == "sent"
+                and not streaming_observed
+                and survivor
+                and survivor != stored_target
+                and canonical(session_url)
+                and canonical(session_url) != canonical(stored_url)
+                and not stored_live
+                and not matching_url
+                and len(matching_target) <= 1
+                and (
+                    not matching_target
+                    or (
+                        str(matching_target[0].get("type") or "") == "page"
+                        and canonical(matching_target[0].get("url")) == canonical(session_url)
+                    )
+                )
+                and not helper_values
+            )
             return {
-                "valid": bool(live_survivor_valid or no_live_target_valid),
+                "valid": bool(live_survivor_valid or no_live_target_valid or stale_sent_session_valid),
                 "live_survivor_valid": live_survivor_valid,
                 "no_live_target_valid": no_live_target_valid,
+                "stale_sent_session_valid": stale_sent_session_valid,
                 "survivor_target_id": survivor,
                 "session_url": session_url,
-                "last_streaming_state": session.get("lastStreamingState"),
-                "status": session.get("status"),
+                "last_streaming_state": last_streaming_state,
+                "status": session_status or None,
                 "completed_at": session.get("completedAt") or session.get("completed_at"),
                 "stored_target_absent": not stored_live,
                 "helper_values": sanitize_evidence(helper_values),
@@ -2128,11 +2159,20 @@ class Bridge:
         survivor_id = str(first.get("survivor_target_id") or "")
         live_survivor_mode = bool(first["live_survivor_valid"] and second["live_survivor_valid"])
         no_live_target_mode = bool(first["no_live_target_valid"] and second["no_live_target_valid"])
+        stale_sent_session_mode = bool(
+            first["stale_sent_session_valid"] and second["stale_sent_session_valid"]
+        )
+        stable_session_url = (
+            canonical(second.get("session_url")) == canonical(first.get("session_url"))
+            if stale_sent_session_mode
+            else canonical(second.get("session_url")) == canonical(stored_url)
+        )
         if (
             not first["valid"] or not second["valid"]
-            or not (live_survivor_mode or no_live_target_mode)
+            or not (live_survivor_mode or no_live_target_mode or stale_sent_session_mode)
             or second.get("survivor_target_id") != survivor_id
-            or canonical(second.get("session_url")) != canonical(stored_url)
+            or not stable_session_url
+            or second.get("status") != first.get("status")
             or stored_target not in candidate["historical_owned_target_ids"]
             or survivor_id in candidate["historical_owned_target_ids"]
             or self.store.user_stop_target_drift_candidate(run_dir) != candidate
@@ -2143,7 +2183,11 @@ class Bridge:
             "decision": (
                 "abandon-without-close"
                 if live_survivor_mode
-                else "abandon-without-close-no-live-target"
+                else (
+                    "abandon-without-close-no-live-target"
+                    if no_live_target_mode
+                    else "abandon-without-close-stale-sent-session"
+                )
             ),
             "child_identity": candidate["child_identity"],
             "parent_identity": candidate["parent_identity"],
@@ -2172,8 +2216,19 @@ class Bridge:
             ),
             "historical_target_absent": True,
             **(
-                {"protected_survivor": {"target_id": survivor_id, "conversation_url": stored_url, "ownership_adopted": False, "close_authorized": False, "tab_closed": False, "classification": "unowned-or-foreign-protected"}}
-                if live_survivor_mode
+                {
+                    "protected_survivor": {
+                        "target_id": survivor_id,
+                        "conversation_url": (
+                            first["session_url"] if stale_sent_session_mode else stored_url
+                        ),
+                        "ownership_adopted": False,
+                        "close_authorized": False,
+                        "tab_closed": False,
+                        "classification": "unowned-or-foreign-protected",
+                    }
+                }
+                if live_survivor_mode or stale_sent_session_mode
                 else {"reported_stale_target": {"target_id": survivor_id, "conversation_url": stored_url, "ownership_adopted": False, "close_authorized": False, "tab_closed": False, "proven_absent": True, "classification": "unowned-reported-stale-target-absent"}}
             ),
             "submission_outcome": "unknown",

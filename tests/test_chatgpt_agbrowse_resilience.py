@@ -1474,3 +1474,225 @@ def test_old_app_cleanup_requires_candidate_commit_for_same_root() -> None:
 
     assert failure.value.code == "APP_RETIRE_OWNERSHIP_UNPROVEN"
     assert connector.deleted == []
+
+
+def test_parent_wide_stop_settles_stable_stale_sent_session_without_touching_survivor(
+    tmp_path: Path,
+) -> None:
+    bridge = load(
+        "chatgpt_agbrowse_bridge_stale_sent_parent_stop_test",
+        "chatgpt_agbrowse_bridge.py",
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    state_file = run_dir / "run.json"
+    state_file.write_text("{}", encoding="utf-8")
+    stored_url = "https://chatgpt.com/c/exact-owned"
+    survivor_url = "https://chatgpt.com/c/foreign-survivor"
+    candidate = {
+        "child_identity": {"run_id": "child"},
+        "parent_identity": {"run_id": "parent"},
+        "lock_identity": {"run_id": "parent", "phase": "USER_STOP_REQUESTED"},
+        "authorization": {
+            "schema": "codex.chatgpt.user-stop-authorization/v1",
+            "explicit_user_request": True,
+        },
+        "authorization_sha256": "a" * 64,
+        "stop_epoch_nonce": "stop-epoch",
+        "parent_stop_scope": {
+            "schema": "codex.chatgpt.parent-wide-user-stop/v1",
+            "sha256": "b" * 64,
+        },
+        "recorded": {
+            "session_id": "S-STALE",
+            "target_id": "T-OWNED",
+            "conversation_url": stored_url,
+        },
+        "historical_owned_target_ids": ["T-OWNED"],
+        "preimages": {},
+    }
+
+    class Store:
+        finalized: list[dict] = []
+
+        @staticmethod
+        def _owner_observation(record):
+            return {"same_process": False, "observed": {"alive": False}}
+
+        @staticmethod
+        def user_stop_target_drift_candidate(_run_dir):
+            return candidate
+
+        @classmethod
+        def finalize_user_stop_target_drift(cls, _run_dir, *, abandonment):
+            cls.finalized.append(abandonment)
+            return {"phase": "ABANDONED_UNCERTAIN", "run_id": "child"}
+
+    calls: list[list[str]] = []
+
+    def runner(argv, env, timeout):
+        calls.append(argv)
+        if argv[1:] == ["tabs", "--json"]:
+            return completed(
+                argv,
+                stdout=json.dumps(
+                    [{"targetId": "T-SURVIVOR", "type": "page", "url": survivor_url}]
+                ),
+            )
+        if argv[1:5] == ["web-ai", "sessions", "show", "S-STALE"]:
+            return completed(
+                argv,
+                stdout=json.dumps(
+                    {
+                        "session": {
+                            "sessionId": "S-STALE",
+                            "targetId": "T-SURVIVOR",
+                            "conversationUrl": survivor_url,
+                            "status": "sent",
+                            "lastStreamingState": False,
+                        }
+                    }
+                ),
+            )
+        raise AssertionError(argv)
+
+    runtime = object.__new__(bridge.Bridge)
+    runtime.store = Store()
+    runtime.runner = runner
+    runtime._finish_target_drift_parent = lambda _state_file, finalized: finalized
+    record = {
+        "record_kind": "child",
+        "run_id": "child",
+        "session_id": "S-STALE",
+        "current_target_id": "T-OWNED",
+        "conversation_url": stored_url,
+        "user_stop": {},
+        "agbrowse": {"executable": "agbrowse"},
+    }
+
+    settled = runtime._try_user_stop_target_drift(str(run_dir), state_file, record)
+
+    assert settled["phase"] == "ABANDONED_UNCERTAIN"
+    assert [command[1] for command in calls] == ["tabs", "web-ai", "tabs", "web-ai"]
+    assert all("stop" not in command and "tab-close" not in command for command in calls)
+    descriptor = Store.finalized[0]
+    payload = json.loads(Path(descriptor["path"]).read_text(encoding="utf-8"))
+    assert payload["decision"] == "abandon-without-close-stale-sent-session"
+    assert len(payload["proof_rounds"]) == 2
+    assert all(round_["stale_sent_session_valid"] for round_ in payload["proof_rounds"])
+    assert payload["protected_survivor"] == {
+        "target_id": "T-SURVIVOR",
+        "conversation_url": survivor_url,
+        "ownership_adopted": False,
+        "close_authorized": False,
+        "tab_closed": False,
+        "classification": "unowned-or-foreign-protected",
+    }
+
+
+@pytest.mark.parametrize(
+    "protection",
+    ["streaming", "canonical-live", "helper", "owned-survivor", "unstable-rounds"],
+)
+def test_parent_wide_stale_sent_stop_preserves_active_owned_and_unstable_protections(
+    tmp_path: Path,
+    protection: str,
+) -> None:
+    bridge = load(
+        f"chatgpt_agbrowse_bridge_stale_sent_protection_{protection}",
+        "chatgpt_agbrowse_bridge.py",
+    )
+    run_dir = tmp_path / protection
+    run_dir.mkdir()
+    state_file = run_dir / "run.json"
+    state_file.write_text("{}", encoding="utf-8")
+    stored_url = "https://chatgpt.com/c/exact-owned"
+    survivor_url = "https://chatgpt.com/c/foreign-survivor"
+    candidate = {
+        "child_identity": {"run_id": "child"},
+        "parent_identity": {"run_id": "parent"},
+        "lock_identity": {"run_id": "parent", "phase": "USER_STOP_REQUESTED"},
+        "authorization": {"explicit_user_request": True},
+        "authorization_sha256": "a" * 64,
+        "stop_epoch_nonce": "stop-epoch",
+        "parent_stop_scope": {"schema": "codex.chatgpt.parent-wide-user-stop/v1"},
+        "recorded": {
+            "session_id": "S-STALE",
+            "target_id": "T-OWNED",
+            "conversation_url": stored_url,
+        },
+        "historical_owned_target_ids": (
+            ["T-OWNED", "T-SURVIVOR"] if protection == "owned-survivor" else ["T-OWNED"]
+        ),
+        "preimages": {},
+    }
+
+    class Store:
+        finalized = False
+
+        @staticmethod
+        def _owner_observation(record):
+            return {"same_process": False, "observed": {"alive": False}}
+
+        @staticmethod
+        def user_stop_target_drift_candidate(_run_dir):
+            return candidate
+
+        @classmethod
+        def finalize_user_stop_target_drift(cls, _run_dir, *, abandonment):
+            cls.finalized = True
+            raise AssertionError("protected run must not settle")
+
+    session_round = 0
+
+    def runner(argv, env, timeout):
+        nonlocal session_round
+        if argv[1:] == ["tabs", "--json"]:
+            rows = [{"targetId": "T-SURVIVOR", "type": "page", "url": survivor_url}]
+            if protection == "canonical-live":
+                rows.append({"targetId": "T-OWNED", "type": "page", "url": stored_url})
+            return completed(argv, stdout=json.dumps(rows))
+        if argv[1:5] == ["web-ai", "sessions", "show", "S-STALE"]:
+            session_round += 1
+            target_id = (
+                "T-SURVIVOR-CHANGED"
+                if protection == "unstable-rounds" and session_round == 2
+                else "T-SURVIVOR"
+            )
+            payload = {
+                "session": {
+                    "sessionId": "S-STALE",
+                    "targetId": target_id,
+                    "conversationUrl": survivor_url,
+                    "status": "sent",
+                    "lastStreamingState": protection == "streaming",
+                }
+            }
+            if protection == "helper":
+                payload["activeCommand"] = {
+                    "sessionId": "S-STALE",
+                    "targetId": "T-SURVIVOR",
+                }
+            return completed(argv, stdout=json.dumps(payload))
+        raise AssertionError(argv)
+
+    runtime = object.__new__(bridge.Bridge)
+    runtime.store = Store()
+    runtime.runner = runner
+    record = {
+        "record_kind": "child",
+        "run_id": "child",
+        "session_id": "S-STALE",
+        "current_target_id": "T-OWNED",
+        "conversation_url": stored_url,
+        "user_stop": {},
+        "agbrowse": {"executable": "agbrowse"},
+    }
+
+    if protection == "canonical-live":
+        assert runtime._try_user_stop_target_drift(str(run_dir), state_file, record) is None
+    else:
+        with pytest.raises(bridge.BridgeError) as failure:
+            runtime._try_user_stop_target_drift(str(run_dir), state_file, record)
+        assert failure.value.code == "USER_STOP_TARGET_DRIFT_UNPROVEN"
+    assert Store.finalized is False
