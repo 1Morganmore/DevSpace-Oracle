@@ -2460,9 +2460,47 @@ class RunStore:
                 and stale.get("classification") == "unowned-reported-stale-target-absent"
                 and not survivor
             )
+            proof_rounds = evidence.get("proof_rounds")
+            same_target_stale_sent_valid = bool(
+                decision == "abandon-without-close-stale-sent-session"
+                and isinstance(proof_rounds, list)
+                and len(proof_rounds) == 2
+                and stale_target_id == str(candidate["recorded"].get("target_id") or "")
+                and stale_target_id in historical
+                and required_absent == historical
+                and absence_union == required_absent
+                and stale.get("ownership_adopted") is False
+                and stale.get("close_authorized") is False
+                and stale.get("tab_closed") is False
+                and stale.get("proven_absent") is True
+                and stale.get("classification") == "owned-reported-stale-target-absent"
+                and not survivor
+                and all(
+                    isinstance(round_, dict)
+                    and round_.get("valid") is True
+                    and round_.get("stale_sent_session_valid") is True
+                    and round_.get("session_virtual_url") is True
+                    and round_.get("stored_target_absent") is True
+                    and round_.get("status") == "sent"
+                    and str(round_.get("survivor_target_id") or "") == stale_target_id
+                    and not round_.get("helper_values")
+                    and re.fullmatch(
+                        r"https://chatgpt\.com/c/WEB:[0-9A-Fa-f-]{16,}(?:[?#].*)?",
+                        str(round_.get("session_url") or ""),
+                    )
+                    for round_ in proof_rounds
+                )
+                and str(proof_rounds[0].get("session_url") or "")
+                == str(proof_rounds[1].get("session_url") or "")
+                == str(stale.get("conversation_url") or "")
+            )
             if (
                 evidence.get("schema") != "codex.chatgpt.user-stop-target-drift-abandonment/v1"
-                or not (live_survivor_valid or no_live_target_valid)
+                or not (
+                    live_survivor_valid
+                    or no_live_target_valid
+                    or same_target_stale_sent_valid
+                )
                 or evidence.get("submission_outcome") != "unknown"
                 or evidence.get("provider_terminal_asserted") is not False
                 or evidence.get("provider_mutation_may_have_occurred") is not True

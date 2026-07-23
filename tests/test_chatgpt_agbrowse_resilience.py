@@ -1804,6 +1804,162 @@ def test_parent_wide_stop_settles_same_target_stable_virtual_session_without_ado
     }
 
 
+def test_parent_wide_same_target_virtual_descriptor_finalizes_with_real_store(
+    tmp_path: Path,
+) -> None:
+    bridge = load(
+        "chatgpt_agbrowse_bridge_same_target_virtual_real_store_test",
+        "chatgpt_agbrowse_bridge.py",
+    )
+    state_root = tmp_path / "state"
+    project = tmp_path / "project"
+    project.mkdir()
+    workflow_id = "wf-same-target-virtual"
+    parent_manifest = tmp_path / "parent.json"
+    parent_manifest.write_text(
+        json.dumps(
+            {
+                "schema": "codex.chatgpt.web-multi/v1",
+                "workflow_id": workflow_id,
+                "project_root": str(project),
+                "question": "parent question",
+            }
+        ),
+        encoding="utf-8",
+    )
+    prompt = tmp_path / "child-prompt.txt"
+    prompt.write_text("Return the requested stage envelope.", encoding="utf-8")
+    child_manifest = tmp_path / "child.json"
+    child_manifest.write_text(
+        json.dumps(
+            {
+                "project_root": str(project),
+                "question": PROMPT_FILE_HANDOFF,
+                "mode_label": "GPT-5.6",
+                "mode_variant": "Very High",
+                "app_policy": "required",
+                "chatgpt_app_name": "CodexPro-Test",
+                "prompt_transport": "file",
+                "prompt_file": str(prompt),
+                "prompt_file_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest(),
+                "files": [str(prompt)],
+                "workflow_correlation": {
+                    "workflow_id": workflow_id,
+                    "stage": "solver-0",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = bridge.STATE.RunStore(state_root)
+    parent = store.create_parent_workflow(
+        project_root=project,
+        manifest_path=parent_manifest,
+        workflow_id=workflow_id,
+        agbrowse_contract={"version": "0.1.18", "executable": "agbrowse"},
+        owner_pid=2_147_483_647,
+    )
+    child = store.create_child_run(
+        parent_run_dir=parent["run_dir"],
+        manifest_path=child_manifest,
+        agbrowse_contract={"version": "0.1.18", "executable": "agbrowse"},
+        role="Solver",
+        lane=0,
+        iteration=0,
+        stage_id="solver-0",
+        owner_pid=2_147_483_647,
+    )
+    stored_target = "T-OWNED"
+    session_id = "S-STALE"
+    stored_url = "https://chatgpt.com/c/6a61c30f-4824-83ee-a1e2-6fe245816825"
+    virtual_url = "https://chatgpt.com/c/WEB:601d79eb-fee9-4ef4-b4e7-bf965dd3c4f6"
+    store.transition(child["run_dir"], "PREFLIGHTED")
+    store.transition(child["run_dir"], "LEASED", target_id=stored_target)
+    child_state_file = Path(child["run_dir"]) / "run.json"
+    sent = bridge.STATE.read_json(child_state_file)
+    sent.update(
+        {
+            "phase": "SUBMISSION_UNCERTAIN",
+            "session_id": session_id,
+            "conversation_url": stored_url,
+        }
+    )
+    bridge.STATE.write_json_atomic(child_state_file, sent)
+    store.begin_user_stop(
+        child["run_dir"],
+        authorization={
+            "schema": "codex.chatgpt.user-stop-authorization/v1",
+            "explicit_user_request": True,
+            "mutation_may_have_occurred": True,
+            "duplicate_risk_acknowledged": True,
+            "run_id": child["run_id"],
+            "project_root": str(project.resolve()),
+            "session_id": session_id,
+            "target_id": stored_target,
+            "conversation_url": stored_url,
+            "reason": "confirm explicit user stop",
+        },
+    )
+    store.establish_parent_wide_user_stop_scope(
+        parent["run_dir"],
+        manager_authorization={
+            "explicit_user_request": True,
+            "scope_kind": "exact-parent-and-listed-children",
+            "parent_run_id": parent["run_id"],
+            "target_child_run_id": child["run_id"],
+            "reason": "confirm explicit user stop",
+        },
+        target_child_run_id=child["run_id"],
+    )
+
+    calls: list[list[str]] = []
+
+    def runner(argv, env, timeout):
+        calls.append(argv)
+        if argv[1:] == ["tabs", "--json"]:
+            return completed(argv, stdout="[]")
+        if argv[1:5] == ["web-ai", "sessions", "show", session_id]:
+            return completed(
+                argv,
+                stdout=json.dumps(
+                    {
+                        "session": {
+                            "sessionId": session_id,
+                            "targetId": stored_target,
+                            "conversationUrl": virtual_url,
+                            "status": "sent",
+                            "lastStreamingState": "unknown",
+                        }
+                    }
+                ),
+            )
+        raise AssertionError(argv)
+
+    runtime = bridge.Bridge(
+        state_root=state_root,
+        runner=runner,
+        headed_runtime_preflight=False,
+    )
+    runtime._finish_target_drift_parent = lambda _state_file, finalized: finalized
+    _, stopped = runtime.store.load(child["run_dir"])
+
+    settled = runtime._try_user_stop_target_drift(
+        child["run_dir"], child_state_file, stopped
+    )
+
+    assert settled["phase"] == "ABANDONED_UNCERTAIN"
+    assert settled["user_stop"]["status"] == "confirmed-target-drift-abandoned-uncertain"
+    assert settled["owned_tab_state"] == "historical-and-reported-targets-absent"
+    assert [command[1] for command in calls] == ["tabs", "web-ai", "tabs", "web-ai"]
+    assert all("stop" not in command and "tab-close" not in command for command in calls)
+    descriptor = bridge.STATE.read_json(
+        Path(child["run_dir"]) / "user-stop" / "target-drift-abandonment.json"
+    )
+    assert descriptor["decision"] == "abandon-without-close-stale-sent-session"
+    assert descriptor["preimages"]["child"]["sha256"]
+    assert all(round_["stale_sent_session_valid"] for round_ in descriptor["proof_rounds"])
+
+
 @pytest.mark.parametrize(
     "protection",
     ["streaming", "canonical-live", "helper", "owned-live", "unstable-virtual-url"],
