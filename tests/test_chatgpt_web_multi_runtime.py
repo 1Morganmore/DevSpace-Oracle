@@ -664,6 +664,53 @@ def test_parent_recovery_cleans_complete_child_missing_cleanup_evidence(tmp_path
     assert bridge.cleanup_calls == [(child["run_dir"], True)]
 
 
+def test_parent_recovery_reconciles_only_exact_stale_pre_submit_retry_target(tmp_path: Path) -> None:
+    manifest = make_manifest(tmp_path, solver_count=2)
+    runtime = RUNTIME.WebMultiRuntime(manifest, state_root=tmp_path / "state")
+    evidence_map = runtime._source_evidence_map()
+    runtime.workflow_dir.mkdir(parents=True, exist_ok=True)
+    RUNTIME.write_immutable_json(runtime.evidence_map_path, evidence_map)
+    runtime.parent = runtime.store.create_parent_workflow(
+        project_root=runtime.manifest["project_root"], manifest_path=runtime.manifest_path,
+        workflow_id=runtime.workflow_id, agbrowse_contract=runtime.contract,
+    )
+    spec = RUNTIME.StageSpec("solver-stale", "Solver", 0, 0, runtime.manifest["question"], tuple())
+    artifacts = runtime._stage_artifacts(spec, runtime.parent, evidence_map)
+    child = runtime.store.create_child_run(
+        parent_run_dir=runtime.parent["run_dir"], manifest_path=artifacts["manifest_path"],
+        agbrowse_contract=runtime.contract, role=spec.role, lane=spec.lane,
+        iteration=spec.iteration, stage_id=spec.stage_id,
+    )
+    runtime.store.transition(child["run_dir"], "PREFLIGHTED")
+    runtime.store.transition(child["run_dir"], "LEASED", target_id="TARGET-STALE")
+    state_file = Path(child["run_dir"]) / "run.json"
+    record = json.loads(state_file.read_text(encoding="utf-8"))
+    record["pre_submit_retry_authority"] = {
+        "eligible": True, "consumed_at": None, "replacement_target_id": "TARGET-STALE",
+    }
+    state_file.write_text(json.dumps(record), encoding="utf-8")
+    runtime.parent = runtime.store.mark_parent_runtime_recovery(
+        runtime.parent["run_dir"], failure={"code": "interrupted-before-retry"},
+    )
+
+    class ReconcileOnlyBridge:
+        def __init__(self, store):
+            self.store = store
+            self.calls = []
+
+        def reconcile_stale_pre_submit_retry_target(self, run_dir):
+            self.calls.append(str(run_dir))
+            return self.store.transition(run_dir, "PREFLIGHT_BLOCKED", block_code="test-stale-target")
+
+    bridge = ReconcileOnlyBridge(runtime.store)
+    runtime.bridge_factory = lambda: bridge
+    runtime._recover_parent_children(runtime.parent)
+
+    _, latest = runtime.store.load(child["run_dir"])
+    assert latest["phase"] == "PREFLIGHT_BLOCKED"
+    assert bridge.calls == [child["run_dir"]]
+
+
 def test_actual_parallel_wave_shares_one_submission_barrier(tmp_path: Path) -> None:
     manifest = make_manifest(tmp_path, solver_count=2)
     runtime = RUNTIME.WebMultiRuntime(manifest, state_root=tmp_path / "state")

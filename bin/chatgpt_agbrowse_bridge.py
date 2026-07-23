@@ -4522,6 +4522,37 @@ class Bridge:
         self.store.record_child_cleanup(run_dir, cleanup)
         return self.store.authorize_child_pre_submit_retry(run_dir, cleanup)
 
+    def reconcile_stale_pre_submit_retry_target(self, run_dir: str) -> dict[str, Any]:
+        """Prove the already-authorized replacement composer is absent.
+
+        The state store performs the ownership and parent-recovery checks.  The
+        bridge only captures fresh exact-session and tab-lifecycle evidence for
+        the recorded replacement target; it does not open a replacement tab.
+        """
+        state_file, record = self.store.load(run_dir)
+        authority = record.get("pre_submit_retry_authority")
+        target_id = str(record.get("current_target_id") or "")
+        if not isinstance(authority, dict) or str(authority.get("replacement_target_id") or "") != target_id:
+            raise BridgeError("STALE_PRE_SUBMIT_AUTHORITY_INVALID", "recorded target is not an exact retry replacement")
+        manifest = _load_manifest(record)
+        executable = record_executable(record)
+        session_artifact = self._adjudicate_pre_submit_session_artifact(
+            run_dir=state_file.parent,
+            executable=executable,
+            manifest=manifest,
+            target_id=target_id,
+        )
+        lifecycle = self._tab_lifecycle(executable, manifest)
+        cleanup = lifecycle.close_pre_submit(
+            run_dir,
+            target_id=target_id,
+            reason="stale-pre-submit-retry-target-reconciliation",
+        )
+        return self.store.reconcile_stale_child_pre_submit_retry_target(
+            run_dir,
+            {**cleanup, "session_artifact": session_artifact},
+        )
+
     def _parent_owned_target_ids(self, record: Mapping[str, Any]) -> set[str]:
         parent_run_id = str(record.get("parent_run_id") or "")
         if not parent_run_id:

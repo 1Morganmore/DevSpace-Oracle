@@ -1167,6 +1167,24 @@ def test_child_retry_replacement_binds_immutable_deep_research_evidence(tmp_path
     assert authority["replacement_evidence_path"] == str(path.resolve())
     assert authority["replacement_evidence_sha256"] == state.sha256_file(path)
 
+    stale_cleanup_path = Path(child["run_dir"]) / "stale-replacement-lifecycle.json"
+    state.write_json_atomic(stale_cleanup_path, {"events": [{
+        "kind": "cleanup-already-absent", "target_id": "TARGET-RESEARCH", "state": "already-absent",
+    }]})
+    stale_cleanup = {"ok": True, "state": "already-absent", "target_id": "TARGET-RESEARCH", "evidence": {
+        "path": str(stale_cleanup_path), "sha256": state.sha256_file(stale_cleanup_path),
+    }}
+    with pytest.raises(state.StateError) as not_recovering:
+        store.reconcile_stale_child_pre_submit_retry_target(child["run_dir"], stale_cleanup)
+    assert not_recovering.value.code == "STALE_PRE_SUBMIT_PARENT_NOT_RECOVERING"
+
+    store.mark_parent_runtime_recovery(parent["run_dir"], failure={"code": "interrupted-before-retry"})
+    reconciled = store.reconcile_stale_child_pre_submit_retry_target(child["run_dir"], stale_cleanup)
+    assert reconciled["phase"] == "PREFLIGHT_BLOCKED"
+    assert reconciled["pre_submit_retry_authority"]["consumed_at"] is None
+    assert reconciled["cleanup_evidence"]["target_id"] == "TARGET-RESEARCH"
+    assert reconciled["recovery_events"][-1]["kind"] == "stale-pre-submit-retry-target-reconciled"
+
 
 def test_child_retry_research_replacement_rejects_tampering_without_authority_mutation(tmp_path: Path) -> None:
     # The full successful binding above covers persistence.  Here exercise the

@@ -3415,6 +3415,80 @@ class RunStore:
         write_json_atomic(state_file, record)
         return record
 
+    def reconcile_stale_child_pre_submit_retry_target(
+        self,
+        run_dir: str | os.PathLike[str],
+        cleanup: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Quarantine one absent retry composer before resuming its exact child.
+
+        This is deliberately narrower than general pre-submit cleanup: the
+        child must already carry an unconsumed, exact mutation-disallowed retry
+        authority, and the parent must be in its own active recovery window.
+        It never creates a target or a send claim.
+        """
+        state_file, record = self.load(run_dir)
+        if str(record.get("record_kind") or "") != "child":
+            raise StateError("CHILD_RECORD_REQUIRED", "stale pre-submit reconciliation requires a child run")
+        if str(record.get("phase") or "") != "LEASED":
+            raise StateError("STALE_PRE_SUBMIT_PHASE_INVALID", "stale pre-submit reconciliation requires LEASED")
+        _, lock = self._verify_lock(state_file, record)
+        parent_file = state_file.parent.parent / str(record.get("parent_run_id") or "") / "run.json"
+        try:
+            parent = read_json(parent_file)
+        except (OSError, StateError) as exc:
+            raise StateError("STALE_PRE_SUBMIT_PARENT_INVALID", "exact active parent record is required") from exc
+        if not (
+            str(parent.get("phase") or "") == "PARENT_ACTIVE"
+            and parent.get("recovery_required") is True
+            and str(lock.get("phase") or "") == "PARENT_ACTIVE"
+            and lock.get("recovery_required") is True
+            and str(parent.get("run_id") or "") == str(record.get("parent_run_id") or "")
+            and str(lock.get("run_id") or "") == str(record.get("parent_run_id") or "")
+        ):
+            raise StateError("STALE_PRE_SUBMIT_PARENT_NOT_RECOVERING", "parent is not in the exact active recovery window")
+        candidate = self.pre_submit_retry_candidate(run_dir)
+        authority = record.get("pre_submit_retry_authority")
+        target_id = str(record.get("current_target_id") or "")
+        if not (
+            isinstance(authority, dict)
+            and authority.get("eligible") is True
+            and authority.get("consumed_at") is None
+            and target_id
+            and str(authority.get("replacement_target_id") or "") == target_id
+            and str(authority.get("claim_sha256") or "") == str(candidate.get("claim_sha256") or "")
+        ):
+            raise StateError("STALE_PRE_SUBMIT_AUTHORITY_INVALID", "current target is not the exact unconsumed retry replacement")
+        lifecycle = cleanup.get("evidence") if isinstance(cleanup.get("evidence"), dict) else {}
+        lifecycle_path = Path(str(lifecycle.get("path") or ""))
+        try:
+            lifecycle_path = lifecycle_path.expanduser().resolve(strict=True)
+            lifecycle_path.relative_to(state_file.parent)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise StateError("STALE_PRE_SUBMIT_ABSENCE_UNPROVEN", "target absence lifecycle path is invalid") from exc
+        if not (
+            cleanup.get("ok") is True
+            and str(cleanup.get("state") or "") in {"closed-and-absent", "already-absent"}
+            and str(cleanup.get("target_id") or "") == target_id
+            and lifecycle_path.is_file()
+            and not lifecycle_path.is_symlink()
+            and sha256_file(lifecycle_path) == str(lifecycle.get("sha256") or "")
+        ):
+            raise StateError("STALE_PRE_SUBMIT_ABSENCE_UNPROVEN", "exact replacement target absence is required")
+        self.record_child_cleanup(run_dir, cleanup)
+        return self.transition(
+            run_dir,
+            "PREFLIGHT_BLOCKED",
+            block_code="STALE_PRE_SUBMIT_RETRY_TARGET_ABSENT",
+            recovery_event={
+                "kind": "stale-pre-submit-retry-target-reconciled",
+                "target_id": target_id,
+                "cleanup_state": str(cleanup.get("state") or ""),
+                "cleanup_lifecycle_sha256": sha256_file(lifecycle_path),
+                "send_claim_sha256": str(candidate.get("claim_sha256") or ""),
+            },
+        )
+
     def confirm_child_retry_replacement(
         self,
         run_dir: str | os.PathLike[str],

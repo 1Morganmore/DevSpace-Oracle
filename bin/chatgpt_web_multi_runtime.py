@@ -2436,6 +2436,23 @@ class WebMultiRuntime:
             phase = str(child.get("phase") or "")
             if phase in {"CREATED", "PREFLIGHTED", "LEASED"}:
                 child_dir = paths.runs_dir / str(child["run_id"])
+                authority = child.get("pre_submit_retry_authority")
+                stale_retry_target = bool(
+                    phase == "LEASED"
+                    and isinstance(authority, dict)
+                    and authority.get("eligible") is True
+                    and authority.get("consumed_at") is None
+                    and str(authority.get("replacement_target_id") or "")
+                    == str(child.get("current_target_id") or "")
+                    and str(child.get("current_target_id") or "")
+                )
+                if stale_retry_target and str(parent.get("phase") or "") == "PARENT_ACTIVE" and bool(parent.get("recovery_required")):
+                    bridge = self.bridge_factory()
+                    reconciled = bridge.reconcile_stale_pre_submit_retry_target(str(child_dir))
+                    if str(reconciled.get("phase") or "") == "PREFLIGHT_BLOCKED":
+                        continue
+                    unresolved.append({"run_id": child["run_id"], "phase": reconciled.get("phase")})
+                    continue
                 safe_zero_send = bool(
                     not (child_dir / "send.claim").exists()
                     and int(child.get("send_attempt_count") or 0) == 0
