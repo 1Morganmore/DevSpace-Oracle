@@ -1184,6 +1184,21 @@ def test_child_retry_replacement_binds_immutable_deep_research_evidence(tmp_path
     assert reconciled["pre_submit_retry_authority"]["consumed_at"] is None
     assert reconciled["cleanup_evidence"]["target_id"] == "TARGET-RESEARCH"
     assert reconciled["recovery_events"][-1]["kind"] == "stale-pre-submit-retry-target-reconciled"
+    state_file = Path(child["run_dir"]) / "run.json"
+    pristine = state.read_json(state_file)
+    for mutate in (
+        lambda value: value["recovery_events"][-1].update({"target_id": "FOREIGN-TARGET"}),
+        lambda value: value["pre_submit_retry_authority"].update({"consumed_at": "2026-07-23T00:00:00+00:00"}),
+    ):
+        tampered = json.loads(json.dumps(pristine))
+        mutate(tampered)
+        state.write_json_atomic(state_file, tampered)
+        with pytest.raises(state.StateError) as unsafe:
+            store.clear_parent_runtime_recovery(parent["run_dir"])
+        assert unsafe.value.code == "PARENT_RUNTIME_RECOVERY_PENDING"
+    state.write_json_atomic(state_file, pristine)
+    cleared = store.clear_parent_runtime_recovery(parent["run_dir"])
+    assert cleared["recovery_required"] is False
 
 
 def test_child_retry_research_replacement_rejects_tampering_without_authority_mutation(tmp_path: Path) -> None:

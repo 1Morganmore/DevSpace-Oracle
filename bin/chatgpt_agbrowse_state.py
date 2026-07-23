@@ -3280,7 +3280,7 @@ class RunStore:
         phase = str(record.get("phase") or "")
         existing_authority = record.get("pre_submit_retry_authority")
         authorized_pre_send = bool(
-            phase in {"PREFLIGHTED", "LEASED"}
+            phase in {"PREFLIGHTED", "LEASED", "PREFLIGHT_BLOCKED"}
             and isinstance(existing_authority, dict)
             and existing_authority.get("eligible") is True
             and existing_authority.get("consumed_at") is None
@@ -4672,6 +4672,78 @@ class RunStore:
                     "PARENT_RUNTIME_RECOVERY_PHASE_INVALID",
                     "runtime recovery can be cleared only on the exact active parent",
                 )
+
+            def exact_reconciled_pre_submit_retry(child_state: Path, child: dict[str, Any]) -> bool:
+                """Accept only the one-send retry state reconciled before recovery clear.
+
+                A normal PREFLIGHT_BLOCKED child remains zero-send only.  This
+                narrow exception preserves the immutable mutation-disallowed
+                claim and requires the fresh stale-target absence event created
+                by ``reconcile_stale_child_pre_submit_retry_target``.
+                """
+                try:
+                    candidate = self.pre_submit_retry_candidate(child_state.parent)
+                except StateError:
+                    return False
+                authority = child.get("pre_submit_retry_authority")
+                target_id = str(child.get("current_target_id") or "")
+                cleanup = child.get("cleanup_evidence") if isinstance(child.get("cleanup_evidence"), dict) else {}
+                evidence = cleanup.get("evidence") if isinstance(cleanup.get("evidence"), dict) else {}
+                events = child.get("recovery_events") if isinstance(child.get("recovery_events"), list) else []
+                latest = events[-1] if events and isinstance(events[-1], dict) else {}
+                lifecycle_path = Path(str(evidence.get("path") or ""))
+                try:
+                    lifecycle_path = lifecycle_path.expanduser().resolve(strict=True)
+                    lifecycle_path.relative_to(child_state.parent)
+                    lifecycle_valid = (
+                        lifecycle_path.is_file()
+                        and not lifecycle_path.is_symlink()
+                        and sha256_file(lifecycle_path) == str(evidence.get("sha256") or "")
+                        and sha256_file(lifecycle_path) == str(latest.get("cleanup_lifecycle_sha256") or "")
+                    )
+                except (OSError, RuntimeError, ValueError):
+                    lifecycle_valid = False
+                replacement_path = Path(str(authority.get("replacement_evidence_path") or "")) if isinstance(authority, dict) else Path()
+                try:
+                    replacement_valid = (
+                        replacement_path.is_file()
+                        and not replacement_path.is_symlink()
+                        and sha256_file(replacement_path) == str(authority.get("replacement_evidence_sha256") or "")
+                    )
+                except OSError:
+                    replacement_valid = False
+                return bool(
+                    str(child.get("phase") or "") == "PREFLIGHT_BLOCKED"
+                    and (child_state.parent / "send.claim").is_file()
+                    and int(child.get("send_attempt_count") or 0) == 1
+                    and not child.get("session_id")
+                    and not child.get("conversation_url")
+                    and child.get("submission_receipt") is None
+                    and child.get("result") is None
+                    and str(child.get("parent_run_id") or "") == str(record.get("run_id") or "")
+                    and str(child.get("parent_workflow_id") or "") == str(record.get("workflow_id") or "")
+                    and str(child.get("parent_lease_nonce") or "") == str(record.get("lease_nonce") or "")
+                    and isinstance(authority, dict)
+                    and authority.get("eligible") is True
+                    and authority.get("consumed_at") is None
+                    and str(authority.get("run_id") or "") == str(child.get("run_id") or "")
+                    and str(authority.get("parent_run_id") or "") == str(record.get("run_id") or "")
+                    and str(authority.get("claim_sha256") or "") == str(candidate.get("claim_sha256") or "")
+                    and str(authority.get("replacement_target_id") or "") == target_id
+                    and replacement_valid
+                    and cleanup.get("ok") is True
+                    and str(cleanup.get("state") or "") in {"closed-and-absent", "already-absent"}
+                    and str(cleanup.get("target_id") or "") == target_id
+                    and lifecycle_valid
+                    and str(child.get("owned_tab_state") or "") in {"closed-and-absent", "already-absent"}
+                    and not bool(child.get("cleanup_pending"))
+                    and int(child.get("owned_open_tabs") or 0) == 0
+                    and str(latest.get("kind") or "") == "stale-pre-submit-retry-target-reconciled"
+                    and str(latest.get("target_id") or "") == target_id
+                    and str(latest.get("cleanup_state") or "") == str(cleanup.get("state") or "")
+                    and str(latest.get("send_claim_sha256") or "") == str(candidate.get("claim_sha256") or "")
+                )
+
             unsafe: list[dict[str, Any]] = []
             for child_state, child in self._parent_children(paths.runs_dir, str(record["run_id"])):
                 phase = str(child.get("phase") or "")
@@ -4693,6 +4765,8 @@ class RunStore:
                         self.pre_submit_retry_candidate(child_state.parent)
                     except StateError as exc:
                         unsafe.append({**summary, "reason": exc.code})
+                    continue
+                if phase == "PREFLIGHT_BLOCKED" and exact_reconciled_pre_submit_retry(child_state, child):
                     continue
                 if phase in {
                     "CREATED",
