@@ -4280,7 +4280,29 @@ class RunStore:
         state_file, record = self.load(run_dir)
         if str(record.get("record_kind") or "") != "child":
             raise StateError("CHILD_RECORD_REQUIRED", "cleanup evidence can be attached only to a child")
-        self._verify_lock(state_file, record)
+        try:
+            self._verify_lock(state_file, record)
+        except StateError as exc:
+            # A later same-project parent lease must not strand an exact,
+            # already-terminal child's uniquely owned tab.  The tab lifecycle
+            # performs the target+URL+immutable-result ownership check before
+            # reaching this write; here additionally require the historical
+            # parent binding to be terminal and exact before recording cleanup.
+            parent_file = state_file.parent.parent / str(record.get("parent_run_id") or "") / "run.json"
+            try:
+                parent = read_json(parent_file)
+            except Exception:
+                parent = {}
+            historical_terminal = (
+                exc.code == "BLOCKED_OWNER_MISMATCH"
+                and str(record.get("phase") or "") in {"COMPLETE", "PROVIDER_FAILED_TERMINAL"}
+                and str(parent.get("phase") or "") in {"PARENT_COMPLETE", "PARENT_FAILED_CLOSED"}
+                and str(parent.get("run_id") or "") == str(record.get("parent_run_id") or "")
+                and str(parent.get("workflow_id") or "") == str(record.get("parent_workflow_id") or "")
+                and str(parent.get("lease_nonce") or "") == str(record.get("parent_lease_nonce") or "")
+            )
+            if not historical_terminal:
+                raise
         state = str(cleanup.get("state") or "")
         if cleanup.get("ok") is not True or state not in {"closed-and-absent", "already-absent"}:
             record["cleanup_pending"] = True
