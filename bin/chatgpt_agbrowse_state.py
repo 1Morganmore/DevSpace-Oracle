@@ -3566,6 +3566,49 @@ class RunStore:
             },
         )
 
+    def backfill_retired_child_pre_submit_cleanup(self, run_dir: str | os.PathLike[str]) -> dict[str, Any]:
+        """Repair only the legacy cleanup pointer omitted by older retirement code."""
+        state_file, record = self.load(run_dir)
+        if str(record.get("record_kind") or "") != "child" or str(record.get("phase") or "") != "PREFLIGHT_BLOCKED":
+            raise StateError("RETIRED_CLEANUP_BACKFILL_PHASE_INVALID", "legacy cleanup backfill requires PREFLIGHT_BLOCKED child")
+        _, lock = self._verify_lock(state_file, record)
+        parent = read_json(state_file.parent.parent / str(record.get("parent_run_id") or "") / "run.json")
+        if not (str(parent.get("phase") or "") == "PARENT_ACTIVE" and parent.get("recovery_required") is True and lock.get("recovery_required") is True):
+            raise StateError("RETIRED_CLEANUP_BACKFILL_PARENT_INVALID", "parent must be exact active recovery")
+        candidate = self.pre_submit_retry_candidate(run_dir)
+        authority = record.get("pre_submit_retry_authority")
+        events = record.get("recovery_events") if isinstance(record.get("recovery_events"), list) else []
+        latest = events[-1] if events and isinstance(events[-1], dict) else {}
+        target_id = str(record.get("current_target_id") or "")
+        activation = next((event for event in reversed(events[:-1]) if isinstance(event, dict) and str(event.get("kind") or "") == "app-composer-target-activation-failed"), {})
+        cleanup = activation.get("cleanup") if isinstance(activation.get("cleanup"), dict) else {}
+        evidence = cleanup.get("evidence") if isinstance(cleanup.get("evidence"), dict) else {}
+        current_cleanup = record.get("cleanup_evidence") if isinstance(record.get("cleanup_evidence"), dict) else {}
+        try:
+            path = Path(str(evidence.get("path") or "")).expanduser().resolve(strict=True)
+            path.relative_to(state_file.parent)
+            evidence_valid = path.is_file() and not path.is_symlink() and sha256_file(path) == str(evidence.get("sha256") or "")
+        except (OSError, RuntimeError, ValueError):
+            evidence_valid = False
+        if not (
+            isinstance(authority, dict) and authority.get("eligible") is True and authority.get("consumed_at") is None
+            and not authority.get("replacement_target_id")
+            and str(authority.get("retired_replacement_target_id") or "") == target_id
+            and str(authority.get("claim_sha256") or "") == str(candidate.get("claim_sha256") or "")
+            and str(latest.get("kind") or "") == "stale-pre-submit-retry-replacement-retired"
+            and str(latest.get("target_id") or "") == target_id
+            and str(latest.get("send_claim_sha256") or "") == str(candidate.get("claim_sha256") or "")
+            and str(latest.get("cleanup_lifecycle_sha256") or "") == str(evidence.get("sha256") or "")
+            and cleanup.get("ok") is True and str(cleanup.get("state") or "") in {"closed-and-absent", "already-absent"}
+            and str(cleanup.get("target_id") or "") == target_id and evidence_valid
+            and not record.get("session_id") and not record.get("conversation_url")
+            and record.get("submission_receipt") is None and record.get("result") is None
+            and str(current_cleanup.get("target_id") or "") == target_id
+            and str((current_cleanup.get("evidence") or {}).get("sha256") or "") != str(evidence.get("sha256") or "")
+        ):
+            raise StateError("RETIRED_CLEANUP_BACKFILL_UNPROVEN", "legacy retired cleanup evidence is not exact")
+        return self.record_child_cleanup(run_dir, cleanup)
+
     def confirm_child_retry_replacement(
         self,
         run_dir: str | os.PathLike[str],

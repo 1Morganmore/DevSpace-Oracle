@@ -1206,6 +1206,27 @@ def test_child_retry_replacement_binds_immutable_deep_research_evidence(tmp_path
     assert retired["pre_submit_retry_authority"]["retired_replacement_target_id"] == "TARGET-RESEARCH"
     assert retired["recovery_events"][-1]["kind"] == "stale-pre-submit-retry-replacement-retired"
     assert retired["cleanup_evidence"]["evidence"]["sha256"] == stale_cleanup["evidence"]["sha256"]
+    legacy_path = Path(child["run_dir"]) / "legacy-reconciliation-lifecycle.json"
+    state.write_json_atomic(legacy_path, {"events": [{"kind": "cleanup", "target_id": "TARGET-RESEARCH"}]})
+    legacy_cleanup = {"ok": True, "state": "already-absent", "target_id": "TARGET-RESEARCH", "evidence": {
+        "path": str(legacy_path), "sha256": state.sha256_file(legacy_path),
+    }}
+    legacy = state.read_json(state_file)
+    legacy["cleanup_evidence"] = legacy_cleanup
+    state.write_json_atomic(state_file, legacy)
+    for mutate in (
+        lambda value: value["recovery_events"][-1].update({"target_id": "FOREIGN-TARGET"}),
+        lambda value: value.update({"session_id": "unexpected-session"}),
+    ):
+        tampered = json.loads(json.dumps(legacy))
+        mutate(tampered)
+        state.write_json_atomic(state_file, tampered)
+        with pytest.raises(state.StateError) as invalid_backfill:
+            store.backfill_retired_child_pre_submit_cleanup(child["run_dir"])
+        assert invalid_backfill.value.code in {"RETIRED_CLEANUP_BACKFILL_UNPROVEN", "PRE_SUBMIT_RETRY_IDENTITY_CONFLICT"}
+    state.write_json_atomic(state_file, legacy)
+    backfilled = store.backfill_retired_child_pre_submit_cleanup(child["run_dir"])
+    assert backfilled["cleanup_evidence"]["evidence"]["sha256"] == stale_cleanup["evidence"]["sha256"]
     cleared = store.clear_parent_runtime_recovery(parent["run_dir"])
     assert cleared["recovery_required"] is False
 
