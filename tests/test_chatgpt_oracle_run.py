@@ -1,0 +1,189 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+RUNNER_PATH = Path(__file__).resolve().parents[1] / "bin" / "chatgpt_oracle_run.py"
+
+
+def load_runner():
+    name = "chatgpt_oracle_run_test"
+    spec = importlib.util.spec_from_file_location(name, RUNNER_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def manifest(tmp_path: Path) -> Path:
+    mission = tmp_path / "mission.md"
+    mission.write_text("finish", encoding="utf-8")
+    path = tmp_path / "job.json"
+    path.write_text(json.dumps({
+        "schema": "codex.chatgpt.oracle-run/v1",
+        "project_root": str(tmp_path.resolve()),
+        "mission_path": str(mission.resolve()),
+        "app_name": "CodexPro",
+        "mode": "browser",
+        "run_root": str((tmp_path / "runs").resolve()),
+        "oracle_command": ["oracle"],
+    }), encoding="utf-8")
+    return path.resolve()
+
+
+def version_runner(command, **kwargs):
+    return subprocess.CompletedProcess(command, 0, stdout="oracle 0.13.0\n", stderr="")
+
+
+class Process:
+    def __init__(self, code: int, events: list[str]):
+        self.code = code
+        self.events = events
+
+    def wait(self):
+        self.events.append("wait")
+        return self.code
+
+
+def popen_for(code: int, output: bytes | None, captured: dict, events: list[str]):
+    def popen(command, **kwargs):
+        captured["command"] = list(command)
+        captured["kwargs"] = kwargs
+        events.append("popen")
+        if output is not None:
+            Path(command[command.index("--write-output") + 1]).write_bytes(output)
+        kwargs["stdout"].write(b"stdout\n")
+        kwargs["stdout"].flush()
+        return Process(code, events)
+    return popen
+
+
+def test_dry_run_never_executes_and_has_no_file_flag(tmp_path: Path) -> None:
+    runner = load_runner()
+    calls = []
+    def forbidden(*args, **kwargs):
+        calls.append(1)
+        raise AssertionError
+    result = runner.execute_run(manifest(tmp_path), dry_run=True, run_factory=forbidden, popen_factory=forbidden)
+    assert result["ok"] is True
+    assert result["prompt_first_line"] == "@CodexPro"
+    assert result["mission_sha256"]
+    assert Path(result["mission_path"]).is_absolute()
+    assert "mission.md" in result["argv"][result["argv"].index("--prompt") + 1]
+    assert "--file" not in result["argv"]
+    assert calls == []
+    assert not (tmp_path / "runs").exists()
+
+
+def test_complete_requires_zero_exit_and_nonempty_output(tmp_path: Path) -> None:
+    runner = load_runner()
+    cases = [(0, b"answer", "complete", True), (0, b" \n", "attention_required", False), (3, b"answer", "failed", False)]
+    for index, (code, output, status, ok) in enumerate(cases):
+        root = tmp_path / str(index)
+        root.mkdir()
+        captured, events = {}, []
+        result = runner.execute_run(manifest(root), run_factory=version_runner, popen_factory=popen_for(code, output, captured, events))
+        assert result["ok"] is ok
+        assert result["result"]["status"] == status
+        assert result["result"]["oracle"]["resolved_version"] == "oracle 0.13.0"
+        assert "--file" not in captured["command"]
+        assert events == ["popen", "wait"]
+        assert Path(result["result"]["artifacts"]["transcript"]).is_file()
+
+
+def test_failure_does_not_resubmit_and_recovery_never_restarts(tmp_path: Path) -> None:
+    runner = load_runner()
+    calls = []
+    def popen(command, **kwargs):
+        calls.append(list(command))
+        return Process(9, [])
+    result = runner.execute_run(manifest(tmp_path), run_factory=version_runner, popen_factory=popen)
+    assert result["result"]["status"] == "failed"
+    assert len(calls) == 1
+    assert "restart" not in calls[0]
+    for action in ("harvest", "live"):
+        recovery = runner.recover_run(Path(result["run_dir"]), action=action, dry_run=True, oracle_command=["oracle"])
+        assert f"--{action}" in recovery["argv"]
+        assert "--write-output" in recovery["argv"]
+        assert "restart" not in recovery["argv"]
+        assert "--prompt" not in recovery["argv"]
+
+
+def test_windows_launch_uses_no_window_and_waits(tmp_path: Path) -> None:
+    runner = load_runner()
+    captured, events = {}, []
+    class Mutex:
+        def __enter__(self):
+            events.append("enter")
+        def __exit__(self, *args):
+            events.append("exit")
+    runner.STATE.project_submit_mutex = lambda *args, **kwargs: Mutex()
+    result = runner.execute_run(
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(0, b"answer", captured, events),
+        platform_name="nt",
+    )
+    assert result["ok"] is True
+    assert captured["kwargs"]["creationflags"] & runner.STATE.CREATE_NO_WINDOW
+    assert events == ["enter", "popen", "wait", "exit"]
+
+
+def test_transport_mission_change_blocks_before_oracle_launch(tmp_path: Path) -> None:
+    runner = load_runner()
+    launched = []
+
+    class MutatingMutex:
+        def __enter__(self):
+            transport = next((tmp_path / "runs").glob("*/mission.md"))
+            transport.write_text("changed", encoding="utf-8")
+
+        def __exit__(self, *args):
+            return None
+
+    runner.STATE.project_submit_mutex = lambda *args, **kwargs: MutatingMutex()
+
+    def forbidden_popen(*args, **kwargs):
+        launched.append(True)
+        raise AssertionError("Oracle must not launch with changed mission bytes")
+
+    result = runner.execute_run(
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=forbidden_popen,
+    )
+    assert result["ok"] is False
+    assert result["result"]["status"] == "failed"
+    assert launched == []
+
+
+def test_recovery_captures_output_and_updates_state(tmp_path: Path) -> None:
+    runner = load_runner()
+    result = runner.execute_run(
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(4, None, {}, []),
+    )
+    run_dir = Path(result["run_dir"])
+
+    def recovery_popen(command, **kwargs):
+        output = Path(command[command.index("--write-output") + 1])
+        output.write_text("recovered answer", encoding="utf-8")
+        return Process(0, [])
+
+    recovered = runner.recover_run(
+        run_dir,
+        action="harvest",
+        oracle_command=["oracle"],
+        popen_factory=recovery_popen,
+    )
+    assert recovered["ok"] is True
+    assert recovered["status"] == "complete"
+    assert Path(recovered["output_path"]).read_text(encoding="utf-8") == "recovered answer"
+    assert recovered["result"]["status"] == "complete"
+    transcript = Path(recovered["result"]["artifacts"]["transcript"]).read_text(encoding="utf-8")
+    assert "recovered answer" in transcript

@@ -9,6 +9,8 @@
     "bin/chatgpt_agbrowse_state.py",
     "bin/chatgpt_agbrowse_tabs.py",
     "bin/chatgpt_git_isolation.py",
+    "bin/chatgpt_oracle_run.py",
+    "bin/chatgpt_oracle_state.py",
     "bin/chatgpt_goal_contract.py",
     "bin/chatgpt_goal_supervisor.py",
     "bin/chatgpt_parallel_implementation_runtime.py",
@@ -35,6 +37,9 @@
     "skills/chatgpt-deep-research-browser/agents/openai.yaml",
     "skills/chatgpt-deep-research-browser/scripts/run_chatgpt_deep_research.py",
     "skills/chatgpt-deep-research-browser/scripts/run_deep_research_browser.py",
+    "skills/chatgpt-oracle-runtime/SKILL.md",
+    "skills/chatgpt-oracle-runtime/agents/openai.yaml",
+    "skills/chatgpt-oracle-runtime/scripts/run_chatgpt_oracle.py",
     "skills/web-multi-gpt/SKILL.md",
     "skills/chatgpt-pro-plan-handoff/SKILL.md",
     "skills/chatgpt-pro-plan-handoff/scripts/handoff_contract.py",
@@ -53,5 +58,20 @@
     "skills/chatgpt-question-designer/SKILL.md",
     "skills/chatgpt-question-designer/agents/openai.yaml"
   ],
-  "external": {"agbrowse": {"package": "agbrowse", "version": "0.1.18", "license": "MIT", "integrity": "sha512-vO2E1XrqTAvkWeSyV1xzsONz+OBB3aDKbxIGVS7Z4pH42Hxg/mlcteIAzM+EuD4hnp6Tt5IJu/X2fjMOiftBCA=="}, "codexpro": "external codexpro@latest-on-bootstrap"}
+  "external": {
+    "agbrowse": {
+      "package": "agbrowse",
+      "version": "0.1.18",
+      "license": "MIT",
+      "integrity": "sha512-vO2E1XrqTAvkWeSyV1xzsONz+OBB3aDKbxIGVS7Z4pH42Hxg/mlcteIAzM+EuD4hnp6Tt5IJu/X2fjMOiftBCA=="
+    },
+    "oracle": {
+      "package": "@steipete/oracle",
+      "tested_version": "0.16.1",
+      "license": "MIT",
+      "integrity": "sha512-oJEAcWLvLihtSOGqznN4ErGIE7GEpVWpx02a5JUwoqeQql/lgWyc7ASnEegov3MGpGROF13CkgcISPgtw2INqg==",
+      "installation": "resolved by the invoking agent through npx; tested_version is not a permanent pin"
+    },
+    "codexpro": "external codexpro@latest-on-bootstrap"
+  }
 }

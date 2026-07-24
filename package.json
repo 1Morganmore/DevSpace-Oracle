@@ -16,6 +16,7 @@
     "codex",
     "chatgpt",
     "agbrowse",
+    "oracle",
     "automation"
   ],
   "files": [
@@ -26,6 +27,8 @@
     "bin/chatgpt_agbrowse_state.py",
     "bin/chatgpt_agbrowse_tabs.py",
     "bin/chatgpt_git_isolation.py",
+    "bin/chatgpt_oracle_run.py",
+    "bin/chatgpt_oracle_state.py",
     "bin/chatgpt_parallel_implementation_runtime.py",
     "bin/chatgpt_prompt_profiles.py",
     "bin/chatgpt_web_multi_runtime.py",
@@ -51,6 +54,9 @@
     "skills/chatgpt-deep-research-browser/agents/openai.yaml",
     "skills/chatgpt-deep-research-browser/scripts/run_chatgpt_deep_research.py",
     "skills/chatgpt-deep-research-browser/scripts/run_deep_research_browser.py",
+    "skills/chatgpt-oracle-runtime/SKILL.md",
+    "skills/chatgpt-oracle-runtime/agents/openai.yaml",
+    "skills/chatgpt-oracle-runtime/scripts/run_chatgpt_oracle.py",
     "skills/web-multi-gpt/SKILL.md",
     "skills/chatgpt-pro-plan-handoff/SKILL.md",
     "skills/chatgpt-pro-plan-handoff/scripts/handoff_contract.py",
