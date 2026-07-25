@@ -1,6 +1,6 @@
 {
   "schema": "codexpro.install-manifest/v1",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "include": [
     "bin/chatgpt_agbrowse_bridge.py",
     "bin/chatgpt_agbrowse_composer.py",
@@ -11,6 +11,10 @@
     "bin/chatgpt_git_isolation.py",
     "bin/chatgpt_oracle_run.py",
     "bin/chatgpt_oracle_state.py",
+    "bin/chatgpt_oracle_profiles.py",
+    "bin/chatgpt_oracle_dispatch.py",
+    "bin/chatgpt_oracle_multi.py",
+    "bin/chatgpt_oracle_comprehensive.py",
     "bin/chatgpt_goal_contract.py",
     "bin/chatgpt_goal_supervisor.py",
     "bin/chatgpt_parallel_implementation_runtime.py",
@@ -40,6 +44,8 @@
     "skills/chatgpt-oracle-runtime/SKILL.md",
     "skills/chatgpt-oracle-runtime/agents/openai.yaml",
     "skills/chatgpt-oracle-runtime/scripts/run_chatgpt_oracle.py",
+    "skills/chatgpt-workspace-setup/SKILL.md",
+    "skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py",
     "skills/web-multi-gpt/SKILL.md",
     "skills/chatgpt-pro-plan-handoff/SKILL.md",
     "skills/chatgpt-pro-plan-handoff/scripts/handoff_contract.py",
@@ -71,6 +77,12 @@
       "license": "MIT",
       "integrity": "sha512-oJEAcWLvLihtSOGqznN4ErGIE7GEpVWpx02a5JUwoqeQql/lgWyc7ASnEegov3MGpGROF13CkgcISPgtw2INqg==",
       "installation": "resolved by the invoking agent through npx; tested_version is not a permanent pin"
+    },
+    "devspace": {
+      "package": "@waishnav/devspace",
+      "tested_version": "1.0.4",
+      "license": "MIT",
+      "installation": "resolved by the explicit setup skill; upstream is not vendored or patched"
     },
     "codexpro": "external codexpro@latest-on-bootstrap"
   }

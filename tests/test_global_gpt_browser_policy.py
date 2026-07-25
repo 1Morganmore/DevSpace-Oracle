@@ -1,169 +1,104 @@
+from __future__ import annotations
+
+import json
 from pathlib import Path
 
 
-CODEX_HOME = Path(__file__).resolve().parents[1]
-GPT_SKILLS = [
-    CODEX_HOME / "skills" / "chatgpt-thinking-browser" / "SKILL.md",
-    CODEX_HOME / "skills" / "chatgpt-pro-browser" / "SKILL.md",
-    CODEX_HOME / "skills" / "chatgpt-deep-research-browser" / "SKILL.md",
-]
-HANDOFF_SKILL = CODEX_HOME / "skills" / "chatgpt-pro-plan-handoff" / "SKILL.md"
+ROOT = Path(__file__).resolve().parents[1]
+THINKING = ROOT / "skills" / "chatgpt-thinking-browser" / "SKILL.md"
+PRO = ROOT / "skills" / "chatgpt-pro-browser" / "SKILL.md"
+HANDOFF = ROOT / "skills" / "chatgpt-pro-plan-handoff" / "SKILL.md"
+MULTI = ROOT / "skills" / "web-multi-gpt" / "SKILL.md"
+RESEARCH = ROOT / "skills" / "chatgpt-deep-research-browser" / "SKILL.md"
+ORACLE = ROOT / "skills" / "chatgpt-oracle-runtime" / "SKILL.md"
 
 
-def _text(path: Path) -> str:
+def text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_owner_skills_define_codexpro_identity_and_pro_transport() -> None:
-    thinking_text = _text(GPT_SKILLS[0])
-    pro_text = _text(GPT_SKILLS[1])
-    assert "Every non-Pro ChatGPT mode must use one exact named CodexPro app." in thinking_text
-    assert "`app_policy: optional` is invalid" in thinking_text
-    assert "exact app name, full server URL, connected state, and `full_access`" in thinking_text
-    assert "App identity is drive-scoped." in thinking_text
-    assert "A C-drive mismatch blocks" in thinking_text
-    assert "One drive must never inherit" in thinking_text
-    assert "external dependency only" in thinking_text
-    assert "Do not vendor, fork, copy, or reimplement" in thinking_text
-    assert "`mode_label: Pro`" in pro_text
-    assert "`app_policy: forbidden`" in pro_text
-    assert "Local context is attachment-only" in pro_text
+def test_new_regular_modes_route_only_to_oracle_devspace() -> None:
+    value = text(THINKING)
+    assert "chatgpt_oracle_dispatch.py" in value
+    assert "@DevSpace" in value
+    assert "never attaches files" in value
+    assert "create a new agbrowse run" in value
+    assert "app picker" not in value.casefold()
 
 
-def test_all_chatgpt_skills_use_only_explicit_contract_validated_agbrowse() -> None:
-    for path in GPT_SKILLS:
-        text = _text(path)
-        assert "0.1.18" in text, path
-        assert "tested default" in text, path
-        assert "contract" in text.casefold(), path
-        assert "pinned, unmodified" not in text.casefold(), path
-        assert "in-app Browser" in text, path
-        assert "@chrome" in text, path
-        assert "fallback" in text.casefold(), path
+def test_pro_remains_attachment_only_and_never_uses_devspace() -> None:
+    value = text(PRO)
+    assert "attachment" in value.casefold()
+    assert "app_policy: forbidden" in value
+    handoff = text(HANDOFF)
+    assert "Pro is unchanged and attachment-only" in handoff
+    assert "It never\nuses DevSpace or Oracle" in handoff
 
 
-def test_fallback_cannot_downgrade_requested_gpt_authority() -> None:
-    assert "never reinterpret Pro as regular GPT" in _text(GPT_SKILLS[0])
-    assert "Never downgrade Pro to regular GPT" in _text(GPT_SKILLS[1])
-    assert "Do not downgrade to ordinary GPT or Pro" in _text(GPT_SKILLS[2])
+def test_deep_research_uses_oracle_deep_without_silent_fallback() -> None:
+    value = text(RESEARCH)
+    assert "chatgpt_oracle_dispatch.py" in value
+    assert "--mode deep-research" in value
+    assert "--browser-research deep" in value
+    assert "Do not silently replace Deep Research" in value
 
 
-def test_published_scope_does_not_install_a_chrome_backend() -> None:
-    assert not (CODEX_HOME / "skills" / "chrome-stability-guard").exists()
-    for path in GPT_SKILLS:
-        text = _text(path)
-        assert "@chrome" in text
-        assert "fallback" in text.casefold()
+def test_web_multi_is_genuine_sessions_with_wave_cap_and_worktrees() -> None:
+    value = text(MULTI)
+    assert "chatgpt_oracle_multi.py" in value
+    assert "waves of at most five" in value
+    assert "worktree-write" in value
+    assert "distinct pre-created worktree" in value
+    assert "single-GPT role simulation" in value
 
 
-def test_recovery_is_exact_session_and_never_mixed_backend() -> None:
-    required = ["sessions doctor <session>", "exact", "URL"]
-    for path in GPT_SKILLS:
-        text = _text(path)
-        for phrase in required:
-            assert phrase in text, (path, phrase)
+def test_comprehensive_is_web_native_relay_with_one_local_gate() -> None:
+    value = text(HANDOFF)
+    assert "chatgpt_oracle_comprehensive.py" in value
+    assert "plan -> optional Pro or Oracle Web Multi -> review" in value
+    assert "final web PASS plus a zero-exit local" in value
+    assert "host validates" in value
+    assert "never rewrites the semantic prompt" in value
 
 
-def test_all_chatgpt_skills_use_exact_job_identity_over_local_diagnostics() -> None:
-    for path in GPT_SKILLS:
-        text = _text(path)
-        assert "Job identity is the exact canonical conversation URL plus the run-owned `prompt-<run_id>.txt` filename" in text
-        assert "heartbeat" in text
-        assert "diagnostic only" in text
+def test_host_control_state_is_outside_devspace_project() -> None:
+    value = text(ORACLE)
+    assert "%USERPROFILE%\\.codex\\state\\chatgpt-oracle" in value
+    source = text(ROOT / "bin" / "chatgpt_oracle_state.py")
+    assert "HOST_STATE_OVERLAPS_PROJECT" in source
 
 
-def test_completed_owned_conversations_are_automatic_but_uncertain_tabs_are_protected() -> None:
-    required = ["automatically close", "uncertain", "unique live"]
-    for path in GPT_SKILLS:
-        text = _text(path)
-        for phrase in required:
-            assert phrase in text, (path, phrase)
+def test_oracle_recovery_is_exact_slug_no_restart_and_monotonic() -> None:
+    value = text(THINKING)
+    assert "stored slug" in value
+    assert "--no-recover" in value
+    assert "never restarts/resubmits" in value
+    assert "never downgrades durable COMPLETE" in value
 
 
-def test_completed_cleanup_has_no_legacy_or_second_request_exception() -> None:
-    root = CODEX_HOME
-    policy_text = "\n".join(
-        _text(path)
-        for path in (
-            root / "README.md",
-            root / "docs" / "ARCHITECTURE_V2.md",
-            *GPT_SKILLS,
-        )
-    ).casefold()
-    assert "legacy manifests without it retain explicit-request-only behavior" not in policy_text
-    assert "v1 manifests remain recovery-only with their original mode and cleanup rules" not in policy_text
-    assert "including recovered legacy runs" in policy_text
-    assert "does not require a separate cleanup request" in policy_text
-
-
-def test_thinking_skill_requires_exact_owned_tab_cleanup_contract() -> None:
-    text = _text(GPT_SKILLS[0])
-    for phrase in (
-        "generic pool/idle/count cleanup limits",
-        "exact owned pre-submit root composer",
-        "durable `COMPLETE`",
-        "cleanup_pending",
-        "one unique live URL match",
+def test_install_inventory_contains_new_active_runtime_and_keeps_legacy_recovery() -> None:
+    manifest = json.loads((ROOT / "install-manifest.json").read_text(encoding="utf-8"))
+    include = set(manifest["include"])
+    for path in (
+        "bin/chatgpt_oracle_dispatch.py",
+        "bin/chatgpt_oracle_multi.py",
+        "bin/chatgpt_oracle_comprehensive.py",
+        "skills/chatgpt-workspace-setup/SKILL.md",
     ):
-        assert phrase in text
+        assert path in include
+    assert "bin/chatgpt_agbrowse_run.py" in include
+    assert manifest["external"]["oracle"]["license"] == "MIT"
+    assert manifest["external"]["devspace"]["license"] == "MIT"
 
 
-def test_thinking_skill_forbids_cross_run_evidence_mixing_and_stale_local_precedence() -> None:
-    text = _text(GPT_SKILLS[0])
-    for phrase in (
-        "Job identity is the exact canonical conversation URL plus the run-owned `prompt-<run_id>.txt` filename",
-        "never authorize mixing another URL/run",
-        "stale helper must never delay immediate completion",
-        "Never treat a completed different canonical URL as the current active run",
-        "Automation-repair work and the user's project execution are separate ownership lanes",
-    ):
-        assert phrase in text
+def test_no_new_skill_routes_to_chrome_playwright_or_in_app_fallback() -> None:
+    combined = "\n".join(text(path) for path in (THINKING, HANDOFF, MULTI, RESEARCH)).casefold()
+    assert "@chrome" not in combined
+    assert "falls back to\nagbrowse, playwright, in-app browser, or chrome" in combined
 
 
-def test_thinking_skill_tracks_current_connectors_ui_contract() -> None:
-    text = _text(GPT_SKILLS[0])
-    for phrase in (
-        "two-step",
-        "저위험 액션 허용",
-        "single-snapshot capabilities",
-        "six hydrated settings reads",
-        "identity-verified candidate port",
-    ):
-        assert phrase in text
-
-
-def test_cold_start_creates_an_owned_parallel_session_instead_of_deferring() -> None:
-    for path in (*GPT_SKILLS[:2], HANDOFF_SKILL):
-        text = _text(path)
-        assert "zero live sessions" in text.casefold() or "session list is empty" in text.casefold(), path
-        assert "--url https://chatgpt.com/ --parallel" in text, path
-        assert "not a precondition" in text.casefold() or "never a prerequisite" in text.casefold(), path
-
-
-def test_new_comprehensive_workflows_are_v4_relayed_and_v1_v2_are_recovery_only() -> None:
-    text = _text(HANDOFF_SKILL)
-    assert "codex.chatgpt.comprehensive-workflow/v4" in text
-    assert "COMPREHENSIVE_V4_REQUIRED" in text
-    assert "V1 and v2 are recovery-only" in text
-    assert "local Codex validates and materializes" in text
-    assert "routine plan does not pay the Web Multi-GPT latency cost" in text
-
-
-def test_comprehensive_waiting_stays_inside_one_runner_turn() -> None:
-    text = _text(HANDOFF_SKILL)
-    for phrase in (
-        "Thin one-minute runner cadence",
-        "Invoke the existing hidden runner once",
-        "60-second sleep -> exact compact terminal check -> 60-second sleep",
-        "must not return `EXACT_ACTIVE` to Codex",
-        "the runner returns one terminal receipt",
-        "Any non-active observation state is actionable",
-        "not a new detector, daemon, dashboard state machine",
-    ):
-        assert phrase in text
-
-
-def test_windows_agbrowse_subprocesses_are_created_without_console_windows() -> None:
-    text = _text(CODEX_HOME / "bin" / "chatgpt_agbrowse_bridge.py")
-    for token in ("CREATE_NO_WINDOW", "STARTUPINFO", "STARTF_USESHOWWINDOW", "SW_HIDE"):
-        assert token in text
+def test_readme_declares_manual_one_time_registration_not_ui_automation() -> None:
+    value = text(ROOT / "README.md")
+    assert "최초 한 번 수동 등록" in value
+    assert "ChatGPT 설정·앱 목록·권한·삭제·선택 UI를 자동화하지 않습니다" in value
+    assert "기존 실행의 정확한 복구" in value

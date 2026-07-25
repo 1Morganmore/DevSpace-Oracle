@@ -8,6 +8,7 @@ $ErrorActionPreference = 'Stop'
 $CodexRoot = [IO.Path]::GetFullPath($CodexHome)
 $ReceiptRoot = Join-Path $CodexRoot 'receipts'
 $Issues = @()
+$Warnings = @()
 $Commands = @('powershell -ExecutionPolicy Bypass -File .\install.ps1 -WhatIf')
 
 function Get-Sha256([string]$Path) {
@@ -66,9 +67,32 @@ if (!$Receipt) {
 
 $Agbrowse = Get-Command agbrowse.cmd,agbrowse -ErrorAction SilentlyContinue | Select-Object -First 1
 if (!$Agbrowse) {
-  $Issues += @{code='AGBROWSE_MISSING'; detail='External dependency not found'}
+  $Warnings += @{code='LEGACY_AGBROWSE_MISSING'; detail='Only legacy run recovery is unavailable'}
   $Commands += 'powershell -ExecutionPolicy Bypass -File .\update.ps1 -AgbrowseVersion 0.1.18'
 }
+
+$Node = Get-Command node.exe,node -ErrorAction SilentlyContinue | Select-Object -First 1
+$Npx = Get-Command npx.cmd,npx -ErrorAction SilentlyContinue | Select-Object -First 1
+$GitBash = Get-Item -LiteralPath 'C:\Program Files\Git\bin\bash.exe' -ErrorAction SilentlyContinue
+if (!$Node -or !$Npx) {
+  $Issues += @{code='ORACLE_DEVSPACE_NODE_TOOLING_MISSING'; detail='Node and npx are required for Oracle and DevSpace'}
+} else {
+  try {
+    $NodeVersion = (& $Node.Source --version).Trim().TrimStart('v')
+    $NodeMajor = [int]($NodeVersion.Split('.')[0])
+    $NodeMinor = [int]($NodeVersion.Split('.')[1])
+    if ($NodeMajor -lt 22 -or $NodeMajor -ge 27 -or ($NodeMajor -eq 22 -and $NodeMinor -lt 19)) {
+      $Issues += @{code='DEVSPACE_NODE_VERSION_UNSUPPORTED'; actual=$NodeVersion; required='>=22.19 <27'}
+    }
+  } catch {
+    $Issues += @{code='NODE_VERSION_UNREADABLE'; detail=$_.Exception.Message}
+  }
+}
+if (!$GitBash) {
+  $Issues += @{code='DEVSPACE_GIT_BASH_MISSING'; detail='Windows DevSpace requires Git Bash'}
+}
+$Commands += 'npx -y @steipete/oracle --version'
+$Commands += 'python .\skills\chatgpt-workspace-setup\scripts\devspace_tailscale_setup.py doctor --root C:\project --hostname your-device.your-tailnet.ts.net'
 
 $Python = Get-Command python.exe,python -ErrorAction SilentlyContinue | Select-Object -First 1
 $UpdateReceiptPath = Join-Path $CodexRoot 'agbrowse-update-receipt.json'
@@ -129,8 +153,11 @@ if (!$Python -or !(Test-Path -LiteralPath $Contract)) {
   receipt = $(if ($Receipt) { $Receipt.FullName } else { $null })
   status = $(if ($Issues) { 'FAIL' } else { 'PASS' })
   issues = $Issues
+  warnings = $Warnings
   commands = $Commands
   agbrowse = @{selected_version=$SelectedVersion; contract=$Contract; update_receipt=$UpdateReceiptPath}
+  oracle = @{package='@steipete/oracle';tested_version='0.16.1';resolution='npx at explicit run time'}
+  devspace = @{package='@waishnav/devspace';tested_version='1.0.4';setup='explicit setup skill only'}
   codexpro = @{
     installation = 'external'
     detail = 'CodexPro is not installed by install.ps1; app bootstrap scripts acquire the latest supported external runtime.'

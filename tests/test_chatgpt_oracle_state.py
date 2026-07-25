@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ def load_state():
 
 
 def manifest(tmp_path: Path, mission_path: Path | str, **extra) -> Path:
+    os.environ["CODEX_ORACLE_STATE_ROOT"] = str((tmp_path.parent / f"{tmp_path.name}-host-state").resolve())
     value = {
         "schema": "codex.chatgpt.oracle-run/v1",
         "project_root": str(tmp_path.resolve()),
@@ -94,3 +96,20 @@ def test_unsafe_oracle_args_are_rejected(tmp_path: Path) -> None:
     with pytest.raises(state.OracleStateError) as exc:
         state.load_manifest(manifest(tmp_path, mission.resolve(), oracle_command=["powershell", "-Command", "echo unsafe"]))
     assert exc.value.code == "ORACLE_COMMAND_FORBIDDEN"
+
+
+def test_control_state_must_be_outside_devspace_project(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(
+            manifest(tmp_path, mission.resolve(), run_root=str((tmp_path / ".ai-bridge" / "runs").resolve()))
+        )
+    assert exc.value.code in {"RUN_ROOT_OUTSIDE_HOST_STATE", "HOST_STATE_OVERLAPS_PROJECT"}
+    mission = tmp_path / "mission.md"
+    overlap_manifest = manifest(tmp_path, mission.resolve())
+    os.environ["CODEX_ORACLE_STATE_ROOT"] = str((tmp_path / "host-state").resolve())
+    with pytest.raises(state.OracleStateError) as overlap:
+        state.load_manifest(overlap_manifest)
+    assert overlap.value.code == "HOST_STATE_OVERLAPS_PROJECT"

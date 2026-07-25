@@ -1,11 +1,19 @@
 ---
 name: chatgpt-oracle-runtime
-description: Run explicitly requested Oracle browser missions from a strict JSON manifest and an absolute UTF-8 mission file. Use only for the additive Oracle path beside existing agbrowse routing. Never use --file for general GPT browser runs, never automate app autocomplete or settings UI, and never restart or resubmit failed sessions automatically.
+description: Run new non-Pro ChatGPT work through Oracle plus the manually registered DevSpace workspace app, including direct modes, recovery, comprehensive relay, and genuine multi-session Web Multi-GPT.
 ---
 
 # ChatGPT Oracle Runtime
 
-Use only when the user explicitly requests Oracle.
+This is the default active browser path for new non-Pro GPT work. Existing
+agbrowse state remains recovery-only. Pro remains attachment-only.
+
+Use `chatgpt_oracle_dispatch.py` for `direct`, `plan`, `review`, `edit`,
+`orchestrator`, `deep-research`, `manual`, and `pro` routing. Regular routes
+select `gpt-5.6` and send only `@DevSpace` plus the absolute project mission
+path. Oracle has no contractual High/Very High selector: record High as a
+manual account precondition, never claim it was verified, invent xhigh, or
+silently downgrade.
 
 ## Manifest
 
@@ -46,4 +54,15 @@ python skills/chatgpt-oracle-runtime/scripts/run_chatgpt_oracle.py recover --run
 
 Use `--action live` only to keep following the same stored session. A successful recovery must write a nonempty stored `output.md`, update `state.json` to `complete`, and refresh `transcript.md`; exit code zero without output is `attention_required`.
 
-Same-project runs hold one cross-process mutex for the entire Oracle process lifetime. Different project roots use different mutexes and may run concurrently.
+Direct same-project runs hold one cross-process mutex for the entire Oracle
+process lifetime. A Multi parent owns that project mutex while authorized
+children use a short parent-scoped launch mutex and then wait concurrently.
+Control state, Oracle output, and transcripts live under
+`%USERPROFILE%\.codex\state\chatgpt-oracle`, outside the DevSpace-writable
+project.
+
+Use `chatgpt_oracle_comprehensive.py` for the bounded plan → optional
+Pro/Multi → review → implementation → final web gate flow. Each web stage
+writes the next mission; the host validates only UTF-8, identity, paths, and
+hashes. Use `chatgpt_oracle_multi.py` for independent solver sessions in waves
+of at most five and one merger over handoff files.

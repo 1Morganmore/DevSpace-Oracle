@@ -1,8 +1,8 @@
 {
   "name": "codexpro-automation",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "private": false,
-  "description": "Safe ChatGPT web workflows for Codex using an external contract-validated agbrowse runtime",
+  "description": "Safe ChatGPT web workflows for Codex using Oracle, DevSpace, and legacy agbrowse recovery",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -29,6 +29,10 @@
     "bin/chatgpt_git_isolation.py",
     "bin/chatgpt_oracle_run.py",
     "bin/chatgpt_oracle_state.py",
+    "bin/chatgpt_oracle_profiles.py",
+    "bin/chatgpt_oracle_dispatch.py",
+    "bin/chatgpt_oracle_multi.py",
+    "bin/chatgpt_oracle_comprehensive.py",
     "bin/chatgpt_parallel_implementation_runtime.py",
     "bin/chatgpt_prompt_profiles.py",
     "bin/chatgpt_web_multi_runtime.py",
@@ -57,6 +61,8 @@
     "skills/chatgpt-oracle-runtime/SKILL.md",
     "skills/chatgpt-oracle-runtime/agents/openai.yaml",
     "skills/chatgpt-oracle-runtime/scripts/run_chatgpt_oracle.py",
+    "skills/chatgpt-workspace-setup/SKILL.md",
+    "skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py",
     "skills/web-multi-gpt/SKILL.md",
     "skills/chatgpt-pro-plan-handoff/SKILL.md",
     "skills/chatgpt-pro-plan-handoff/scripts/handoff_contract.py",
@@ -82,7 +88,7 @@
     "SECURITY.md"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19 <27"
   },
   "dependencies": {}
 }

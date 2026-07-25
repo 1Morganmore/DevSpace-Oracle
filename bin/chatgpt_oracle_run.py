@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -39,7 +40,10 @@ def build_oracle_argv(config, layout, prompt: str) -> list[str]:
     command = [
         *config.oracle_command,
         "--engine", "browser",
-        "--browser-model-strategy", "current",
+        "--model", config.model,
+        "--browser-model-strategy", config.model_strategy,
+        "--browser-research", config.research,
+        "--browser-archive", config.archive,
         *config.oracle_args,
         "--slug", layout.slug,
         "--prompt", prompt,
@@ -102,9 +106,11 @@ def execute_run(
     platform_name: str | None = None,
 ) -> dict[str, Any]:
     config = STATE.load_manifest(manifest_path, platform_name=platform_name)
-    layout = STATE.create_layout(config)
+    layout = STATE.create_layout(config, run_id=config.requested_run_id)
     transport_mission_path = layout.run_dir / "mission.md"
-    prompt = STATE.composer_prompt(config, transport_mission_path)
+    # The app reads the project mission. The copied bytes below are host-only
+    # immutable evidence and are never exposed as the workspace handoff path.
+    prompt = STATE.composer_prompt(config, config.mission_path)
     argv = build_oracle_argv(config, layout, prompt)
     if dry_run:
         return dry_run_payload(config, layout, argv, prompt)
@@ -132,13 +138,23 @@ def execute_run(
 
     try:
         with layout.stdout_path.open("wb") as stdout_handle, layout.stderr_path.open("wb") as stderr_handle:
-            with STATE.project_submit_mutex(config.project_root, timeout_seconds=config.submit_mutex_timeout_seconds, platform_name=platform_name):
+            mutex_root = (
+                config.project_root / ".oracle-parallel-submit" / str(config.parallel_parent_id)
+                if config.parallel_parent_id
+                else config.project_root
+            )
+            with STATE.project_submit_mutex(mutex_root, timeout_seconds=config.submit_mutex_timeout_seconds, platform_name=platform_name):
+                original_mission_sha256 = STATE.sha256_file(config.mission_path)
                 current_mission_sha256 = STATE.sha256_file(transport_mission_path)
-                if current_mission_sha256 != config.mission_sha256:
+                if original_mission_sha256 != config.mission_sha256 or current_mission_sha256 != config.mission_sha256:
                     raise OracleRunError(
                         "MISSION_CHANGED_BEFORE_SUBMIT",
                         "mission bytes changed after manifest validation",
-                        {"expected": config.mission_sha256, "actual": current_mission_sha256},
+                        {
+                            "expected": config.mission_sha256,
+                            "original_actual": original_mission_sha256,
+                            "evidence_actual": current_mission_sha256,
+                        },
                     )
                 process = popen_factory(
                     argv,
@@ -150,6 +166,9 @@ def execute_run(
                     **STATE.windows_subprocess_kwargs(platform_name=platform_name),
                 )
                 STATE.update_state(layout.state_path, status="running", resolved_version=version)
+                if not config.parallel_parent_id:
+                    exit_code = int(process.wait())
+            if config.parallel_parent_id:
                 exit_code = int(process.wait())
     except Exception as exc:
         append_error(layout.stderr_path, f"Oracle launch/run failed: {exc}")
@@ -165,13 +184,13 @@ def execute_run(
 def recovery_argv(command: Sequence[str], locator: str, action: str, output_path: Path) -> list[str]:
     if action not in {"harvest", "live"}:
         raise OracleRunError("RECOVERY_ACTION_INVALID", "recovery action must be harvest or live")
-    argv = [*command, "session", locator, f"--{action}", "--write-output", str(output_path)]
+    argv = [*command, "session", locator, f"--{action}", "--no-recover", "--write-output", str(output_path)]
     if "restart" in argv or "--prompt" in argv or "-p" in argv:
         raise OracleRunError("RECOVERY_COMMAND_UNSAFE", "recovery must not restart or submit a new prompt")
     return argv
 
 
-def recover_run(
+def _recover_run_locked(
     run_dir: Path,
     *,
     action: str,
@@ -182,13 +201,28 @@ def recover_run(
 ) -> dict[str, Any]:
     directory = run_dir.expanduser().resolve(strict=True)
     state = STATE.load_state(directory / "state.json")
+    if state.get("status") == "complete" and STATE.output_is_nonempty(Path(str(state["artifacts"]["output"]))):
+        return {
+            "ok": True,
+            "status": "complete",
+            "run_dir": str(directory),
+            "action": "none",
+            "result": state,
+            "output_path": str(state["artifacts"]["output"]),
+            "monotonic_noop": True,
+        }
     oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
     locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
     if not locator:
         raise OracleRunError("SESSION_LOCATOR_MISSING", "run state has no Oracle session locator")
     artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
     output_path = Path(str(artifacts.get("output") or (directory / "output.md"))).expanduser().resolve()
-    argv = recovery_argv(tuple(oracle_command or STATE.default_oracle_command(platform_name)), locator, action, output_path)
+    if not STATE.is_within(STATE.oracle_state_root(), output_path):
+        raise OracleRunError("RECOVERY_OUTPUT_OUTSIDE_HOST_STATE", "recovery output must remain inside host-only Oracle state")
+    stored_command = oracle.get("command")
+    command = STATE.validate_oracle_command(list(oracle_command) if oracle_command is not None else stored_command)
+    argv_output = directory / f"recovery-{action}-candidate.md"
+    argv = recovery_argv(command, locator, action, argv_output)
     if dry_run:
         return {"ok": True, "status": "dry-run", "run_dir": str(directory), "action": action, "argv": STATE.command_for_display(argv)}
     stdout_path = directory / f"recovery-{action}-stdout.log"
@@ -204,6 +238,8 @@ def recover_run(
             **STATE.windows_subprocess_kwargs(platform_name=platform_name),
         )
         exit_code = int(process.wait())
+    if exit_code == 0 and STATE.output_is_nonempty(argv_output):
+        os.replace(argv_output, output_path)
     layout = STATE.RunLayout(
         str(state["run_id"]),
         str(oracle.get("slug") or locator),
@@ -216,6 +252,19 @@ def recover_run(
     )
     STATE.write_transcript(layout)
     status = "complete" if exit_code == 0 and STATE.output_is_nonempty(output_path) else ("attention_required" if exit_code == 0 else "failed")
+    latest = STATE.load_state(layout.state_path)
+    latest_output = Path(str(latest.get("artifacts", {}).get("output") or output_path))
+    if latest.get("status") == "complete" and STATE.output_is_nonempty(latest_output):
+        return {
+            "ok": True,
+            "status": "complete",
+            "run_dir": str(directory),
+            "action": action,
+            "exit_code": exit_code,
+            "result": latest,
+            "output_path": str(latest_output),
+            "monotonic_race_preserved": True,
+        }
     updated = STATE.update_state(layout.state_path, status=status, exit_code=exit_code)
     return {
         "ok": status == "complete",
@@ -228,6 +277,45 @@ def recover_run(
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
     }
+
+
+def recover_run(
+    run_dir: Path,
+    *,
+    action: str,
+    dry_run: bool = False,
+    oracle_command: Sequence[str] | None = None,
+    popen_factory: Callable[..., Any] = subprocess.Popen,
+    platform_name: str | None = None,
+) -> dict[str, Any]:
+    directory = run_dir.expanduser().resolve(strict=True)
+    stored = STATE.load_state(directory / "state.json")
+    project_root = Path(str(stored.get("project_root") or "")).expanduser().resolve(strict=True)
+    parallel_parent_id = str(stored.get("parallel_parent_id") or "").strip().casefold()
+    if parallel_parent_id and STATE.PARENT_ID_RE.fullmatch(parallel_parent_id) is None:
+        raise OracleRunError(
+            "RECOVERY_PARALLEL_PARENT_ID_INVALID",
+            "stored parallel parent id is invalid",
+            {"parallel_parent_id": parallel_parent_id},
+        )
+    mutex_root = (
+        project_root / ".oracle-parallel-submit" / parallel_parent_id
+        if parallel_parent_id
+        else project_root
+    )
+    with STATE.project_submit_mutex(
+        mutex_root,
+        timeout_seconds=30,
+        platform_name=platform_name,
+    ):
+        return _recover_run_locked(
+            directory,
+            action=action,
+            dry_run=dry_run,
+            oracle_command=oracle_command,
+            popen_factory=popen_factory,
+            platform_name=platform_name,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:

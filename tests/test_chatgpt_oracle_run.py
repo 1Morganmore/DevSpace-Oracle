@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -19,19 +20,22 @@ def load_runner():
     return module
 
 
-def manifest(tmp_path: Path) -> Path:
+def manifest(tmp_path: Path, **extra) -> Path:
     mission = tmp_path / "mission.md"
     mission.write_text("finish", encoding="utf-8")
     path = tmp_path / "job.json"
-    path.write_text(json.dumps({
+    payload = {
         "schema": "codex.chatgpt.oracle-run/v1",
         "project_root": str(tmp_path.resolve()),
         "mission_path": str(mission.resolve()),
         "app_name": "CodexPro",
         "mode": "browser",
-        "run_root": str((tmp_path / "runs").resolve()),
+        "run_root": str((tmp_path.parent / f"{tmp_path.name}-host-state" / "runs").resolve()),
         "oracle_command": ["oracle"],
-    }), encoding="utf-8")
+    }
+    payload.update(extra)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    os.environ["CODEX_ORACLE_STATE_ROOT"] = str((tmp_path.parent / f"{tmp_path.name}-host-state").resolve())
     return path.resolve()
 
 
@@ -73,7 +77,7 @@ def test_dry_run_never_executes_and_has_no_file_flag(tmp_path: Path) -> None:
     assert result["prompt_first_line"] == "@CodexPro"
     assert result["mission_sha256"]
     assert Path(result["mission_path"]).is_absolute()
-    assert "mission.md" in result["argv"][result["argv"].index("--prompt") + 1]
+    assert str((tmp_path / "mission.md").resolve()) in result["argv"][result["argv"].index("--prompt") + 1]
     assert "--file" not in result["argv"]
     assert calls == []
     assert not (tmp_path / "runs").exists()
@@ -187,3 +191,50 @@ def test_recovery_captures_output_and_updates_state(tmp_path: Path) -> None:
     assert recovered["result"]["status"] == "complete"
     transcript = Path(recovered["result"]["artifacts"]["transcript"]).read_text(encoding="utf-8")
     assert "recovered answer" in transcript
+
+
+def test_recovery_never_downgrades_durable_complete(tmp_path: Path) -> None:
+    runner = load_runner()
+    result = runner.execute_run(
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(0, b"answer", {}, []),
+    )
+    calls = []
+    recovered = runner.recover_run(
+        Path(result["run_dir"]),
+        action="harvest",
+        oracle_command=["oracle"],
+        popen_factory=lambda *args, **kwargs: calls.append(True),
+    )
+    assert recovered["ok"] is True
+    assert recovered["monotonic_noop"] is True
+    assert calls == []
+
+
+def test_parallel_recovery_reuses_the_parent_scoped_submit_mutex(tmp_path: Path) -> None:
+    runner = load_runner()
+    parent_id = "a" * 32
+    roots: list[Path] = []
+
+    class Mutex:
+        def __init__(self, root: Path):
+            self.root = root
+
+        def __enter__(self):
+            roots.append(self.root)
+
+        def __exit__(self, *args):
+            return None
+
+    runner.STATE.project_submit_mutex = lambda root, **kwargs: Mutex(root)
+    result = runner.execute_run(
+        manifest(tmp_path, parallel_parent_id=parent_id),
+        run_factory=version_runner,
+        popen_factory=popen_for(4, None, {}, []),
+    )
+    recovered = runner.recover_run(Path(result["run_dir"]), action="harvest", dry_run=True, oracle_command=["oracle"])
+    expected = tmp_path.resolve() / ".oracle-parallel-submit" / parent_id
+    assert result["result"]["status"] == "failed"
+    assert recovered["status"] == "dry-run"
+    assert roots == [expected, expected]

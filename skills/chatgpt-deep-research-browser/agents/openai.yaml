@@ -1,6 +1,6 @@
 interface:
   display_name: "ChatGPT Deep Research Browser"
-  short_description: "Automate ChatGPT Deep Research with a dedicated browser profile"
-  default_prompt: "$chatgpt-deep-research-browser C:\\path\\to\\job.yaml"
+  short_description: "Run Deep Research through Oracle and DevSpace"
+  default_prompt: "$chatgpt-deep-research-browser C:\\project\\research-mission.md"
 policy:
   allow_implicit_invocation: false

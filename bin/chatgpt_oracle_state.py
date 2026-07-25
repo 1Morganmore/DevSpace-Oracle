@@ -33,6 +33,9 @@ BLOCKED_COMMANDS = {"restart", "session", "status", "serve", "tui"}
 SAFE_ORACLE_SWITCHES = {"--no-notify", "--notify", "--no-notify-sound", "--notify-sound", "--verbose"}
 SAFE_ORACLE_VALUE_OPTIONS = {"--heartbeat", "--timeout", "--zombie-timeout"}
 APP_RE = re.compile(r"^[^\r\n]+$")
+MODEL_RE = re.compile(r"^[a-zA-Z0-9._ -]+$")
+PARENT_ID_RE = re.compile(r"^[a-f0-9]{32,64}$")
+RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{7,95}$")
 _THREAD_MUTEXES: dict[str, threading.Lock] = {}
 _THREAD_MUTEXES_GUARD = threading.Lock()
 
@@ -58,6 +61,12 @@ class OracleConfig:
     oracle_command: tuple[str, ...]
     oracle_args: tuple[str, ...]
     submit_mutex_timeout_seconds: float
+    model: str
+    model_strategy: str
+    research: str
+    archive: str
+    parallel_parent_id: str | None
+    requested_run_id: str | None
 
 
 @dataclass(frozen=True)
@@ -101,6 +110,11 @@ def is_within(root: Path, candidate: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def oracle_state_root() -> Path:
+    override = str(os.environ.get("CODEX_ORACLE_STATE_ROOT") or "").strip()
+    return Path(override).expanduser().resolve() if override else (Path.home() / ".codex" / "state" / "chatgpt-oracle").resolve()
 
 
 def default_oracle_command(platform_name: str | None = None) -> tuple[str, ...]:
@@ -181,9 +195,16 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
     mode = str(payload.get("mode") or "browser").strip().casefold()
     if mode != "browser":
         raise OracleStateError("MODE_INVALID", "Oracle foundation runner supports mode=browser only")
-    run_root = absolute_path(payload.get("run_root") or (project_root / ".ai-bridge" / "oracle-runs"), label="run_root", must_exist=False)
-    if not is_within(project_root, run_root):
-        raise OracleStateError("RUN_ROOT_OUTSIDE_PROJECT", "run_root must stay inside project_root")
+    state_root = oracle_state_root()
+    if is_within(project_root, state_root) or is_within(state_root, project_root):
+        raise OracleStateError(
+            "HOST_STATE_OVERLAPS_PROJECT",
+            "Oracle host state must be disjoint from the DevSpace-writable project",
+        )
+    project_key = hashlib.sha256(str(project_root).casefold().encode("utf-8")).hexdigest()[:24]
+    run_root = absolute_path(payload.get("run_root") or (state_root / "projects" / project_key / "runs"), label="run_root", must_exist=False)
+    if not is_within(state_root, run_root):
+        raise OracleStateError("RUN_ROOT_OUTSIDE_HOST_STATE", "run_root must stay inside the host-only Oracle state root")
     command_value = payload.get("oracle_command")
     if command_value is None:
         oracle_command = default_oracle_command(platform_name)
@@ -195,7 +216,42 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
         raise OracleStateError("MUTEX_TIMEOUT_INVALID", "submit_mutex_timeout_seconds must be numeric") from exc
     if not 0 < timeout <= 300:
         raise OracleStateError("MUTEX_TIMEOUT_INVALID", "submit_mutex_timeout_seconds must be within 0..300")
-    return OracleConfig(project_root, mission_path, sha256_file(mission_path), app_name, mode, run_root, oracle_command, validate_oracle_args(payload.get("oracle_args")), timeout)
+    model = str(payload.get("model") or "gpt-5.6").strip()
+    if not model or MODEL_RE.fullmatch(model) is None:
+        raise OracleStateError("MODEL_INVALID", "model must be one safe Oracle browser model label")
+    model_strategy = str(payload.get("model_strategy") or "select").strip().casefold()
+    if model_strategy not in {"select", "current", "ignore"}:
+        raise OracleStateError("MODEL_STRATEGY_INVALID", "model_strategy must be select, current, or ignore")
+    research = str(payload.get("research") or "off").strip().casefold()
+    if research not in {"off", "deep"}:
+        raise OracleStateError("RESEARCH_INVALID", "research must be off or deep")
+    archive = str(payload.get("archive") or "auto").strip().casefold()
+    if archive not in {"auto", "always", "never"}:
+        raise OracleStateError("ARCHIVE_INVALID", "archive must be auto, always, or never")
+    parallel_parent_raw = str(payload.get("parallel_parent_id") or "").strip().casefold()
+    parallel_parent_id = parallel_parent_raw or None
+    if parallel_parent_id is not None and PARENT_ID_RE.fullmatch(parallel_parent_id) is None:
+        raise OracleStateError("PARALLEL_PARENT_ID_INVALID", "parallel_parent_id must be 32-64 lowercase hex characters")
+    requested_run_id = str(payload.get("run_id") or "").strip() or None
+    if requested_run_id is not None and RUN_ID_RE.fullmatch(requested_run_id) is None:
+        raise OracleStateError("RUN_ID_INVALID", "run_id must be a safe 8-96 character identifier")
+    return OracleConfig(
+        project_root,
+        mission_path,
+        sha256_file(mission_path),
+        app_name,
+        mode,
+        run_root,
+        oracle_command,
+        validate_oracle_args(payload.get("oracle_args")),
+        timeout,
+        model,
+        model_strategy,
+        research,
+        archive,
+        parallel_parent_id,
+        requested_run_id,
+    )
 
 
 def composer_prompt(config: OracleConfig, mission_path: Path | None = None) -> str:
@@ -215,12 +271,24 @@ def state_payload(config: OracleConfig, layout: RunLayout, *, status: str, resol
     return {
         "schema": STATE_SCHEMA, "run_id": layout.run_id, "project_root": str(config.project_root),
         "mode": config.mode, "app_name": config.app_name,
+        "profile": {
+            "model": config.model,
+            "model_strategy": config.model_strategy,
+            "research": config.research,
+            "archive": config.archive,
+        },
+        "parallel_parent_id": config.parallel_parent_id,
         "mission": {
             "path": str(config.mission_path),
             "transport_path": str(layout.run_dir / "mission.md"),
             "sha256": config.mission_sha256,
         },
-        "oracle": {"resolved_version": resolved_version, "slug": layout.slug, "session_locator": layout.slug},
+        "oracle": {
+            "resolved_version": resolved_version,
+            "command": list(config.oracle_command),
+            "slug": layout.slug,
+            "session_locator": layout.slug,
+        },
         "artifacts": {"output": str(layout.output_path), "transcript": str(layout.transcript_path), "stdout": str(layout.stdout_path), "stderr": str(layout.stderr_path)},
         "status": status, "exit_code": exit_code,
     }
