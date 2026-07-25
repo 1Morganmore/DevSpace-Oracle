@@ -40,10 +40,11 @@ ChatGPT 설정·앱 목록·권한·삭제·선택 UI를 자동화하지 않습�
 | Web Multi-GPT | 독립 Oracle solver 2~25개, 최대 5개씩 wave, 별도 merger |
 | Pro | 기존 attachment-only 경로, DevSpace 금지 |
 
-Oracle 0.16.1은 모델을 선택할 수 있지만 웹의 High/Very High를 검증하는
-별도 CLI 옵션은 없습니다. 이 프로젝트는 `gpt-5.6`을 명시적으로
-선택하고 High를 계정의 수동 사전 조건으로 기록합니다. 검증하지 못한
-사고 수준을 성공으로 꾸미거나 xhigh를 만들거나 자동 하향하지 않습니다.
+Oracle 0.16.1의 통합 모델 선택 UI에 맞춘 해시 검증형 호환 패치를
+적용합니다. 일반·계획·검토·수정·지휘·종합·Web Multi는
+`GPT-5.6 Sol`과 `heavy`를 선택하고 화면의 `Extra High(매우 높음)`을
+검증합니다. 알려지지 않은 Oracle 버전이나 파일 해시는 수정하지 않고
+차단하며, xhigh를 만들거나 자동 하향하지 않습니다.
 
 ## 설치
 
@@ -98,7 +99,7 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
   --project-root C:\project `
   --mission-path C:\project\mission.md `
   --manifest-output C:\project\.ai-bridge\oracle.json `
-  --reasoning-level High `
+  --reasoning-level "Very High" `
   --dry-run
 ```
 
@@ -122,7 +123,9 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
 세션을 실행합니다. 6개 이상도 lane을 줄이지 않고 최대 5개씩 wave로
 나눕니다. 읽기 전용 solver는 같은 작업공간을 볼 수 있지만 쓰기 solver는
 서로 다른 사전 생성 Git worktree를 사용해야 합니다. 결과는 짧은 handoff
-파일로 남기고 merger 한 개가 모두 읽습니다.
+파일로 남기고 merger 한 개가 모두 읽습니다. Windows에서는 각 lane이
+로그인된 Oracle 프로필의 독립 throwaway 복사본을 사용하므로 실제로
+서로 다른 Chrome 세션이 동시에 동작합니다.
 
 ## 상태와 복구
 
@@ -152,9 +155,10 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_run.py" recover `
 ## 보안과 라이선스
 
 프로젝트는 MIT 라이선스입니다. Oracle·DevSpace·agbrowse도 외부 MIT
-의존성이며 소스를 vendor하지 않습니다. Tailscale Funnel은 공개 endpoint
-이므로 Tailnet 정책·HTTPS·공개 범위를 확인하세요. 비밀값, Owner
-비밀번호, 토큰, 브라우저 프로필은 저장소에 넣지 마세요.
+의존성입니다. Oracle 본체를 vendor하지 않지만, 검증된 0.16.1 설치본에만
+적용되는 최소 호환 패치와 원 저작권 고지를 함께 배포합니다. Tailscale
+Funnel은 공개 endpoint이므로 Tailnet 정책·HTTPS·공개 범위를 확인하세요.
+비밀값, Owner 비밀번호, 토큰, 브라우저 프로필은 저장소에 넣지 마세요.
 
 자세한 제3자 고지는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md),
 보안 정책은 [SECURITY.md](SECURITY.md)를 참고하세요.

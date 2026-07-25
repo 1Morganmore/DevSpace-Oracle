@@ -133,6 +133,9 @@ def load_manifest(path: Path) -> dict[str, Any]:
         "max_concurrency": concurrency,
         "app_name": str(value.get("app_name") or "DevSpace").strip(),
         "model": str(value.get("model") or "gpt-5.6").strip(),
+        "copy_profile": Path(
+            str(value.get("copy_profile") or (Path.home() / ".oracle" / "browser-profile"))
+        ).expanduser().resolve(),
         "allowed_worktree_roots": allowed_worktrees,
         "manifest_sha256": hashlib.sha256(path.resolve(strict=True).read_bytes()).hexdigest(),
         "next_stage_binding": value.get("next_stage_binding") if isinstance(value.get("next_stage_binding"), dict) else {},
@@ -157,6 +160,8 @@ def _child_manifest(config: dict[str, Any], lane: dict[str, Any], parent_id: str
             "mode": "browser",
             "model": config["model"],
             "model_strategy": "select",
+            "thinking_time": "heavy",
+            "copy_profile": str(config["copy_profile"]),
             "research": "off",
             "archive": "auto",
             "parallel_parent_id": parent_id,

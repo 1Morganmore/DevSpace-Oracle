@@ -32,6 +32,7 @@ def test_regular_and_deep_research_compile_to_oracle_without_attachments(tmp_pat
         assert value["app_name"] == "DevSpace"
         assert value["model"] == "gpt-5.6"
         assert value["model_strategy"] == "select"
+        assert value["thinking_time"] == "heavy"
         assert value["research"] == research
 
 

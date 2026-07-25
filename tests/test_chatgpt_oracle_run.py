@@ -43,6 +43,11 @@ def version_runner(command, **kwargs):
     return subprocess.CompletedProcess(command, 0, stdout="oracle 0.13.0\n", stderr="")
 
 
+def execute_run(runner, *args, **kwargs):
+    kwargs.setdefault("compat_factory", lambda version: {"ok": True, "version": version})
+    return runner.execute_run(*args, **kwargs)
+
+
 class Process:
     def __init__(self, code: int, events: list[str]):
         self.code = code
@@ -72,15 +77,26 @@ def test_dry_run_never_executes_and_has_no_file_flag(tmp_path: Path) -> None:
     def forbidden(*args, **kwargs):
         calls.append(1)
         raise AssertionError
-    result = runner.execute_run(manifest(tmp_path), dry_run=True, run_factory=forbidden, popen_factory=forbidden)
+    result = execute_run(runner, manifest(tmp_path), dry_run=True, run_factory=forbidden, popen_factory=forbidden)
     assert result["ok"] is True
-    assert result["prompt_first_line"] == "@CodexPro"
+    assert result["prompt_first_line"].startswith("@CodexPro ")
+    assert str((tmp_path / "mission.md").resolve()) in result["prompt_first_line"]
     assert result["mission_sha256"]
     assert Path(result["mission_path"]).is_absolute()
     assert str((tmp_path / "mission.md").resolve()) in result["argv"][result["argv"].index("--prompt") + 1]
     assert "--file" not in result["argv"]
+    assert result["argv"][result["argv"].index("--browser-model-strategy") + 1] == "select"
+    assert result["argv"][result["argv"].index("--browser-thinking-time") + 1] == "heavy"
     assert calls == []
     assert not (tmp_path / "runs").exists()
+
+
+def test_copy_profile_is_first_class_and_outside_project(tmp_path: Path) -> None:
+    runner = load_runner()
+    profile = tmp_path.parent / f"{tmp_path.name}-oracle-profile"
+    profile.mkdir()
+    result = execute_run(runner, manifest(tmp_path, copy_profile=str(profile.resolve())), dry_run=True)
+    assert result["argv"][result["argv"].index("--copy-profile") + 1] == str(profile.resolve())
 
 
 def test_complete_requires_zero_exit_and_nonempty_output(tmp_path: Path) -> None:
@@ -90,7 +106,7 @@ def test_complete_requires_zero_exit_and_nonempty_output(tmp_path: Path) -> None
         root = tmp_path / str(index)
         root.mkdir()
         captured, events = {}, []
-        result = runner.execute_run(manifest(root), run_factory=version_runner, popen_factory=popen_for(code, output, captured, events))
+        result = execute_run(runner, manifest(root), run_factory=version_runner, popen_factory=popen_for(code, output, captured, events))
         assert result["ok"] is ok
         assert result["result"]["status"] == status
         assert result["result"]["oracle"]["resolved_version"] == "oracle 0.13.0"
@@ -105,7 +121,7 @@ def test_failure_does_not_resubmit_and_recovery_never_restarts(tmp_path: Path) -
     def popen(command, **kwargs):
         calls.append(list(command))
         return Process(9, [])
-    result = runner.execute_run(manifest(tmp_path), run_factory=version_runner, popen_factory=popen)
+    result = execute_run(runner, manifest(tmp_path), run_factory=version_runner, popen_factory=popen)
     assert result["result"]["status"] == "failed"
     assert len(calls) == 1
     assert "restart" not in calls[0]
@@ -126,7 +142,8 @@ def test_windows_launch_uses_no_window_and_waits(tmp_path: Path) -> None:
         def __exit__(self, *args):
             events.append("exit")
     runner.STATE.project_submit_mutex = lambda *args, **kwargs: Mutex()
-    result = runner.execute_run(
+    result = execute_run(
+        runner,
         manifest(tmp_path),
         run_factory=version_runner,
         popen_factory=popen_for(0, b"answer", captured, events),
@@ -155,7 +172,8 @@ def test_transport_mission_change_blocks_before_oracle_launch(tmp_path: Path) ->
         launched.append(True)
         raise AssertionError("Oracle must not launch with changed mission bytes")
 
-    result = runner.execute_run(
+    result = execute_run(
+        runner,
         manifest(tmp_path),
         run_factory=version_runner,
         popen_factory=forbidden_popen,
@@ -167,7 +185,8 @@ def test_transport_mission_change_blocks_before_oracle_launch(tmp_path: Path) ->
 
 def test_recovery_captures_output_and_updates_state(tmp_path: Path) -> None:
     runner = load_runner()
-    result = runner.execute_run(
+    result = execute_run(
+        runner,
         manifest(tmp_path),
         run_factory=version_runner,
         popen_factory=popen_for(4, None, {}, []),
@@ -195,7 +214,8 @@ def test_recovery_captures_output_and_updates_state(tmp_path: Path) -> None:
 
 def test_recovery_never_downgrades_durable_complete(tmp_path: Path) -> None:
     runner = load_runner()
-    result = runner.execute_run(
+    result = execute_run(
+        runner,
         manifest(tmp_path),
         run_factory=version_runner,
         popen_factory=popen_for(0, b"answer", {}, []),
@@ -228,7 +248,8 @@ def test_parallel_recovery_reuses_the_parent_scoped_submit_mutex(tmp_path: Path)
             return None
 
     runner.STATE.project_submit_mutex = lambda root, **kwargs: Mutex(root)
-    result = runner.execute_run(
+    result = execute_run(
+        runner,
         manifest(tmp_path, parallel_parent_id=parent_id),
         run_factory=version_runner,
         popen_factory=popen_for(4, None, {}, []),

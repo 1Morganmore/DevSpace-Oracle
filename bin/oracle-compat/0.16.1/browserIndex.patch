@@ -1,0 +1,14 @@
+diff --git a/dist/src/browser/index.js b/dist/src/browser/index.js
+index d585a16..be389f6 100644
+--- a/dist/src/browser/index.js
++++ b/dist/src/browser/index.js
+@@ -667,6 +667,9 @@ export async function runBrowserMode(options) {
+         }
+         return runRemoteBrowserMode(promptText, attachments, config, logger, options);
+     }
++    if (usingCopiedProfile && config.manualLogin) {
++        config = { ...config, manualLogin: false, manualLoginProfileDir: null };
++    }
+     const manualLogin = Boolean(config.manualLogin);
+     if (manualLogin && usingCopiedProfile) {
+         throw new BrowserAutomationError("--copy-profile cannot be combined with --browser-manual-login: choose either a throwaway copied profile or the persistent manual-login profile.", { stage: "profile-config" });

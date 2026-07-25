@@ -1,0 +1,167 @@
+diff --git a/dist/src/browser/actions/promptComposer.js b/dist/src/browser/actions/promptComposer.js
+index c643386..df28522 100644
+--- a/dist/src/browser/actions/promptComposer.js
++++ b/dist/src/browser/actions/promptComposer.js
+@@ -14,6 +14,10 @@ const ENTER_KEY_TEXT = "\r";
+ export async function submitPrompt(deps, prompt, logger) {
+     const { runtime, input } = deps;
+     await waitForDomReady(runtime, logger, deps.inputTimeoutMs ?? undefined);
++    // Failed app-mention attempts can leave a server-persisted draft in the
++    // root composer. Always begin this one-shot submission from an empty
++    // composer so the next run cannot duplicate the mention.
++    await clearPromptComposer(runtime, logger);
+     const encodedPrompt = JSON.stringify(prompt);
+     const focusResult = await runtime.evaluate({
+         expression: `(() => {
+@@ -67,7 +71,150 @@ export async function submitPrompt(deps, prompt, logger) {
+         await logDomFailure(runtime, logger, "focus-textarea");
+         throw new Error("Failed to focus prompt textarea");
+     }
+-    await input.insertText({ text: prompt });
++    // Use trusted editing keys as well as DOM clearing. ChatGPT can restore a
++    // stale Lexical draft after direct textContent mutation.
++    await input.dispatchKeyEvent({
++        type: "keyDown",
++        key: "a",
++        code: "KeyA",
++        windowsVirtualKeyCode: 65,
++        nativeVirtualKeyCode: 65,
++        modifiers: 2,
++    });
++    await input.dispatchKeyEvent({
++        type: "keyUp",
++        key: "a",
++        code: "KeyA",
++        windowsVirtualKeyCode: 65,
++        nativeVirtualKeyCode: 65,
++        modifiers: 2,
++    });
++    await input.dispatchKeyEvent({
++        type: "keyDown",
++        key: "Backspace",
++        code: "Backspace",
++        windowsVirtualKeyCode: 8,
++        nativeVirtualKeyCode: 8,
++    });
++    await input.dispatchKeyEvent({
++        type: "keyUp",
++        key: "Backspace",
++        code: "Backspace",
++        windowsVirtualKeyCode: 8,
++        nativeVirtualKeyCode: 8,
++    });
++    await delay(250);
++    // ChatGPT custom apps require the leading @name suggestion to be
++    // confirmed before the remainder of the prompt is entered. Inserting the
++    // whole string at once leaves the suggestion overlay open and the send
++    // button inert. Keep this generic for any single leading app mention.
++    const mentionMatch = prompt.match(/^(@[^\s]+)(\s+[\s\S]+)$/u);
++    if (mentionMatch) {
++        const appName = mentionMatch[1].slice(1);
++        await input.insertText({ text: mentionMatch[1] });
++        const suggestionDeadline = Date.now() + 5_000;
++        let suggestionVisible = false;
++        while (Date.now() < suggestionDeadline) {
++            const probe = await runtime.evaluate({
++                expression: `(() => {
++                  const wanted = ${JSON.stringify(appName.toLowerCase())};
++                  const visible = (node) => {
++                    const rect = node?.getBoundingClientRect?.();
++                    return Boolean(rect && rect.width > 0 && rect.height > 0);
++                  };
++                  return Array.from(document.querySelectorAll(
++                    '[role="option"],[role="menuitem"],[role="group"],[data-radix-collection-item]'
++                  )).some((node) => {
++                    if (!visible(node)) return false;
++                    const text = String(node.innerText || node.textContent || '').trim().toLowerCase();
++                    return text === wanted || text.includes(wanted);
++                  });
++                })()`,
++                returnByValue: true,
++            });
++            if (probe.result?.value === true) {
++                suggestionVisible = true;
++                break;
++            }
++            await delay(100);
++        }
++        if (!suggestionVisible) {
++            const diagnostic = await runtime.evaluate({
++                expression: `(() => {
++                  const wanted = ${JSON.stringify(appName.toLowerCase())};
++                  const visible = (node) => {
++                    const rect = node?.getBoundingClientRect?.();
++                    return Boolean(rect && rect.width > 0 && rect.height > 0);
++                  };
++                  return Array.from(document.querySelectorAll('[role],[data-testid],button'))
++                    .filter((node) => visible(node) &&
++                      String(node.innerText || node.textContent || '').trim().toLowerCase().includes(wanted))
++                    .slice(0, 12)
++                    .map((node) => ({
++                      tag: node.tagName,
++                      role: node.getAttribute('role'),
++                      testid: node.getAttribute('data-testid'),
++                      text: String(node.innerText || node.textContent || '').trim().slice(0, 160),
++                    }));
++                })()`,
++                returnByValue: true,
++            });
++            throw new BrowserAutomationError("ChatGPT app mention suggestion did not appear.", {
++                stage: "submit-prompt",
++                code: "app-mention-suggestion-missing",
++                appName,
++                candidates: diagnostic.result?.value,
++            });
++        }
++        await input.dispatchKeyEvent({
++            type: "keyDown",
++            key: "Tab",
++            code: "Tab",
++            windowsVirtualKeyCode: 9,
++            nativeVirtualKeyCode: 9,
++        });
++        await input.dispatchKeyEvent({
++            type: "keyUp",
++            key: "Tab",
++            code: "Tab",
++            windowsVirtualKeyCode: 9,
++            nativeVirtualKeyCode: 9,
++        });
++        const pillDeadline = Date.now() + 5_000;
++        let pillConfirmed = false;
++        while (Date.now() < pillDeadline) {
++            const probe = await runtime.evaluate({
++                expression: `(() => {
++                  const wanted = ${JSON.stringify(appName.toLowerCase())};
++                  const roots = Array.from(document.querySelectorAll(
++                    ${JSON.stringify(INPUT_SELECTORS.join(","))}
++                  ));
++                  return roots.some((root) => Array.from(root.querySelectorAll(
++                    '[contenteditable="false"],[data-lexical-decorator="true"],[data-testid*="mention"],button'
++                  )).some((node) =>
++                    String(node.innerText || node.textContent || '').trim().toLowerCase().includes(wanted)
++                  ));
++                })()`,
++                returnByValue: true,
++            });
++            if (probe.result?.value === true) {
++                pillConfirmed = true;
++                break;
++            }
++            await delay(100);
++        }
++        if (!pillConfirmed) {
++            throw new BrowserAutomationError("ChatGPT app mention was not confirmed in the composer.", {
++                stage: "submit-prompt",
++                code: "app-mention-pill-missing",
++                appName,
++            });
++        }
++        await input.insertText({ text: mentionMatch[2] });
++    }
++    else {
++        await input.insertText({ text: prompt });
++    }
+     // Some pages (notably ChatGPT when subscriptions/widgets load) need a brief settle
+     // before the send button becomes enabled; give it a short breather to avoid races.
+     await delay(500);

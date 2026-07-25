@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 
-REGULAR_REASONING_LEVELS = ("High",)
+REGULAR_REASONING_LEVELS = ("Very High", "High")
 DEVSPACE_APP_NAME = "DevSpace"
 
 
@@ -83,6 +83,8 @@ def _resolve_reasoning(requested: str | None) -> str:
     if requested is None or not str(requested).strip():
         return REGULAR_REASONING_LEVELS[0]
     normalized = str(requested).strip().casefold()
+    if normalized in {"very high", "very-high", "extra high", "extra-high", "매우 높음"}:
+        return "Very High"
     if normalized == "high":
         return "High"
     raise OracleProfileError(
@@ -95,7 +97,7 @@ def _resolve_reasoning(requested: str | None) -> str:
 def composer_handoff(mission_path: str | Path) -> str:
     """The only regular-GPT composer text: app mention plus the absolute mission."""
     mission = _absolute_mission_path(mission_path)
-    return f"@{DEVSPACE_APP_NAME}\nRead and execute the mission file: {mission}"
+    return f"@{DEVSPACE_APP_NAME} Read and execute the mission file: {mission}"
 
 
 def build_launch_contract(

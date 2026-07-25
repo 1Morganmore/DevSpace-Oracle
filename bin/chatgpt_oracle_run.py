@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 STATE_PATH = Path(__file__).resolve().with_name("chatgpt_oracle_state.py")
+COMPAT_PATH = Path(__file__).resolve().with_name("chatgpt_oracle_compat.py")
 
 
 def load_state_module():
@@ -24,6 +25,19 @@ def load_state_module():
 
 
 STATE = load_state_module()
+
+
+def load_compat_module():
+    spec = importlib.util.spec_from_file_location("chatgpt_oracle_compat_runtime", COMPAT_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Oracle compatibility module unavailable: {COMPAT_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+COMPAT = load_compat_module()
 
 
 class OracleRunError(RuntimeError):
@@ -42,6 +56,7 @@ def build_oracle_argv(config, layout, prompt: str) -> list[str]:
         "--engine", "browser",
         "--model", config.model,
         "--browser-model-strategy", config.model_strategy,
+        "--browser-thinking-time", config.thinking_time,
         "--browser-research", config.research,
         "--browser-archive", config.archive,
         *config.oracle_args,
@@ -49,6 +64,8 @@ def build_oracle_argv(config, layout, prompt: str) -> list[str]:
         "--prompt", prompt,
         "--write-output", str(layout.output_path),
     ]
+    if config.copy_profile is not None:
+        command[command.index("--slug"):command.index("--slug")] = ["--copy-profile", str(config.copy_profile)]
     if any(item == "--file" or item.startswith("--file=") or item == "-f" for item in command):
         raise OracleRunError("FILE_TRANSPORT_FORBIDDEN", "general GPT browser runs must not use --file")
     return command
@@ -104,6 +121,7 @@ def execute_run(
     run_factory: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     popen_factory: Callable[..., Any] = subprocess.Popen,
     platform_name: str | None = None,
+    compat_factory: Callable[[str], dict[str, Any]] = COMPAT.ensure_oracle_compatibility,
 ) -> dict[str, Any]:
     config = STATE.load_manifest(manifest_path, platform_name=platform_name)
     layout = STATE.create_layout(config, run_id=config.requested_run_id)
@@ -130,11 +148,16 @@ def execute_run(
     layout.stderr_path.touch()
     try:
         version = resolve_oracle_version(config.oracle_command, run_factory=run_factory, platform_name=platform_name)
+        compat_factory(version)
         STATE.update_state(layout.state_path, status="prepared", resolved_version=version)
     except Exception as exc:
         append_error(layout.stderr_path, f"version resolution failed: {exc}")
         STATE.write_transcript(layout)
-        return {"ok": False, "run_dir": str(layout.run_dir), "result": STATE.update_state(layout.state_path, status="failed")}
+        return {
+            "ok": False,
+            "run_dir": str(layout.run_dir),
+            "result": STATE.update_state(layout.state_path, status="failed"),
+        }
 
     try:
         with layout.stdout_path.open("wb") as stdout_handle, layout.stderr_path.open("wb") as stderr_handle:

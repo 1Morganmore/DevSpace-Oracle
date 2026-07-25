@@ -1,0 +1,25 @@
+diff --git a/dist/src/browser/actions/modelSelection.js b/dist/src/browser/actions/modelSelection.js
+index 3e19c41..458b62c 100644
+--- a/dist/src/browser/actions/modelSelection.js
++++ b/dist/src/browser/actions/modelSelection.js
+@@ -1085,6 +1085,20 @@ function buildModelSelectionExpression(targetModel, strategy) {
+         ensureMenuOpen();
+         const match = findBestOption();
+         if (match) {
++          const matchedVisibleSolFamily =
++            desiredModelVariant === 'sol' &&
++            versionFromLabel(match.normalizedText) === desiredVersion &&
++            match.normalizedText.split(' ').includes('sol') &&
++            match.node?.getAttribute?.('aria-haspopup') === 'menu';
++          if (matchedVisibleSolFamily) {
++            // In the unified 2026 picker, "GPT-5.6 Sol" is the family row
++            // while Medium/High/Extra High are the actual selectable effort
++            // rows. Presence of the exact family row verifies the requested
++            // model; the subsequent thinking-time step selects the effort.
++            closeMenu();
++            resolve({ status: 'already-selected', label: match.label });
++            return;
++          }
+           if (
+             activeSelectionMatchesTarget() ||
+             canTrustSelectedOption(match.node, match.normalizedText, match.testid)

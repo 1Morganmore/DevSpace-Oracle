@@ -63,6 +63,8 @@ class OracleConfig:
     submit_mutex_timeout_seconds: float
     model: str
     model_strategy: str
+    thinking_time: str
+    copy_profile: Path | None
     research: str
     archive: str
     parallel_parent_id: str | None
@@ -222,6 +224,19 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
     model_strategy = str(payload.get("model_strategy") or "select").strip().casefold()
     if model_strategy not in {"select", "current", "ignore"}:
         raise OracleStateError("MODEL_STRATEGY_INVALID", "model_strategy must be select, current, or ignore")
+    thinking_time = str(payload.get("thinking_time") or "heavy").strip().casefold()
+    if thinking_time not in {"light", "standard", "extended", "heavy"}:
+        raise OracleStateError(
+            "THINKING_TIME_INVALID",
+            "thinking_time must be light, standard, extended, or heavy",
+        )
+    copy_profile_raw = str(payload.get("copy_profile") or "").strip()
+    copy_profile = absolute_path(copy_profile_raw, label="copy_profile", must_exist=True) if copy_profile_raw else None
+    if copy_profile is not None:
+        if not copy_profile.is_dir():
+            raise OracleStateError("COPY_PROFILE_NOT_DIRECTORY", "copy_profile must identify a directory")
+        if is_within(project_root, copy_profile) or is_within(copy_profile, project_root):
+            raise OracleStateError("COPY_PROFILE_OVERLAPS_PROJECT", "copy_profile must be outside the DevSpace project")
     research = str(payload.get("research") or "off").strip().casefold()
     if research not in {"off", "deep"}:
         raise OracleStateError("RESEARCH_INVALID", "research must be off or deep")
@@ -247,6 +262,8 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
         timeout,
         model,
         model_strategy,
+        thinking_time,
+        copy_profile,
         research,
         archive,
         parallel_parent_id,
@@ -256,13 +273,20 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
 
 def composer_prompt(config: OracleConfig, mission_path: Path | None = None) -> str:
     effective_path = config.mission_path if mission_path is None else mission_path
-    return f"@{config.app_name}\n{effective_path} 파일을 읽고 끝까지 수행하세요."
+    # Keep the Windows npx.cmd prompt in one argument line. A literal newline
+    # truncates the prompt after the app mention before Oracle receives it.
+    return f"@{config.app_name} {effective_path} 파일을 읽고 끝까지 수행하세요."
 
 
 def create_layout(config: OracleConfig, *, run_id: str | None = None) -> RunLayout:
     actual = run_id or f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:12]}"
-    token = re.sub(r"[^a-z0-9]+", "-", config.project_root.name.casefold()).strip("-") or "project"
-    slug = f"oracle-{token[:24]}-{actual[-12:]}"
+    project_words = (re.findall(r"[a-z0-9]+", config.project_root.name.casefold()) or ["project"])[:3]
+    project_token = "-".join(word[:10] for word in project_words)
+    # Oracle accepts 3-5 words and normalizes every word to its first ten
+    # characters. Generate that exact locator up front so recovery never
+    # stores an alias that Oracle cannot resolve later.
+    run_token = actual.rsplit("-", 1)[-1][:10]
+    slug = f"oracle-{project_token}-{run_token}"
     run_dir = config.run_root / actual
     return RunLayout(actual, slug, run_dir, run_dir / "state.json", run_dir / "output.md", run_dir / "transcript.md", run_dir / "stdout.log", run_dir / "stderr.log")
 
@@ -274,6 +298,8 @@ def state_payload(config: OracleConfig, layout: RunLayout, *, status: str, resol
         "profile": {
             "model": config.model,
             "model_strategy": config.model_strategy,
+            "thinking_time": config.thinking_time,
+            "copy_profile": str(config.copy_profile) if config.copy_profile else None,
             "research": config.research,
             "archive": config.archive,
         },

@@ -28,6 +28,8 @@
     "bin/chatgpt_agbrowse_tabs.py",
     "bin/chatgpt_git_isolation.py",
     "bin/chatgpt_oracle_run.py",
+    "bin/chatgpt_oracle_compat.py",
+    "bin/oracle-compat/",
     "bin/chatgpt_oracle_state.py",
     "bin/chatgpt_oracle_profiles.py",
     "bin/chatgpt_oracle_dispatch.py",

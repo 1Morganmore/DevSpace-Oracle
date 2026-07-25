@@ -26,7 +26,9 @@ Each lane receives its own Oracle slug/run/output and only `@DevSpace` plus its
 mission path. Lanes run in stable waves of at most five; a larger topology is
 not reduced. Successful handoffs are preserved and exactly one merger consumes
 their paths in lane order. The parent holds same-project exclusion while child
-launches use a short parent-scoped mutex.
+launches use a short parent-scoped mutex. On Windows each lane uses a separate
+throwaway copy of the signed-in Oracle profile, preventing one solver from
+closing or taking over another solver's Chrome session.
 
 No attachments, app/settings automation, broad tab cleanup, `--force`,
 restart, or silent resubmission. Oracle owns one-shot tab archival. Existing

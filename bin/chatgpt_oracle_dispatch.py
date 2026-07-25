@@ -47,6 +47,7 @@ def compile_manifest(
         "mode": "browser",
         "model": "gpt-5.6",
         "model_strategy": "select",
+        "thinking_time": "heavy",
         "research": "deep" if contract["research"] else "off",
         "archive": "auto",
     }

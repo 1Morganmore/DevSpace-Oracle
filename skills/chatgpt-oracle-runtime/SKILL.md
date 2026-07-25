@@ -11,9 +11,8 @@ agbrowse state remains recovery-only. Pro remains attachment-only.
 Use `chatgpt_oracle_dispatch.py` for `direct`, `plan`, `review`, `edit`,
 `orchestrator`, `deep-research`, `manual`, and `pro` routing. Regular routes
 select `gpt-5.6` and send only `@DevSpace` plus the absolute project mission
-path. Oracle has no contractual High/Very High selector: record High as a
-manual account precondition, never claim it was verified, invent xhigh, or
-silently downgrade.
+path. Regular routes select `GPT-5.6 Sol` with `heavy` and require Oracle
+evidence for visible `Extra High`. Never invent xhigh or silently downgrade.
 
 ## Manifest
 
@@ -23,7 +22,8 @@ Require schema `codex.chatgpt.oracle-run/v1` with:
 - `mission_path`: absolute UTF-8 regular file inside the project.
 - `app_name`: one-line app name, without a leading `@`.
 - `mode`: `browser`.
-- Optional `run_root`, `oracle_command`, `oracle_args`, and mutex timeout.
+- Optional `run_root`, `oracle_command`, `oracle_args`, `thinking_time`,
+  hash-validated `copy_profile`, and mutex timeout.
 
 ## Run
 
@@ -56,7 +56,8 @@ Use `--action live` only to keep following the same stored session. A successful
 
 Direct same-project runs hold one cross-process mutex for the entire Oracle
 process lifetime. A Multi parent owns that project mutex while authorized
-children use a short parent-scoped launch mutex and then wait concurrently.
+children use a short parent-scoped launch mutex and isolated copied Chrome
+profiles, then wait concurrently.
 Control state, Oracle output, and transcripts live under
 `%USERPROFILE%\.codex\state\chatgpt-oracle`, outside the DevSpace-writable
 project.

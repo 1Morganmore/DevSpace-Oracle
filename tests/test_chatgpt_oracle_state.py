@@ -56,10 +56,18 @@ def test_prompt_is_plain_app_plus_absolute_mission_instruction(tmp_path: Path) -
     mission = tmp_path / "mission.md"
     mission.write_text("work", encoding="utf-8")
     config = state.load_manifest(manifest(tmp_path, mission.resolve()))
-    assert state.composer_prompt(config).splitlines() == [
-        "@CodexPro",
-        f"{mission.resolve()} 파일을 읽고 끝까지 수행하세요.",
-    ]
+    prompt = state.composer_prompt(config)
+    assert prompt == f"@CodexPro {mission.resolve()} 파일을 읽고 끝까지 수행하세요."
+    assert "\n" not in prompt
+
+
+def test_layout_uses_oracle_exact_ten_character_session_suffix(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    config = state.load_manifest(manifest(tmp_path, mission.resolve()))
+    layout = state.create_layout(config, run_id="20260725T151414Z-a3aeba967d99")
+    assert layout.slug == "oracle-test-layout-uses-a3aeba967d"
 
 
 def test_nonempty_output_mutex_and_windows_flags(tmp_path: Path) -> None:
@@ -93,6 +101,11 @@ def test_unsafe_oracle_args_are_rejected(tmp_path: Path) -> None:
         manifest(tmp_path, mission.resolve(), oracle_args=["--timeout", "45m", "--no-notify", "--heartbeat=20"])
     )
     assert config.oracle_args == ("--timeout", "45m", "--no-notify", "--heartbeat=20")
+    assert config.model_strategy == "select"
+    assert config.thinking_time == "heavy"
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(tmp_path, mission.resolve(), thinking_time="xhigh"))
+    assert exc.value.code == "THINKING_TIME_INVALID"
     with pytest.raises(state.OracleStateError) as exc:
         state.load_manifest(manifest(tmp_path, mission.resolve(), oracle_command=["powershell", "-Command", "echo unsafe"]))
     assert exc.value.code == "ORACLE_COMMAND_FORBIDDEN"

@@ -143,6 +143,7 @@ def _oracle_manifest(config: dict[str, Any], mission: Path, stage_dir: Path, run
         "mode": "browser",
         "model": config["model"],
         "model_strategy": "select",
+        "thinking_time": "heavy",
         "research": "off",
         "archive": "auto",
         "parallel_parent_id": config["_parallel_parent_id"],
