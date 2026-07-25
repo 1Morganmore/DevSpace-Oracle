@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 
 PATH = Path(__file__).resolve().parents[1] / "bin" / "chatgpt_oracle_multi.py"
 
@@ -38,6 +40,17 @@ def make_manifest(tmp_path: Path, count: int = 7) -> Path:
         "merger_mission_path": str(merger.resolve()),
     }), encoding="utf-8")
     return manifest
+
+
+def test_manifest_rejects_non_devspace_app(tmp_path: Path) -> None:
+    module = load()
+    path = make_manifest(tmp_path, 2)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["app_name"] = "OtherWorkspace"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(module.MultiError, match="exactly DevSpace"):
+        module.load_manifest(path)
 
 
 def test_multi_uses_unique_child_manifests_waves_and_merger(tmp_path: Path) -> None:

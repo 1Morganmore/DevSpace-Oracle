@@ -13,6 +13,11 @@ from typing import Any, Iterable
 CODEX_HOME = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
 BRIDGE_PATH = Path(__file__).resolve().with_name("chatgpt_agbrowse_bridge.py")
 DEFAULT_CONTRACT = CODEX_HOME / "contracts" / "agbrowse-0.1.18.json"
+LEGACY_NEW_SUBMISSION_FROZEN = "LEGACY_NEW_SUBMISSION_FROZEN"
+LEGACY_NEW_SUBMISSION_MESSAGE = (
+    "new ChatGPT submissions through agbrowse/CodexPro are frozen; "
+    "use the Oracle runtime. This legacy entrypoint is recovery-only."
+)
 
 
 def _load_bridge():
@@ -442,13 +447,35 @@ def main(argv: Iterable[str] | None = None) -> int:
     args, unknown = build_parser().parse_known_args(list(argv) if argv is not None else None)
     if unknown:
         raise SystemExit(f"unsupported legacy arguments: {' '.join(unknown)}")
+    recovery_requested = any(
+        (
+            args.recover_run,
+            args.retry_completed_cleanup,
+            args.poll_run,
+            args.show_run,
+            args.observe_run,
+            args.abandon_uncertain_run,
+            args.doctor_project_lock,
+            args.reconcile_project_lock,
+        )
+    )
+    if (
+        args.prepare_session
+        or args.config
+        or args.manifest
+        or not recovery_requested
+    ):
+        payload = {
+            "ok": False,
+            "error": {
+                "code": LEGACY_NEW_SUBMISSION_FROZEN,
+                "message": LEGACY_NEW_SUBMISSION_MESSAGE,
+            },
+        }
+        print(json.dumps(compact_envelope(payload) if args.compact else payload, ensure_ascii=False, indent=2))
+        return 2
     try:
-        if args.prepare_session:
-            contract = BRIDGE.read_contract(args.contract)
-            executable = BRIDGE.contract_executable(contract)
-            manifest = load_manifest(args.config or args.manifest) if (args.config or args.manifest) else {}
-            result = {"ok": True, "result": prepare_browser(executable, manifest)}
-        elif args.doctor_project_lock or args.reconcile_project_lock:
+        if args.doctor_project_lock or args.reconcile_project_lock:
             store = BRIDGE.STATE.RunStore(args.state_root)
             root = args.reconcile_project_lock or args.doctor_project_lock
             record = store.reconcile_project_lock(
@@ -486,12 +513,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 _, record = bridge.store.load(args.show_run)
             result = {"ok": True, "result": record}
         else:
-            manifest_path = (args.config or args.manifest)
-            if not manifest_path:
-                raise RuntimeError("--config/--manifest is required")
-            manifest_path = manifest_path.expanduser().resolve()
-            manifest = load_manifest(manifest_path)
-            result = dry_run(manifest, args.contract) if args.dry_run else execute(manifest_path, args.contract, args.state_root)
+            raise RuntimeError(LEGACY_NEW_SUBMISSION_MESSAGE)
         output = compact_envelope(result) if args.compact else result
         print(json.dumps(output, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 2

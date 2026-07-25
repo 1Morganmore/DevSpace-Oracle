@@ -64,9 +64,18 @@ def build_oracle_argv(config, layout, prompt: str) -> list[str]:
         "--prompt", prompt,
         "--write-output", str(layout.output_path),
     ]
+    if config.transport == "pro-attachment-only":
+        attachment_args: list[str] = []
+        for path in config.attachments:
+            attachment_args.extend(["--file", str(path)])
+        command[command.index("--slug"):command.index("--slug")] = [
+            "--browser-attachments", "always", *attachment_args,
+        ]
     if config.copy_profile is not None:
         command[command.index("--slug"):command.index("--slug")] = ["--copy-profile", str(config.copy_profile)]
-    if any(item == "--file" or item.startswith("--file=") or item == "-f" for item in command):
+    if config.transport != "pro-attachment-only" and any(
+        item == "--file" or item.startswith("--file=") or item == "-f" for item in command
+    ):
         raise OracleRunError("FILE_TRANSPORT_FORBIDDEN", "general GPT browser runs must not use --file")
     return command
 
@@ -100,11 +109,16 @@ def dry_run_payload(config, layout, argv: Sequence[str], prompt: str) -> dict[st
         "prompt_first_line": prompt.splitlines()[0],
         "mission_path": str(config.mission_path),
         "mission_sha256": config.mission_sha256,
+        "transport": config.transport,
+        "attachments": [
+            {"path": str(path), "sha256": digest}
+            for path, digest in zip(config.attachments, config.attachment_sha256s, strict=True)
+        ],
         "output_path": str(layout.output_path),
         "transcript_path": str(layout.transcript_path),
         "stdout_path": str(layout.stdout_path),
         "stderr_path": str(layout.stderr_path),
-        "contains_file_flag": False,
+        "contains_file_flag": "--file" in argv,
     }
 
 
@@ -141,6 +155,14 @@ def execute_run(
             "mission bytes changed after manifest validation",
             {"expected": config.mission_sha256, "actual": actual_mission_sha256},
         )
+    for attachment, expected in zip(config.attachments, config.attachment_sha256s, strict=True):
+        actual = STATE.sha256_file(attachment)
+        if actual != expected:
+            raise OracleRunError(
+                "ATTACHMENT_CHANGED_BEFORE_PREPARE",
+                "attachment bytes changed after manifest validation",
+                {"path": str(attachment), "expected": expected, "actual": actual},
+            )
     layout.run_dir.mkdir(parents=True, exist_ok=False)
     transport_mission_path.write_bytes(mission_bytes)
     STATE.write_json_atomic(layout.state_path, STATE.state_payload(config, layout, status="prepared", resolved_version="unresolved"))
@@ -179,6 +201,14 @@ def execute_run(
                             "evidence_actual": current_mission_sha256,
                         },
                     )
+                for attachment, expected in zip(config.attachments, config.attachment_sha256s, strict=True):
+                    actual = STATE.sha256_file(attachment)
+                    if actual != expected:
+                        raise OracleRunError(
+                            "ATTACHMENT_CHANGED_BEFORE_SUBMIT",
+                            "attachment bytes changed after manifest validation",
+                            {"path": str(attachment), "expected": expected, "actual": actual},
+                        )
                 process = popen_factory(
                     argv,
                     cwd=str(config.project_root),

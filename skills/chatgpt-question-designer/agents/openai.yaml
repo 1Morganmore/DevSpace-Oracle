@@ -1,4 +1,4 @@
 interface:
   display_name: "ChatGPT Question Designer"
-  short_description: "Purpose-specific GPT prompt and authority design."
-  default_prompt: "Design a purpose-specific GPT/browser question with the correct cognitive profile, evidence boundary, action authority, and execution ownership."
+  short_description: "Design Oracle+DevSpace missions or attachment-only Pro packets."
+  default_prompt: "Design a purpose-specific GPT mission using Oracle+DevSpace for non-Pro or exact attachments for Pro; never route new work through CodexPro."

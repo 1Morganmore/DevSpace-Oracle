@@ -1,4 +1,4 @@
-# CodexPro Automation
+# Oracle GPT Automation for Codex
 
 Codex가 웹 ChatGPT에 계획·검토·수정·구현을 맡기고 로컬 토큰 사용을
 줄이기 위한 Windows 자동화입니다.
@@ -10,9 +10,9 @@ Codex가 웹 ChatGPT에 계획·검토·수정·구현을 맡기고 로컬 토�
 - [DevSpace](https://github.com/Waishnav/devspace): 허용한 로컬
   작업공간의 읽기·쓰기·명령 실행 MCP
 
-과거 `agbrowse` 기반 실행 파일은 삭제하지 않았지만 새 질문에는 쓰지
-않습니다. 기존 실행의 정확한 복구와 한 릴리스 롤백용으로만 남습니다.
-Pro 모드는 기존 첨부 전용 경로를 그대로 사용합니다.
+과거 `agbrowse`·CodexPro 기반 실행 파일은 삭제하지 않았지만 새 질문에는
+쓰지 않습니다. 기존 실행의 정확한 복구와 롤백 증거로만 남습니다. 일반
+GPT부터 Pro까지 모든 신규 브라우저 실행은 Oracle 하나로 통일합니다.
 
 ## 왜 단순해졌나
 
@@ -25,6 +25,8 @@ Pro 모드는 기존 첨부 전용 경로를 그대로 사용합니다.
 4. 로컬은 host-only 상태, 해시, 마지막 결정론적 검사만 담당
 
 ChatGPT 설정·앱 목록·권한·삭제·선택 UI를 자동화하지 않습니다.
+기존 전역 규칙에서 agbrowse·CodexPro를 일반 GPT 기본값으로 지정했다면
+[전역 라우팅 안내](docs/GLOBAL_CHATGPT_ROUTING.md)에 맞춰 제거하세요.
 
 ## 모드
 
@@ -38,7 +40,7 @@ ChatGPT 설정·앱 목록·권한·삭제·선택 UI를 자동화하지 않습�
 | 심층 리서치 | Oracle browser research deep + DevSpace |
 | 종합모드 | Oracle plan → optional Pro/Multi → review → implementation → final web gate → local gate |
 | Web Multi-GPT | 독립 Oracle solver 2~25개, 최대 5개씩 wave, 별도 merger |
-| Pro | 기존 attachment-only 경로, DevSpace 금지 |
+| Pro | Oracle attachment-only, DevSpace 금지 |
 
 Oracle 0.16.1의 통합 모델 선택 UI에 맞춘 해시 검증형 호환 패치를
 적용합니다. 일반·계획·검토·수정·지휘·종합·Web Multi는
@@ -62,6 +64,10 @@ cd codexpro-automation
 ```powershell
 .\install.ps1 -WhatIf
 ```
+
+기본 설치는 동결된 agbrowse/CodexPro 의존성을 설치하거나 갱신하지
+않습니다. 이미 저장된 구형 실행을 복구해야 하는 컴퓨터에서만
+`-InstallLegacyRecoveryDependency`를 명시하세요.
 
 ## DevSpace 최초 연결
 
@@ -106,6 +112,24 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
 실제 웹 실행 승인이 있을 때만 `--dry-run`을 뺍니다. 일반 모드에는
 첨부를 사용하지 않습니다.
 
+## Pro 첨부 전용 실행
+
+Pro도 Oracle을 사용하지만 DevSpace를 호출하지 않습니다. 짧은 UTF-8
+지시 파일과 정확한 첨부 파일을 지정하고 먼저 미리봅니다.
+
+```powershell
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
+  --mode pro `
+  --project-root C:\project `
+  --mission-path C:\project\pro.md `
+  --attachment C:\project\packet.zip `
+  --manifest-output C:\project\.ai-bridge\pro.json `
+  --dry-run
+```
+
+첨부 파일과 해시, Pro 모델 선택, 출력 위치가 정확할 때만 실제 실행합니다.
+Oracle 실패를 일반 GPT나 agbrowse로 자동 전환하지 않습니다.
+
 ## 종합모드
 
 `codex.chatgpt.oracle-comprehensive/v1` manifest를
@@ -149,8 +173,8 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_run.py" recover `
 .\uninstall.ps1
 ```
 
-기존 agbrowse 상태 파일은 마이그레이션 중 삭제하지 않습니다. 새 경로가
-안정화된 한 릴리스 뒤에만 제거 후보를 검토합니다.
+기존 agbrowse와 CodexPro 상태 파일은 삭제하지 않습니다. 신규 제출에는
+쓰지 않고 기존 실행의 정확한 복구 증거로만 보존합니다.
 
 ## 보안과 라이선스
 

@@ -148,12 +148,17 @@ def prepared_bridge(
                 "full_access": True,
             }
         )
+    fake_tab_lifecycle = FakeTabLifecycle()
+    fake_tab_lifecycle.env = {
+        "BROWSER_AGENT_HOME": str(tmp_path / "browser-agent"),
+        "CDP_PORT": "9222",
+    }
     bridge = BRIDGE.Bridge(
         state_root=tmp_path / "state",
         runner=runner,
         app_connector_factory=app_connector_factory,
         app_identity_probe=healthy_identity,
-        tab_lifecycle_factory=lambda _executable, _manifest: FakeTabLifecycle(),
+        tab_lifecycle_factory=lambda _executable, _manifest: fake_tab_lifecycle,
         headed_runtime_preflight=headed_runtime_preflight,
     )
     record = bridge.prepare(project_root=str(project), manifest_path=str(manifest), contract_path=str(contract))
@@ -708,6 +713,7 @@ def test_parent_owned_child_rejects_second_send_before_browser_mutation(tmp_path
         ),
         app_identity_probe=healthy_identity,
         tab_lifecycle_factory=lambda _executable, _manifest: FakeTabLifecycle(),
+        headed_runtime_preflight=False,
     )
 
     first = bridge.send(child["run_dir"])
@@ -1091,6 +1097,7 @@ def test_app_transaction_exception_blocks_project_before_submission(tmp_path: Pa
         runner=lambda *_: completed({"ok": True}),
         app_connector_factory=lambda _executable: FakeAppConnector(error=RuntimeError("ui drift")),
         app_identity_probe=healthy_identity,
+        headed_runtime_preflight=False,
     )
     record = bridge.prepare(project_root=str(project), manifest_path=str(manifest), contract_path=str(contract))
     run_dir = tmp_path / "state" / "projects" / record["project_key"] / "runs" / record["run_id"]
@@ -1231,6 +1238,11 @@ def test_headed_start_records_owned_blank_target_for_app_connector(tmp_path: Pat
     )
 
     class Lifecycle:
+        env = {
+            "BROWSER_AGENT_HOME": str(tmp_path / "browser-agent"),
+            "CDP_PORT": "9222",
+        }
+
         @staticmethod
         def list_tabs():
             return [

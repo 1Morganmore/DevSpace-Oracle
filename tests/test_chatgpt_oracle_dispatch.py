@@ -36,12 +36,30 @@ def test_regular_and_deep_research_compile_to_oracle_without_attachments(tmp_pat
         assert value["research"] == research
 
 
-def test_pro_and_manual_never_compile_oracle_manifest(tmp_path: Path) -> None:
+def test_pro_compiles_attachment_only_oracle_and_manual_never_launches(tmp_path: Path) -> None:
     module = load()
-    for mode in ("pro", "manual"):
-        target = tmp_path / f"{mode}.json"
-        result = module.compile_manifest(
-            mode=mode, project_root=tmp_path, mission_path=None, output_path=target
-        )
-        assert result["oracle_manifest_path"] is None
-        assert not target.exists()
+    prompt = tmp_path / "prompt.txt"
+    packet = tmp_path / "packet.zip"
+    prompt.write_text("instructions", encoding="utf-8")
+    packet.write_bytes(b"PK\x03\x04packet")
+    pro_target = tmp_path / "pro.json"
+    pro = module.compile_manifest(
+        mode="pro",
+        project_root=tmp_path,
+        mission_path=prompt,
+        output_path=pro_target,
+        attachment_paths=[prompt, packet],
+    )
+    value = json.loads(pro_target.read_text(encoding="utf-8"))
+    assert pro["contract"]["route"] == "oracle-pro-attachment-only"
+    assert value["transport"] == "pro-attachment-only"
+    assert value["model"] == "gpt-5.5-pro"
+    assert value["attachments"] == [str(prompt.resolve()), str(packet.resolve())]
+    assert "app_name" not in value
+
+    manual_target = tmp_path / "manual.json"
+    manual = module.compile_manifest(
+        mode="manual", project_root=tmp_path, mission_path=None, output_path=manual_target
+    )
+    assert manual["oracle_manifest_path"] is None
+    assert not manual_target.exists()

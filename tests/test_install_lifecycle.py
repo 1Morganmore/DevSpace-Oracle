@@ -48,9 +48,11 @@ def test_update_records_and_validates_an_atomic_contract() -> None:
     assert 'schedule' not in text.lower()
 
 
-def test_installer_uses_skip_dependency_switch_and_explicit_update() -> None:
+def test_installer_freezes_legacy_dependency_unless_explicitly_requested() -> None:
     text = (ROOT / 'install.ps1').read_text(encoding='utf-8')
-    assert 'if(!$SkipDependencyInstall)' in text
+    assert '$InstallLegacyRecoveryDependency' in text
+    assert '$ManageLegacyDependency' in text
+    assert 'legacy-recovery-dependencies-frozen' in text
     assert "Join-Path $RepoRoot 'update.ps1'" in text
     assert 'agbrowse dependency install failed' in text
     assert '-PreflightToken $dependencyPreflightToken' in text
@@ -163,7 +165,10 @@ def test_failed_dependency_preflight_leaves_existing_managed_file_byte_identical
         (mock / 'python.cmd').write_text('@echo off\nexit /b 0\n', encoding='utf-8')
         env = os.environ.copy()
         env['PATH'] = str(mock) + os.pathsep + env['PATH']
-        result = run_powershell('-File', str(ROOT / 'install.ps1'), '-CodexHome', home, env=env)
+        result = run_powershell(
+            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home,
+            '-InstallLegacyRecoveryDependency', env=env,
+        )
         assert result.returncode != 0
         assert managed.read_bytes() == original
 
@@ -242,7 +247,10 @@ def test_normal_install_dependency_receipt_rolls_back_mocked_npm_and_contract_ex
         env['PATH'] = str(mock) + os.pathsep + env['PATH']
         env['MOCK_NPM_STATE'] = str(state)
 
-        installed = run_powershell('-File', str(ROOT / 'install.ps1'), '-CodexHome', home, env=env)
+        installed = run_powershell(
+            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home,
+            '-InstallLegacyRecoveryDependency', env=env,
+        )
         assert installed.returncode == 0, installed.stderr
         receipt = next((codex_home / 'receipts').glob('codexpro-automation-*.json'))
         value = json.loads(receipt.read_text(encoding='utf-8-sig'))
@@ -288,7 +296,10 @@ def test_dependency_inverse_rejects_registry_integrity_mismatch_after_mocked_ins
         (mock / 'agbrowse.cmd').write_text('@echo off\necho mocked\n', encoding='utf-8')
         env = os.environ.copy()
         env.update({'PATH': str(mock) + os.pathsep + env['PATH'], 'MOCK_NPM_STATE': str(state), 'MOCK_PRIOR_INTEGRITY': 'recorded-prior-integrity'})
-        installed = run_powershell('-File', str(ROOT / 'install.ps1'), '-CodexHome', home, env=env)
+        installed = run_powershell(
+            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home,
+            '-InstallLegacyRecoveryDependency', env=env,
+        )
         assert installed.returncode == 0, installed.stderr
         receipt = next((codex_home / 'receipts').glob('codexpro-automation-*.json'))
         env['MOCK_PRIOR_INTEGRITY'] = 'drifted-prior-integrity'

@@ -40,6 +40,17 @@ def manifest(tmp_path: Path) -> Path:
     return path
 
 
+def test_manifest_rejects_non_devspace_app_before_workflow_creation(tmp_path: Path) -> None:
+    module = load()
+    path = manifest(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["app_name"] = "OtherWorkspace"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(module.WorkflowError, match="exactly DevSpace"):
+        module.load_manifest(path)
+
+
 def test_web_authored_relay_reaches_complete_without_host_semantic_rewrite(tmp_path: Path) -> None:
     module = load()
     order = ["plan", "review", "implementation", "final-web-gate"]
@@ -89,6 +100,152 @@ def test_web_authored_relay_reaches_complete_without_host_semantic_rewrite(tmp_p
     assert result["ok"] is True
     assert seen == order
     assert result["status"] == "complete"
+
+
+def test_pro_stage_runs_oracle_attachment_only_and_materializes_bound_receipt(tmp_path: Path) -> None:
+    module = load()
+    stages = []
+
+    def regular_receipt(mission: Path, stage: str, next_stage: str, next_mission: Path) -> None:
+        text = mission.read_text(encoding="utf-8")
+        attempt = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("attempt_id="))
+        input_sha = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("input_mission_sha256="))
+        output = mission.parent / "regular-output.md"
+        output.write_text(stage, encoding="utf-8")
+        (mission.parent / "stage-result.json").write_text(json.dumps({
+            "schema": module.RECEIPT_SCHEMA, "workflow_id": "a" * 32, "stage": stage,
+            "attempt_id": attempt, "input_mission_sha256": input_sha, "status": "PASS",
+            "output_path": str(output), "output_sha256": module.sha(output),
+            "next_stage": next_stage, "next_mission_path": str(next_mission),
+            "next_mission_sha256": module.sha(next_mission), "ready_for_next": True, "blocker": "",
+        }), encoding="utf-8")
+
+    def fake_execute(path: Path, *, dry_run: bool):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        mission = Path(payload["mission_path"])
+        text = mission.read_text(encoding="utf-8")
+        stage = next(item for item in ("plan", "pro", "review", "implementation", "final-web-gate") if f"stage={item}\n" in text)
+        stages.append(stage)
+        if stage == "pro":
+            assert payload["transport"] == "pro-attachment-only"
+            assert payload["model"] == "gpt-5.5-pro"
+            assert payload["attachments"] == [str(mission)]
+            assert "app_name" not in payload
+            attempt = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("attempt_id="))
+            input_sha = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("input_mission_sha256="))
+            oracle_output = mission.parent / "oracle-output.json"
+            oracle_output.write_text(json.dumps({
+                "schema": module.PRO_OUTPUT_SCHEMA, "workflow_id": "a" * 32, "stage": "pro",
+                "attempt_id": attempt, "input_mission_sha256": input_sha, "status": "PASS",
+                "output_text": "Pro decision\nsecond line\n", "next_stage": "review",
+                "next_mission_text": "Review the Pro decision independently.\nPreserve LF.\n",
+                "ready_for_next": True, "blocker": "",
+            }), encoding="utf-8")
+            return {"ok": True, "run_dir": str(mission.parent / "run"), "output_path": str(oracle_output)}
+        next_stage = {
+            "plan": "pro", "review": "implementation",
+            "implementation": "final-web-gate", "final-web-gate": "complete",
+        }[stage]
+        next_mission = tmp_path / f"next-{stage}.md"
+        next_mission.write_text(f"mission after {stage}", encoding="utf-8")
+        regular_receipt(mission, stage, next_stage, next_mission)
+        return {"ok": True, "run_dir": str(mission.parent / "run")}
+
+    result = module.run_workflow(
+        manifest(tmp_path),
+        oracle_execute=fake_execute,
+        local_gate_runner=lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    assert result["ok"] is True, result
+    assert stages == ["plan", "pro", "review", "implementation", "final-web-gate"]
+    pro_stage = next((tmp_path / "workflow" / "stages").glob("01-pro-*"))
+    assert (pro_stage / "output.md").read_bytes() == b"Pro decision\nsecond line\n"
+    assert (pro_stage / "next-mission.md").read_bytes() == b"Review the Pro decision independently.\nPreserve LF.\n"
+    receipt = json.loads((pro_stage / "stage-result.json").read_text(encoding="utf-8"))
+    assert receipt["stage"] == "pro"
+    assert receipt["next_stage"] == "review"
+
+
+def test_pro_exact_recovery_materializes_output_without_resubmission(tmp_path: Path) -> None:
+    module = load()
+    workflow_path = manifest(tmp_path)
+    config = module.load_manifest(workflow_path)
+    config["_parallel_parent_id"] = "b" * 64
+    attempt = "c" * 32
+    source = tmp_path / "pro-source.md"
+    source.write_text("Pro review request", encoding="utf-8")
+    mission, receipt, input_sha = module._pro_stage_mission(config, "a" * 32, 1, source, attempt)
+    oracle_manifest = module._oracle_manifest(config, mission, mission.parent, attempt, stage="pro")
+    run_dir = _oracle_running_state(module, oracle_manifest)
+    state_path = module._state_path(config, "a" * 32)
+    module._write(state_path, {
+        "schema": module.STATE_SCHEMA, "status": "attention_required", "workflow_id": "a" * 32,
+        "manifest_sha256": config["manifest_sha256"], "current_stage": "pro",
+        "current_attempt_id": attempt, "current_input_sha256": input_sha,
+        "current_mission_path": str(source), "receipt_path": str(receipt),
+        "oracle_run_id": attempt, "oracle_run_dir": str(run_dir),
+        "oracle_manifest_path": str(oracle_manifest), "next_index": 1, "records": [],
+    })
+    oracle_output = run_dir / "recovered-output.json"
+    oracle_output.write_text(json.dumps({
+        "schema": module.PRO_OUTPUT_SCHEMA, "workflow_id": "a" * 32, "stage": "pro",
+        "attempt_id": attempt, "input_mission_sha256": input_sha, "status": "PASS",
+        "output_text": "Recovered Pro result", "next_stage": "review",
+        "next_mission_text": "Review recovered Pro result.",
+        "ready_for_next": True, "blocker": "",
+    }), encoding="utf-8")
+    submissions = 0
+
+    def no_pro_resubmit(path: Path, *, dry_run: bool):
+        nonlocal submissions
+        submissions += 1
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["transport"] == "devspace"
+        return {"ok": False, "run_dir": str(_oracle_running_state(module, path))}
+
+    def fake_recover(exact_run_dir: Path, *, action: str, dry_run: bool):
+        assert exact_run_dir == run_dir
+        return {"ok": True, "status": "complete", "run_dir": str(run_dir), "output_path": str(oracle_output)}
+
+    result = module.run_workflow(
+        workflow_path, oracle_execute=no_pro_resubmit, oracle_recover=fake_recover
+    )
+    assert result["status"] == "attention_required"
+    assert result["current_stage"] == "review"
+    assert submissions == 1
+    assert receipt.is_file()
+    assert (receipt.parent / "output.md").read_text(encoding="utf-8") == "Recovered Pro result"
+
+
+@pytest.mark.parametrize("mutation", ["duplicate", "additional"])
+def test_pro_output_rejects_duplicate_or_additional_keys(tmp_path: Path, mutation: str) -> None:
+    module = load()
+    workflow_path = manifest(tmp_path)
+    config = module.load_manifest(workflow_path)
+    config["_parallel_parent_id"] = "b" * 64
+    attempt = "d" * 32
+    source = tmp_path / "pro-source.md"
+    source.write_text("Pro request", encoding="utf-8")
+    mission, receipt, input_sha = module._pro_stage_mission(config, "a" * 32, 1, source, attempt)
+    output = tmp_path / "pro-output.json"
+    base = {
+        "schema": module.PRO_OUTPUT_SCHEMA, "workflow_id": "a" * 32, "stage": "pro",
+        "attempt_id": attempt, "input_mission_sha256": input_sha, "status": "PASS",
+        "output_text": "result", "next_stage": "review", "next_mission_text": "review",
+        "ready_for_next": True, "blocker": "",
+    }
+    if mutation == "additional":
+        base["unexpected"] = "forbidden"
+        output.write_text(json.dumps(base), encoding="utf-8")
+    else:
+        valid = json.dumps(base)
+        output.write_text(valid[:-1] + ',"status":"PASS"}', encoding="utf-8")
+    with pytest.raises(module.WorkflowError, match="duplicate key|closed key set"):
+        module._materialize_pro_receipt(
+            config, receipt, "a" * 32, attempt, input_sha,
+            {"output_path": str(output)},
+        )
+    assert not receipt.exists()
 
 
 def test_missing_receipt_fails_closed_without_duplicate_stage(tmp_path: Path) -> None:

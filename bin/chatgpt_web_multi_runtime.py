@@ -21,6 +21,7 @@ V2_SCHEMA = "codex.chatgpt.web-multi/v2"
 SCHEMA = V1_SCHEMA
 STAGE_SCHEMA = "codex.chatgpt.web-multi-stage/v1"
 RESULT_SCHEMA = "codex.chatgpt.web-multi-result/v1"
+LEGACY_NEW_SUBMISSION_FROZEN = "LEGACY_NEW_SUBMISSION_FROZEN"
 V2_SEMANTICS_VERSION = "upstream-parity-v1"
 V2_ALLOWED_KEYS = frozenset(
     {
@@ -859,11 +860,13 @@ class WebMultiRuntime:
         state_root: Path | None = None,
         stage_executor: StageExecutor | None = None,
         bridge_factory: Callable[[], Any] | None = None,
+        recovery_only: bool = False,
     ):
         self.manifest_path = manifest_path.expanduser().resolve(strict=True)
         self.manifest = validate_manifest(read_mapping(self.manifest_path), self.manifest_path)
         self.store = STATE.RunStore(state_root)
         self.stage_executor = stage_executor
+        self.recovery_only = bool(recovery_only)
         self.bridge_factory = bridge_factory or (lambda: BRIDGE.Bridge(state_root=self.store.root))
         self.workflow_id = str(self.manifest["workflow_id"])
         self.workflow_dir = Path(self.manifest["output_dir"]) / self.workflow_id
@@ -1428,6 +1431,18 @@ class WebMultiRuntime:
     def _fake_execute(self, child: dict[str, Any], spec: StageSpec, artifacts: Mapping[str, Any]) -> tuple[dict[str, Any], float, float]:
         run_dir = str(child["run_dir"])
         _, current = self.store.load(run_dir)
+        if self.recovery_only and current["phase"] in {
+            "CREATED",
+            "PREFLIGHTED",
+            "LEASED",
+            "PREFLIGHT_BLOCKED",
+            "BLOCKED_APP_TRANSACTION",
+            "SEND_REJECTED",
+        }:
+            raise WebMultiError(
+                LEGACY_NEW_SUBMISSION_FROZEN,
+                f"legacy recovery cannot fake-submit a pre-submit child: {spec.stage_id}",
+            )
         if current["phase"] == "CREATED":
             current = self.store.transition(run_dir, "PREFLIGHTED")
         if current["phase"] == "PREFLIGHTED":
@@ -1497,10 +1512,25 @@ class WebMultiRuntime:
         try:
             _, current = self.store.load(run_dir)
             if current["phase"] == "CREATED":
+                if self.recovery_only:
+                    raise WebMultiError(
+                        LEGACY_NEW_SUBMISSION_FROZEN,
+                        f"legacy recovery cannot submit an unsent child: {spec.stage_id}",
+                    )
                 current = self.store.transition(run_dir, "PREFLIGHTED")
             if current["phase"] == "SEND_REJECTED":
+                if self.recovery_only:
+                    raise WebMultiError(
+                        LEGACY_NEW_SUBMISSION_FROZEN,
+                        f"legacy recovery cannot retry a rejected pre-submit child: {spec.stage_id}",
+                    )
                 current = bridge.authorize_pre_submit_retry(run_dir)
             if current["phase"] in {"PREFLIGHTED", "LEASED", "PREFLIGHT_BLOCKED", "BLOCKED_APP_TRANSACTION", "SEND_REJECTED"}:
+                if self.recovery_only:
+                    raise WebMultiError(
+                        LEGACY_NEW_SUBMISSION_FROZEN,
+                        f"legacy recovery cannot send a pre-submit child: {spec.stage_id}",
+                    )
                 retry_limit = max(0, min(5, int(self.manifest.get("safe_pre_submit_retry_limit") or 5)))
                 retry_started = time.monotonic()
                 retry_deadline_seconds = max(
@@ -1851,8 +1881,13 @@ class WebMultiRuntime:
                 self._intervals.append((result.generation_started_at, result.generation_ended_at, spec.stage_id))
             return result
 
-        artifacts = self._stage_artifacts(spec, self.parent, evidence_map)
         child = self._existing_child(spec.stage_id)
+        if child is None and self.recovery_only:
+            raise WebMultiError(
+                LEGACY_NEW_SUBMISSION_FROZEN,
+                f"legacy recovery cannot create an unsubmitted child stage: {spec.stage_id}",
+            )
+        artifacts = self._stage_artifacts(spec, self.parent, evidence_map)
         if child is None:
             with self._mutex:
                 child = self._children.get(spec.stage_id)
@@ -2998,12 +3033,13 @@ def main(argv: Iterable[str] | None = None) -> int:
             return 0
         if not args.manifest:
             raise WebMultiError("MANIFEST_REQUIRED", "--manifest is required")
-        runtime = WebMultiRuntime(args.manifest)
-        result = (
-            runtime.dry_run()
-            if args.dry_run
-            else run_with_provider_failure_retries(args.manifest, resume_parent=args.resume_parent)
-        )
+        if not args.resume_parent:
+            raise WebMultiError(
+                LEGACY_NEW_SUBMISSION_FROZEN,
+                "new Web Multi submissions through the agbrowse runtime are frozen; use Oracle Web Multi",
+            )
+        runtime = WebMultiRuntime(args.manifest, recovery_only=True)
+        result = runtime.run(resume_parent=args.resume_parent)
         print(json.dumps({"ok": True, "result": result}, ensure_ascii=False, indent=2))
         return 0
     except BaseException as exc:

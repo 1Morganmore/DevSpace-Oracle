@@ -55,16 +55,34 @@ def test_regular_reasoning_rejects_unsupported_level_without_downgrade(tmp_path:
     assert exc.value.evidence["supported"] == ["Very High", "High"]
 
 
-def test_pro_is_explicit_legacy_attachment_only_and_manual_launches_nothing() -> None:
+def test_pro_is_oracle_attachment_only_and_manual_launches_nothing(tmp_path: Path) -> None:
     profiles = load_profiles()
-    pro = profiles.build_launch_contract("pro")
+    mission = (tmp_path / "prompt.txt").resolve()
+    packet = (tmp_path / "packet.zip").resolve()
+    pro = profiles.build_launch_contract("pro", mission_path=mission, attachment_paths=[mission, packet])
     manual = profiles.build_launch_contract("manual")
-    assert pro["route"] == "legacy-pro-attachment-only"
+    assert pro["route"] == "oracle-pro-attachment-only"
     assert pro["app_policy"] == "forbidden"
-    assert pro["oracle_launch"] is False
+    assert pro["oracle_launch"] is True
+    assert pro["devspace_required"] is False
+    assert pro["model"] == "gpt-5.5-pro"
+    assert pro["attachment_policy"] == "always"
+    assert pro["attachments"] == [str(mission), str(packet)]
+    assert pro["composer_prompt"] == "Read the attached prompt/instructions and all attached files, then complete the task."
+    assert "@DevSpace" not in pro["composer_prompt"]
     assert manual["route"] == "manual-no-launch"
     assert manual["composer_prompt"] is None
     assert manual["oracle_launch"] is False
+
+
+def test_pro_includes_mission_once_and_regular_rejects_attachments(tmp_path: Path) -> None:
+    profiles = load_profiles()
+    mission = (tmp_path / "prompt.txt").resolve()
+    pro = profiles.build_launch_contract("pro", mission_path=mission, attachment_paths=[])
+    assert pro["attachments"] == [str(mission)]
+    with pytest.raises(profiles.OracleProfileError) as exc:
+        profiles.build_launch_contract("review", mission_path=mission, attachment_paths=[mission])
+    assert exc.value.code == "REGULAR_ATTACHMENTS_FORBIDDEN"
 
 
 def test_relative_mission_is_rejected(tmp_path: Path) -> None:

@@ -11,6 +11,7 @@ HANDOFF = ROOT / "skills" / "chatgpt-pro-plan-handoff" / "SKILL.md"
 MULTI = ROOT / "skills" / "web-multi-gpt" / "SKILL.md"
 RESEARCH = ROOT / "skills" / "chatgpt-deep-research-browser" / "SKILL.md"
 ORACLE = ROOT / "skills" / "chatgpt-oracle-runtime" / "SKILL.md"
+DESIGNER = ROOT / "skills" / "chatgpt-question-designer" / "SKILL.md"
 
 
 def text(path: Path) -> str:
@@ -26,13 +27,15 @@ def test_new_regular_modes_route_only_to_oracle_devspace() -> None:
     assert "app picker" not in value.casefold()
 
 
-def test_pro_remains_attachment_only_and_never_uses_devspace() -> None:
+def test_pro_is_oracle_attachment_only_and_never_uses_devspace_or_codexpro() -> None:
     value = text(PRO)
     assert "attachment" in value.casefold()
-    assert "app_policy: forbidden" in value
+    assert "Oracle is the only backend for a new Pro run" in value
+    assert "must never invoke DevSpace or CodexPro" not in value
+    assert "There is no new agbrowse, CodexPro, DevSpace" in value
     handoff = text(HANDOFF)
-    assert "Pro is unchanged and attachment-only" in handoff
-    assert "It never\nuses DevSpace or Oracle" in handoff
+    assert "Pro is attachment-only through `chatgpt-pro-browser` and Oracle" in handoff
+    assert "never uses\nDevSpace or CodexPro" in handoff
 
 
 def test_deep_research_uses_oracle_deep_without_silent_fallback() -> None:
@@ -40,6 +43,8 @@ def test_deep_research_uses_oracle_deep_without_silent_fallback() -> None:
     assert "chatgpt_oracle_dispatch.py" in value
     assert "--mode deep-research" in value
     assert "--browser-research deep" in value
+    assert '--reasoning-level "Very High"' in value
+    assert "visible `Extra High`" in value
     assert "Do not silently replace Deep Research" in value
 
 
@@ -87,8 +92,18 @@ def test_install_inventory_contains_new_active_runtime_and_keeps_legacy_recovery
     ):
         assert path in include
     assert "bin/chatgpt_agbrowse_run.py" in include
+    assert manifest["routing"] == {
+        "new_work_engine": "oracle",
+        "regular_workspace_transport": "devspace",
+        "pro_transport": "oracle-attachment-only",
+        "agbrowse": "persisted-run-recovery-only",
+        "codexpro": "persisted-run-recovery-only",
+    }
     assert manifest["external"]["oracle"]["license"] == "MIT"
     assert manifest["external"]["devspace"]["license"] == "MIT"
+    assert manifest["external"]["agbrowse"]["role"] == "persisted-run-recovery-only"
+    assert manifest["external"]["agbrowse"]["default_install"] is False
+    assert manifest["external"]["codexpro"]["frozen"] is True
 
 
 def test_no_new_skill_routes_to_chrome_playwright_or_in_app_fallback() -> None:
@@ -102,3 +117,21 @@ def test_readme_declares_manual_one_time_registration_not_ui_automation() -> Non
     assert "최초 한 번 수동 등록" in value
     assert "ChatGPT 설정·앱 목록·권한·삭제·선택 UI를 자동화하지 않습니다" in value
     assert "기존 실행의 정확한 복구" in value
+
+
+def test_question_designer_cannot_route_new_work_through_codexpro_or_legacy_sessions() -> None:
+    value = text(DESIGNER)
+    assert "CodexPro is frozen for new work" in value
+    assert "never design a new prompt around CodexPro" in value
+    assert "Every new Oracle stage is a one-shot session" in value
+    assert "Do not add legacy `session_policy`" in value
+    assert "verified CodexPro live connector context remains the default" not in value
+
+
+def test_agent_metadata_exposes_oracle_active_routes() -> None:
+    thinking = text(ROOT / "skills" / "chatgpt-thinking-browser" / "agents" / "openai.yaml")
+    multi = text(ROOT / "skills" / "web-multi-gpt" / "agents" / "openai.yaml")
+    pro = text(ROOT / "skills" / "chatgpt-pro-browser" / "agents" / "openai.yaml")
+    assert "Oracle and DevSpace" in thinking
+    assert "parallel Oracle GPT sessions" in multi
+    assert "attachment-only Pro through Oracle" in pro

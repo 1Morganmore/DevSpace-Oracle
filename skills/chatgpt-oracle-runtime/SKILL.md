@@ -5,13 +5,16 @@ description: Run new non-Pro ChatGPT work through Oracle plus the manually regis
 
 # ChatGPT Oracle Runtime
 
-This is the default active browser path for new non-Pro GPT work. Existing
-agbrowse state remains recovery-only. Pro remains attachment-only.
+This is the only active browser path for all new GPT work. CodexPro and
+agbrowse are frozen for exact legacy recovery only. Regular modes use DevSpace;
+Pro uses Oracle attachment transport without any app.
 
 Use `chatgpt_oracle_dispatch.py` for `direct`, `plan`, `review`, `edit`,
 `orchestrator`, `deep-research`, `manual`, and `pro` routing. Regular routes
 select `gpt-5.6` and send only `@DevSpace` plus the absolute project mission
-path. Regular routes select `GPT-5.6 Sol` with `heavy` and require Oracle
+path. Pro selects the account-visible Pro model and sends one short instruction
+plus exact attachment files; it never mentions DevSpace.
+Regular routes select `GPT-5.6 Sol` with `heavy` and require Oracle
 evidence for visible `Extra High`. Never invent xhigh or silently downgrade.
 
 ## Manifest
@@ -20,7 +23,8 @@ Require schema `codex.chatgpt.oracle-run/v1` with:
 
 - `project_root`: absolute existing directory.
 - `mission_path`: absolute UTF-8 regular file inside the project.
-- `app_name`: one-line app name, without a leading `@`.
+- `app_name`: one-line app name, without a leading `@`, for regular routes.
+- `task_kind: pro` plus one or more exact `attachments` for Pro.
 - `mode`: `browser`.
 - Optional `run_root`, `oracle_command`, `oracle_args`, `thinking_time`,
   hash-validated `copy_profile`, and mutex timeout.

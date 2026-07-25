@@ -1,5 +1,13 @@
 # Release checklist
 
+New submissions use Oracle only. CodexPro and agbrowse checks below apply only
+to packaging integrity and exact recovery of already-persisted legacy runs;
+they are not active routing prerequisites.
+
+The default installer must leave both frozen dependencies untouched.
+`-InstallLegacyRecoveryDependency` is the only opt-in that may install or
+contract-validate agbrowse for an old persisted run.
+
 - Run `python scripts/check_portability.py --root .`, `python scripts/run_v4_contract_tests.py --focused`, `python scripts/run_v3_contract_tests.py`, and `python scripts/run_v4_contract_tests.py --full`.
 - Confirm `install-manifest.json` and `package.json` inventory every shipped runtime/schema file, the v4 runner, and both v7/v8 quiescent app-trace incident fixtures.
 - Confirm MIT copyright is `2026 ventianima-lab` and third-party notices retain the multi-gpt commit/hash attribution.
@@ -26,6 +34,10 @@
 
 # Release lifecycle safety
 
-- `install.ps1` only manages manifest-owned files. CodexPro remains an external runtime acquired by the application bootstrap scripts; `-SkipDependencyInstall` does not change that.
+- `install.ps1` only manages manifest-owned files. By default it neither
+  installs nor updates CodexPro/agbrowse because those dependencies are frozen
+  for new work. `-InstallLegacyRecoveryDependency` is an explicit opt-in used
+  only when an existing persisted legacy run requires that exact recovery
+  runtime; `-SkipDependencyInstall` suppresses dependency mutation entirely.
 - Retain the unique receipt and backup directory. `uninstall.ps1` is a safe inverse: it removes only unchanged created files and restores only unchanged overwritten files; modified destinations are reported as conflicts.
 - Run `doctor.ps1` before an explicit `update.ps1 -AgbrowseVersion <version>`. Updates defer while bridge state is active or uncertain and never terminate it.

@@ -31,26 +31,36 @@ def compile_manifest(
     mission_path: Path | None,
     output_path: Path,
     reasoning_level: str | None = None,
+    attachment_paths: Iterable[Path] | None = None,
 ) -> dict[str, Any]:
-    contract = PROFILES.build_launch_contract(mode, mission_path=mission_path, reasoning_level=reasoning_level)
+    contract = PROFILES.build_launch_contract(
+        mode,
+        mission_path=mission_path,
+        reasoning_level=reasoning_level,
+        attachment_paths=list(attachment_paths or ()),
+    )
     result = {"ok": True, "contract": contract, "oracle_manifest_path": None}
     if not contract["oracle_launch"]:
         return result
     root = project_root.expanduser().resolve(strict=True)
     target = output_path.expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
-    manifest = {
+    manifest: dict[str, Any] = {
         "schema": RUNNER.STATE.SCHEMA,
         "project_root": str(root),
         "mission_path": contract["mission_path"],
-        "app_name": "DevSpace",
         "mode": "browser",
-        "model": "gpt-5.6",
+        "transport": "pro-attachment-only" if contract["mode"] == "pro" else "devspace",
+        "model": contract.get("model") or "gpt-5.6",
         "model_strategy": "select",
         "thinking_time": "heavy",
         "research": "deep" if contract["research"] else "off",
         "archive": "auto",
     }
+    if contract["mode"] == "pro":
+        manifest["attachments"] = contract["attachments"]
+    else:
+        manifest["app_name"] = "DevSpace"
     target.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     result["oracle_manifest_path"] = str(target)
     return result
@@ -63,6 +73,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--mission-path", type=Path)
     parser.add_argument("--manifest-output", type=Path, required=True)
     parser.add_argument("--reasoning-level")
+    parser.add_argument("--attachment", type=Path, action="append", default=[])
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -72,6 +83,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             mission_path=args.mission_path,
             output_path=args.manifest_output,
             reasoning_level=args.reasoning_level,
+            attachment_paths=args.attachment,
         )
         if compiled["oracle_manifest_path"]:
             run = RUNNER.execute_run(Path(compiled["oracle_manifest_path"]), dry_run=args.dry_run)

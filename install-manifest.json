@@ -1,6 +1,6 @@
 {
   "schema": "codexpro.install-manifest/v1",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "include": [
     "bin/chatgpt_agbrowse_bridge.py",
     "bin/chatgpt_agbrowse_composer.py",
@@ -37,6 +37,7 @@
     "bin/codexpro_windows_process_identity.py",
     "bin/mcp_resource_guard.py",
     "skills/chatgpt-thinking-browser/SKILL.md",
+    "skills/chatgpt-thinking-browser/agents/openai.yaml",
     "skills/chatgpt-thinking-browser/scripts/run_chatgpt_thinking.py",
     "skills/chatgpt-thinking-browser/scripts/run_thinking_browser.py",
     "skills/chatgpt-pro-browser/SKILL.md",
@@ -53,6 +54,7 @@
     "skills/chatgpt-workspace-setup/SKILL.md",
     "skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py",
     "skills/web-multi-gpt/SKILL.md",
+    "skills/web-multi-gpt/agents/openai.yaml",
     "skills/chatgpt-pro-plan-handoff/SKILL.md",
     "skills/chatgpt-pro-plan-handoff/scripts/handoff_contract.py",
     "skills/chatgpt-pro-plan-handoff/scripts/goal_cycle_adapter.py",
@@ -68,14 +70,25 @@
     "tests/fixtures/planner-v7-app-trace-quiescent-incident.json",
     "tests/fixtures/planner-v8-app-trace-quiescent-incident.json",
     "skills/chatgpt-question-designer/SKILL.md",
-    "skills/chatgpt-question-designer/agents/openai.yaml"
+    "skills/chatgpt-question-designer/agents/openai.yaml",
+    "skills/mcp-update-guard/SKILL.md",
+    "skills/mcp-update-guard/agents/openai.yaml"
   ],
+  "routing": {
+    "new_work_engine": "oracle",
+    "regular_workspace_transport": "devspace",
+    "pro_transport": "oracle-attachment-only",
+    "agbrowse": "persisted-run-recovery-only",
+    "codexpro": "persisted-run-recovery-only"
+  },
   "external": {
     "agbrowse": {
       "package": "agbrowse",
       "version": "0.1.18",
       "license": "MIT",
-      "integrity": "sha512-vO2E1XrqTAvkWeSyV1xzsONz+OBB3aDKbxIGVS7Z4pH42Hxg/mlcteIAzM+EuD4hnp6Tt5IJu/X2fjMOiftBCA=="
+      "integrity": "sha512-vO2E1XrqTAvkWeSyV1xzsONz+OBB3aDKbxIGVS7Z4pH42Hxg/mlcteIAzM+EuD4hnp6Tt5IJu/X2fjMOiftBCA==",
+      "role": "persisted-run-recovery-only",
+      "default_install": false
     },
     "oracle": {
       "package": "@steipete/oracle",
@@ -90,6 +103,11 @@
       "license": "MIT",
       "installation": "resolved by the explicit setup skill; upstream is not vendored or patched"
     },
-    "codexpro": "external codexpro@latest-on-bootstrap"
+    "codexpro": {
+      "package": "codexpro",
+      "role": "persisted-run-recovery-only",
+      "default_install": false,
+      "frozen": true
+    }
   }
 }

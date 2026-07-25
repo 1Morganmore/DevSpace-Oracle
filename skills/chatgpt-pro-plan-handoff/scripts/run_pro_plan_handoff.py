@@ -66,6 +66,7 @@ PROMPT_FILE_HANDOFF = (
     "Return only the output format requested by that file."
 )
 REGULAR_MODE_VARIANTS = {"High", "Very High"}
+LEGACY_NEW_SUBMISSION_FROZEN = "LEGACY_NEW_SUBMISSION_FROZEN"
 
 
 def preferred_regular_mode_variant() -> str:
@@ -612,6 +613,7 @@ class ProPlanHandoffDriver:
         runtime: RuntimeProtocol | None = None,
         web_multi_runtime: WebMultiRuntimeProtocol | None = None,
         parallel_implementation_runtime: ParallelImplementationRuntimeProtocol | None = None,
+        recovery_only: bool = False,
     ):
         self.manifest_path = manifest_path.resolve()
         raw_manifest = load_mapping(self.manifest_path)
@@ -623,6 +625,7 @@ class ProPlanHandoffDriver:
         self.runtime = runtime or AgbrowseRuntime()
         self.web_multi_runtime = web_multi_runtime or (LocalWebMultiRuntime() if self.manifest["workflow_mode"] == "gpt-comprehensive" else None)
         self.parallel_implementation_runtime = parallel_implementation_runtime
+        self.recovery_only = bool(recovery_only)
         self.workflow_id = str(self.manifest["workflow_id"])
         self.question = str(self.manifest["question"])
         self.question_sha256 = sha256_text(self.question)
@@ -1215,6 +1218,11 @@ class ProPlanHandoffDriver:
             raise WorkflowError("STAGE_CHECKPOINTS_INVALID")
         checkpoint = stages.get(key)
         if checkpoint is None:
+            if self.recovery_only:
+                raise WorkflowError(
+                    LEGACY_NEW_SUBMISSION_FROZEN,
+                    f"legacy recovery cannot create an unsubmitted stage: {key}",
+                )
             checkpoint = {
                 "schema": "codex.chatgpt.stage-checkpoint/v1",
                 "stage": stage,
@@ -1335,6 +1343,11 @@ class ProPlanHandoffDriver:
         # The checkpoint has already committed the nonce/dependencies.  The
         # manifest must therefore be byte-stable too, so a rerun cannot alter
         # the identity that agbrowse uses to locate the original submission.
+        if self.recovery_only and not manifest_path.is_file():
+            raise WorkflowError(
+                LEGACY_NEW_SUBMISSION_FROZEN,
+                f"legacy recovery cannot create an unsubmitted stage manifest: {stage}",
+            )
         write_immutable_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True))
         capture_path = stage_dir / "runtime-capture.json"
         result_capture = stage_dir / "runtime-result.json"
@@ -1357,6 +1370,11 @@ class ProPlanHandoffDriver:
         if recovered:
             run_id = recovered[0]
         else:
+            if self.recovery_only:
+                raise WorkflowError(
+                    LEGACY_NEW_SUBMISSION_FROZEN,
+                    f"legacy recovery found no already-sent run for stage: {stage}",
+                )
             started = dict(self.runtime.start(manifest_path))
             run_id = str(started.get("run_id") or "")
         if not run_id:
@@ -1372,6 +1390,11 @@ class ProPlanHandoffDriver:
             "SUBMISSION_UNCERTAIN_IDENTITY_MISSING",
             "BLOCKED_RECOVERY_EXHAUSTED",
         }:
+            if self.recovery_only and status.get("phase") == "SEND_REJECTED":
+                raise WorkflowError(
+                    LEGACY_NEW_SUBMISSION_FROZEN,
+                    f"legacy recovery cannot retry a pre-submit rejected stage: {stage}",
+                )
             self.runtime.resume(run_id)
             status = dict(self.runtime.wait(run_id))
         if status.get("status") != "completed":
@@ -2223,8 +2246,32 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = parse_args(argv)
+    if not args.manifest.is_file():
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": {
+                        "code": LEGACY_NEW_SUBMISSION_FROZEN,
+                        "message": (
+                            "new staged ChatGPT submissions through the legacy agbrowse handoff are frozen; "
+                            "use the Oracle comprehensive runtime"
+                        ),
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 2
     try:
-        result = ProPlanHandoffDriver(args.manifest).run(prepare_only=args.prepare_only)
+        driver = ProPlanHandoffDriver(args.manifest, recovery_only=True)
+        if not driver.state_path.is_file():
+            raise WorkflowError(
+                LEGACY_NEW_SUBMISSION_FROZEN,
+                "new staged ChatGPT submissions use the Oracle comprehensive runtime",
+            )
+        result = driver.run(prepare_only=args.prepare_only)
         print(json.dumps({"ok": True, "result": result}, ensure_ascii=False, indent=2))
         return 0
     except Exception as exc:

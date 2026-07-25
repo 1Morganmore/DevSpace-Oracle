@@ -17,6 +17,8 @@ from typing import Any
 
 REGULAR_REASONING_LEVELS = ("Very High", "High")
 DEVSPACE_APP_NAME = "DevSpace"
+PRO_MODEL = "gpt-5.5-pro"
+PRO_COMPOSER_PROMPT = "Read the attached prompt/instructions and all attached files, then complete the task."
 
 
 class OracleProfileError(ValueError):
@@ -47,7 +49,7 @@ _PROFILES = {
     "orchestrator": OracleModeProfile("orchestrator", "orchestrator", True, True),
     "deep-research": OracleModeProfile("deep-research", "deep-research", True, True, research=True),
     "manual": OracleModeProfile("manual", "manual", False, False),
-    "pro": OracleModeProfile("pro", "pro", False, False, legacy_route="legacy-pro-attachment-only"),
+    "pro": OracleModeProfile("pro", "pro", True, False),
 }
 _ALIASES = {
     "deep_research": "deep-research",
@@ -100,16 +102,31 @@ def composer_handoff(mission_path: str | Path) -> str:
     return f"@{DEVSPACE_APP_NAME} Read and execute the mission file: {mission}"
 
 
+def _attachment_paths(values: list[str | Path] | tuple[str | Path, ...] | None) -> list[Path]:
+    result: list[Path] = []
+    for value in values or ():
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            raise OracleProfileError(
+                "ATTACHMENT_PATH_ABSOLUTE_REQUIRED",
+                "Pro attachment paths must be absolute",
+                {"attachment_path": str(path)},
+            )
+        result.append(path.resolve(strict=False))
+    return result
+
+
 def build_launch_contract(
     mode: str,
     *,
     mission_path: str | Path | None = None,
     reasoning_level: str | None = None,
+    attachment_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
 ) -> dict[str, Any]:
     """Build an immutable, browser-agnostic launch contract for parent runners.
 
-    `manual` and `pro` intentionally produce non-launch contracts.  Pro remains
-    on the existing attachment-only route and is never silently redirected here.
+    `manual` intentionally produces a non-launch contract. Pro uses the same
+    Oracle browser engine but has a distinct attachment-only transport.
     """
     profile = resolve_profile(mode)
     result: dict[str, Any] = {
@@ -123,16 +140,6 @@ def build_launch_contract(
         "app_picker": False,
         "app_settings_automation": False,
     }
-    if profile.legacy_route:
-        result.update({
-            "route": profile.legacy_route,
-            "app_policy": "forbidden",
-            "attachment_policy": "legacy-pro-attachment-only",
-            "reasoning_level": None,
-            "composer_prompt": None,
-            "mission_path": None,
-        })
-        return result
     if not profile.oracle_launch:
         result.update({
             "route": "manual-no-launch",
@@ -143,6 +150,28 @@ def build_launch_contract(
         })
         return result
     mission = _absolute_mission_path(mission_path)
+    if profile.mode == "pro":
+        attachments = _attachment_paths(attachment_paths)
+        if mission not in attachments:
+            attachments.insert(0, mission)
+        if not attachments:
+            raise OracleProfileError("PRO_ATTACHMENTS_REQUIRED", "Pro requires at least one exact attachment")
+        result.update({
+            "route": "oracle-pro-attachment-only",
+            "app_policy": "forbidden",
+            "attachment_policy": "always",
+            "attachments": [str(path) for path in attachments],
+            "model": PRO_MODEL,
+            "reasoning_level": "Pro",
+            "mission_path": str(mission),
+            "composer_prompt": PRO_COMPOSER_PROMPT,
+        })
+        return result
+    if attachment_paths:
+        raise OracleProfileError(
+            "REGULAR_ATTACHMENTS_FORBIDDEN",
+            "non-Pro Oracle modes use DevSpace and must not attach files",
+        )
     result.update({
         "route": "oracle-devspace",
         "app_policy": "prompt-mention-only",
@@ -160,6 +189,7 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mode")
     parser.add_argument("--mission-path")
     parser.add_argument("--reasoning-level")
+    parser.add_argument("--attachment", action="append", default=[])
     args = parser.parse_args(argv)
     try:
         if args.command == "list":
@@ -167,7 +197,15 @@ def _main(argv: list[str] | None = None) -> int:
         else:
             if not args.mode:
                 raise OracleProfileError("MODE_REQUIRED", "--mode is required for resolve")
-            result = {"ok": True, "contract": build_launch_contract(args.mode, mission_path=args.mission_path, reasoning_level=args.reasoning_level)}
+            result = {
+                "ok": True,
+                "contract": build_launch_contract(
+                    args.mode,
+                    mission_path=args.mission_path,
+                    reasoning_level=args.reasoning_level,
+                    attachment_paths=args.attachment,
+                ),
+            }
     except OracleProfileError as exc:
         print(json.dumps(exc.envelope(), ensure_ascii=False, sort_keys=True))
         return 2

@@ -5,8 +5,9 @@ description: Run staged work with unchanged attachment-only Pro and Oracle-based
 
 # Pro and comprehensive handoff
 
-Pro is unchanged and attachment-only through `chatgpt-pro-browser`. It never
-uses DevSpace or Oracle.
+Pro is attachment-only through `chatgpt-pro-browser` and Oracle. It never uses
+DevSpace or CodexPro. CodexPro and all agbrowse creation are frozen; legacy
+files remain only for exact persisted-run recovery.
 
 New GPT comprehensive work uses
 `bin/chatgpt_oracle_comprehensive.py` with schema
@@ -24,14 +25,21 @@ bound `codex.chatgpt.oracle-stage-result/v1` receipt. The host validates
 workflow/stage/attempt/input hashes, UTF-8 paths, output hashes, PASS status,
 and the transition; it never rewrites the semantic prompt.
 
+An optional Pro stage runs through Oracle attachment-only. Because Pro has no
+DevSpace access, it returns one strict identity-bound JSON envelope containing
+its output and next-mission text. The host mechanically preserves those strings
+as UTF-8 files and computes the standard receipt; it does not summarize or
+rewrite them.
+
 ```powershell
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_comprehensive.py" --manifest C:\project\workflow.json --dry-run
 ```
 
 Only PASS can reach implementation. Only final web PASS plus a zero-exit local
-gate can complete. A Pro selection returns an explicit attachment-only handoff
-and waits for a bound receipt; it is never downgraded. Missing receipt/output,
-crash, or ambiguity returns attention-required without a replacement submit.
+gate can complete. A Pro selection launches an explicit Oracle attachment-only
+stage and waits for a bound receipt; it is never downgraded. Missing
+receipt/output, crash, or ambiguity returns attention-required without a
+replacement submit.
 
 Existing v1-v4 agbrowse comprehensive state and v3 parallel implementation are
 legacy recovery-only. Their files remain installed for exact recovery but are

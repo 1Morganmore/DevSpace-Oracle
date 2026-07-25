@@ -924,6 +924,25 @@ def main() -> int:
     execute_parser.add_argument("--parent-run-dir", required=True)
     execute_parser.add_argument("--capacity-receipt")
     args = parser.parse_args()
+    if args.command in {"prepare", "resume", "execute"}:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": {
+                        "errorCode": "LEGACY_NEW_SUBMISSION_FROZEN",
+                        "message": (
+                            "new or resumed provider submissions through the legacy parallel implementation "
+                            "runtime are frozen; use Oracle Web Multi"
+                        ),
+                        "evidence": {},
+                    },
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 2
     try:
         if args.command == "prepare":
             initial_receipt = read_json(Path(args.capacity_receipt).resolve(strict=True)) if args.capacity_receipt else None

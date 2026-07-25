@@ -32,4 +32,5 @@ closing or taking over another solver's Chrome session.
 
 No attachments, app/settings automation, broad tab cleanup, `--force`,
 restart, or silent resubmission. Oracle owns one-shot tab archival. Existing
-agbrowse Multi state is recovery-only.
+agbrowse Multi state is recovery-only. CodexPro is frozen and is never a solver
+or merger transport.

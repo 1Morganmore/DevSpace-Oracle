@@ -13,6 +13,11 @@ from typing import Any, Callable, Iterable
 
 SCHEMA = "codex.chatgpt.oracle-comprehensive/v1"
 RECEIPT_SCHEMA = "codex.chatgpt.oracle-stage-result/v1"
+PRO_OUTPUT_SCHEMA = "codex.chatgpt.oracle-pro-stage-output/v1"
+PRO_OUTPUT_KEYS = {
+    "schema", "workflow_id", "stage", "attempt_id", "input_mission_sha256",
+    "status", "output_text", "next_stage", "next_mission_text", "ready_for_next", "blocker",
+}
 STATE_SCHEMA = "codex.chatgpt.oracle-comprehensive-state/v1"
 STAGES = {"plan", "pro", "web-multi", "review", "implementation", "final-web-gate"}
 TRANSITIONS = {
@@ -86,13 +91,16 @@ def load_manifest(path: Path) -> dict[str, Any]:
     workflow_id = str(value.get("workflow_id") or "").strip()
     if not workflow_id or not all(character in "0123456789abcdef-" for character in workflow_id.casefold()):
         raise WorkflowError("workflow_id must be stable hex/UUID text")
+    app_name = str(value.get("app_name") or "DevSpace").strip()
+    if app_name != "DevSpace":
+        raise WorkflowError("app_name must be exactly DevSpace")
     return {
         **value,
         "project_root": root,
         "workflow_dir": workflow_dir,
         "initial_mission_path": mission,
         "max_stages": maximum,
-        "app_name": str(value.get("app_name") or "DevSpace"),
+        "app_name": app_name,
         "model": str(value.get("model") or "gpt-5.6"),
         "local_gate_command": list(local_gate),
         "manifest_sha256": sha(path.resolve(strict=True)),
@@ -133,23 +141,157 @@ def _stage_mission(
     return target, receipt, input_sha
 
 
-def _oracle_manifest(config: dict[str, Any], mission: Path, stage_dir: Path, run_id: str) -> Path:
+def _pro_stage_mission(
+    config: dict[str, Any],
+    workflow_id: str,
+    index: int,
+    source: Path,
+    attempt_id: str,
+) -> tuple[Path, Path, str]:
+    stage_dir = config["workflow_dir"] / "stages" / f"{index:02d}-pro-{attempt_id[:12]}"
+    receipt = stage_dir / "stage-result.json"
+    target = stage_dir / "mission.md"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    input_sha = sha(source)
+    body = source.read_text(encoding="utf-8")
+    protocol = (
+        "\n\n[HOST_STAGE_CONTRACT]\n"
+        f"workflow_id={workflow_id}\nstage=pro\nstage_index={index}\n"
+        f"attempt_id={attempt_id}\ninput_mission_sha256={input_sha}\n"
+        "Return exactly one JSON object and no surrounding prose or Markdown fences. "
+        f"The schema must be {PRO_OUTPUT_SCHEMA}. Include workflow_id, stage, attempt_id, "
+        "input_mission_sha256, status, output_text, next_stage, next_mission_text, ready_for_next, blocker. "
+        "A passing result requires status=PASS, next_stage=review, ready_for_next=true, an empty blocker, "
+        "and nonempty output_text and next_mission_text. The host will preserve those two strings exactly, "
+        "materialize them as UTF-8 files, and validate their hashes without rewriting their meaning.\n"
+    )
+    target.write_text(body.rstrip() + protocol, encoding="utf-8")
+    return target, receipt, input_sha
+
+
+def _oracle_manifest(
+    config: dict[str, Any],
+    mission: Path,
+    stage_dir: Path,
+    run_id: str,
+    *,
+    stage: str,
+) -> Path:
     path = stage_dir / "oracle.json"
-    _write(path, {
+    payload: dict[str, Any] = {
         "schema": RUNNER.STATE.SCHEMA,
         "project_root": str(config["project_root"]),
         "mission_path": str(mission),
-        "app_name": config["app_name"],
         "mode": "browser",
-        "model": config["model"],
+        "model": "gpt-5.5-pro" if stage == "pro" else config["model"],
         "model_strategy": "select",
         "thinking_time": "heavy",
         "research": "off",
         "archive": "auto",
         "parallel_parent_id": config["_parallel_parent_id"],
         "run_id": run_id,
-    })
+    }
+    if stage == "pro":
+        payload["transport"] = "pro-attachment-only"
+        payload["attachments"] = [str(mission)]
+    else:
+        payload["transport"] = "devspace"
+        payload["app_name"] = config["app_name"]
+    _write(path, payload)
     return path
+
+
+def _oracle_output_path(result: dict[str, Any], run_dir: Any = None) -> Path | None:
+    direct = str(result.get("output_path") or "").strip()
+    if direct:
+        return Path(direct).expanduser()
+    nested = result.get("result")
+    if isinstance(nested, dict):
+        artifacts = nested.get("artifacts")
+        if isinstance(artifacts, dict) and str(artifacts.get("output") or "").strip():
+            return Path(str(artifacts["output"])).expanduser()
+    if run_dir:
+        state_path = Path(str(run_dir)).expanduser() / "state.json"
+        if state_path.is_file():
+            state = RUNNER.STATE.load_state(state_path)
+            artifacts = state.get("artifacts")
+            if isinstance(artifacts, dict) and str(artifacts.get("output") or "").strip():
+                return Path(str(artifacts["output"])).expanduser()
+    return None
+
+
+def _materialize_pro_receipt(
+    config: dict[str, Any],
+    receipt_path: Path,
+    workflow_id: str,
+    attempt_id: str,
+    input_sha: str,
+    oracle_result: dict[str, Any],
+    *,
+    run_dir: Any = None,
+) -> None:
+    output_path = _oracle_output_path(oracle_result, run_dir)
+    if output_path is None or not output_path.resolve(strict=True).is_file():
+        raise WorkflowError("Pro Oracle output is unavailable")
+
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise WorkflowError(f"Pro Oracle output contains duplicate key: {key}")
+            value[key] = item
+        return value
+
+    try:
+        envelope = json.loads(
+            output_path.read_text(encoding="utf-8"),
+            object_pairs_hook=reject_duplicate_keys,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WorkflowError("Pro Oracle output must be one strict UTF-8 JSON object") from exc
+    if not isinstance(envelope, dict) or set(envelope) != PRO_OUTPUT_KEYS:
+        raise WorkflowError("Pro Oracle output must contain the exact closed key set")
+    if (
+        envelope.get("schema") != PRO_OUTPUT_SCHEMA
+        or envelope.get("workflow_id") != workflow_id
+        or envelope.get("stage") != "pro"
+        or envelope.get("attempt_id") != attempt_id
+        or envelope.get("input_mission_sha256") != input_sha
+    ):
+        raise WorkflowError("Pro Oracle output identity mismatch")
+    output_text = envelope.get("output_text")
+    next_mission_text = envelope.get("next_mission_text")
+    if (
+        envelope.get("status") != "PASS"
+        or envelope.get("next_stage") != "review"
+        or envelope.get("ready_for_next") is not True
+        or envelope.get("blocker")
+        or not isinstance(output_text, str)
+        or not output_text.strip()
+        or not isinstance(next_mission_text, str)
+        or not next_mission_text.strip()
+    ):
+        raise WorkflowError("Pro Oracle output did not pass")
+    stage_dir = receipt_path.parent
+    materialized_output = stage_dir / "output.md"
+    next_mission = stage_dir / "next-mission.md"
+    materialized_output.write_bytes(output_text.encode("utf-8"))
+    next_mission.write_bytes(next_mission_text.encode("utf-8"))
+    _write(receipt_path, {
+        "schema": RECEIPT_SCHEMA,
+        "workflow_id": workflow_id,
+        "stage": "pro",
+        "attempt_id": attempt_id,
+        "input_mission_sha256": input_sha,
+        "status": "PASS",
+        "output_path": str(materialized_output),
+        "output_sha256": sha(materialized_output),
+        "next_stage": "review",
+        "next_mission_path": str(next_mission),
+        "next_mission_sha256": sha(next_mission),
+        "ready_for_next": True,
+        "blocker": "",
+    })
 
 
 def _validate_receipt(
@@ -289,7 +431,7 @@ def _run_workflow_locked(
         mission, receipt_path, input_sha = _stage_mission(
             config, workflow_id, 0, "plan", config["initial_mission_path"], attempt_id
         )
-        oracle_manifest = _oracle_manifest(config, mission, mission.parent, attempt_id)
+        oracle_manifest = _oracle_manifest(config, mission, mission.parent, attempt_id, stage="plan")
         preview = oracle_execute(oracle_manifest, dry_run=True)
         return {
             "ok": bool(preview.get("ok")),
@@ -421,6 +563,16 @@ def _run_workflow_locked(
                 }
                 _write(state_path, blocked)
                 return {"ok": False, **blocked}
+            if stored.get("current_stage") == "pro" and not Path(str(stored["receipt_path"])).is_file():
+                _materialize_pro_receipt(
+                    config,
+                    Path(str(stored["receipt_path"])),
+                    workflow_id,
+                    str(stored["current_attempt_id"]),
+                    str(stored["current_input_sha256"]),
+                    recovered,
+                    run_dir=stored.get("oracle_run_dir"),
+                )
             awaiting = {
                 **stored, "status": "awaiting_receipt", "records": records,
                 "recovery": {"status": "recovered", "run_id": stored.get("oracle_run_id") or stored.get("current_attempt_id"), "run_dir": stored.get("oracle_run_dir")},
@@ -448,30 +600,6 @@ def _run_workflow_locked(
             "next_index": 0, "records": records,
         })
     for index in range(start_index, config["max_stages"]):
-        if stage == "pro":
-            attempt_id = uuid.uuid4().hex
-            input_sha = sha(source)
-            pro_dir = config["workflow_dir"] / "pro" / attempt_id[:12]
-            receipt_path = pro_dir / "stage-result.json"
-            handoff_path = pro_dir / "handoff.json"
-            _write(handoff_path, {
-                "schema": "codex.chatgpt.oracle-pro-handoff/v1",
-                "workflow_id": workflow_id,
-                "stage": "pro",
-                "attempt_id": attempt_id,
-                "input_mission_path": str(source),
-                "input_mission_sha256": input_sha,
-                "receipt_path": str(receipt_path),
-                "transport": "existing-attachment-only-pro",
-            })
-            result = {"schema": STATE_SCHEMA, "status": "attention_required", "workflow_id": workflow_id,
-                      "manifest_sha256": config["manifest_sha256"],
-                      "next_action": "run existing attachment-only Pro handoff, then provide a bound Pro receipt",
-                      "next_stage": "pro", "next_mission_path": str(source), "next_index": index,
-                      "current_attempt_id": attempt_id, "current_input_sha256": input_sha,
-                      "receipt_path": str(receipt_path), "pro_handoff_path": str(handoff_path), "records": records}
-            _write(state_path, result)
-            return {"ok": False, **result}
         if stage == "web-multi":
             # This complete preflight is intentionally before the send-boundary
             # state write.  An invalid Multi manifest is a retryable pre-submit
@@ -513,9 +641,16 @@ def _run_workflow_locked(
             })
             continue
         attempt_id = uuid.uuid4().hex
-        mission, receipt_path, input_sha = _stage_mission(config, workflow_id, index, stage, source, attempt_id)
+        if stage == "pro":
+            mission, receipt_path, input_sha = _pro_stage_mission(
+                config, workflow_id, index, source, attempt_id
+            )
+        else:
+            mission, receipt_path, input_sha = _stage_mission(
+                config, workflow_id, index, stage, source, attempt_id
+            )
         stage_dir = mission.parent
-        oracle_manifest = _oracle_manifest(config, mission, stage_dir, attempt_id)
+        oracle_manifest = _oracle_manifest(config, mission, stage_dir, attempt_id, stage=stage)
         oracle_config = RUNNER.STATE.load_manifest(oracle_manifest)
         oracle_layout = RUNNER.STATE.create_layout(oracle_config, run_id=attempt_id)
         _write(state_path, {
@@ -528,6 +663,16 @@ def _run_workflow_locked(
         })
         run = oracle_execute(oracle_manifest, dry_run=False)
         records.append({"stage": stage, "run_dir": run.get("run_dir"), "ok": bool(run.get("ok"))})
+        if stage == "pro" and run.get("ok") and not receipt_path.is_file():
+            _materialize_pro_receipt(
+                config,
+                receipt_path,
+                workflow_id,
+                attempt_id,
+                input_sha,
+                run,
+                run_dir=run.get("run_dir"),
+            )
         if run.get("ok"):
             _write(state_path, {
                 "schema": STATE_SCHEMA, "status": "awaiting_receipt", "workflow_id": workflow_id,

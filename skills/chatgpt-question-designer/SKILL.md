@@ -45,7 +45,7 @@ Every non-trivial GPT/browser question should include:
 1. `Goal`: what decision or artifact the answer should improve.
 2. `Original task`: preserve the user's request separately from any candidate artifact.
 3. `Cognitive profile`: answer, research, plan, review, edit, orchestrator, synthesis, or an explicit Web Multi role.
-4. `Evidence boundary`: list verified live connector context, attached fallback files, web/source constraints, freshness limits, and what cannot be inspected.
+4. `Evidence boundary`: list the live DevSpace workspace scope for regular GPT, exact attachments for Pro, web/source constraints, freshness limits, and what cannot be inspected.
 5. `Action authority`: read-only, bounded workspace write, or mission-owned adaptive execution.
 6. `Confidence discipline`: separate evidence-backed findings, inference, speculation, and unknowns.
 7. `Answer shape`: compact sections; no vague approval; code-shaped output when code-oriented.
@@ -60,39 +60,39 @@ State material uncertainty and stay within the declared action and file scope.
 
 Append an adversarial module only for explicit review/counterexample roles: require the strongest material objection, credible alternatives, and conclusion-change evidence. Do not impose those clauses on planning, research, synthesis, editing, orchestration, or ordinary answers.
 
-## Evidence Context Rules
+## Transport and Evidence Context Rules
 
 Context selection must match the question type.
 
-- Code/design/debug/refactor: prefer verified live local connector access, such as CodexPro `tree/search/read`, for source files, configs, schemas, tests, logs, error output, current plan/spec, and relevant `AGENTS.md` when they affect behavior. Use attachments or ZIP only as fallback/supplement when live connector access is unavailable, unverified, disabled, or intentionally snapshot-based.
-- Planning/review: prefer verified live local connector access for draft plan, research summary, acceptance criteria, rubric/checklist, constraints, local guidance, and known open risks. Attach fallback packets only when live connector access is unavailable or the exact snapshot is itself the review target.
-- Investigation/source synthesis: provide internal findings packet, source list, contradictory evidence, and provenance through live connector access where possible. Use web/search separately for current facts.
-- Idea expansion: provide the seed idea, constraints, non-goals, target audience, and existing alternatives through live connector access or a compact fallback packet.
+- New non-Pro direct, plan, review, edit, orchestrator, Deep Research, comprehensive, and Web Multi work uses Oracle plus the manually registered `DevSpace` workspace. The composer receives only `@DevSpace` and the absolute UTF-8 mission path. The mission tells GPT which project files, logs, tests, constraints, and artifacts to inspect through DevSpace.
+- Pro uses Oracle with exact snapshot attachments only. It must not use DevSpace, CodexPro, or another app.
+- CodexPro is frozen for new work. It may appear only while recovering an already persisted legacy agbrowse run; never design a new prompt around CodexPro `tree/search/read`, app registration, app repair, or a CodexPro fallback.
+- Code/design/debug/refactor: give the regular web GPT a narrow project-contained mission and let it inspect the live workspace through DevSpace. Do not duplicate the workspace into attachments or a ZIP.
+- Planning/review: identify the live draft, research, acceptance criteria, local guidance, and known risks by project-relative paths in the mission. Use an attachment packet only for Pro or when the exact immutable snapshot is itself the requested evidence.
+- Investigation/source synthesis: identify internal findings and provenance in the DevSpace-visible mission, and use web/search separately for current public facts.
+- Idea expansion: put the seed, constraints, non-goals, audience, and known alternatives in the mission; do not preselect a conclusion.
 
-Fail closed instead of sending a thin prompt when the question is code-oriented and neither verified live local context nor relevant fallback attachments are available.
+For a new non-Pro project task, a failed or unavailable DevSpace endpoint blocks submission and routes only to `chatgpt-workspace-setup` diagnosis. It never authorizes CodexPro, ZIP, agbrowse, in-app Browser, Playwright/CDP, or `@chrome` fallback. For Pro, missing exact Oracle attachments blocks submission.
 
-Use ZIP transport only as fallback when many selected files would produce fragile upload tiles or exceed the configured threshold and verified live connector context is not available. For regular non-Pro GPT-5.6 project-local runs, verified CodexPro live connector context remains the default; ZIP is degraded snapshot fallback only after concrete CodexPro app/transport failure plus lazy repair/retry evidence, or an explicit deeper local transport override. Keep direct raw anchors for exact code, schema, diffs, validators, errors, security evidence, and release fixtures when those exact snapshots are the evidence under review.
-
-## Session Continuity Rules
+## Oracle Continuity Rules
 
 This skill designs the prompt packet; it must not erase local project question templates or force every follow-up into a new ChatGPT conversation.
 
-- For a same inquiry chain, preserve the local prompt/template shape and add session metadata to the runner manifest: `session_policy: auto` plus a stable `session_affinity_key` / `inquiry_chain_id`; use `session_policy: reuse` only when continuing the same chain is explicit and safe.
-- Reuse is allowed only when the current question continues the same objective, artifact, decision chain, or investigation thread; the prior conversation's latest state is still valid; model family, reasoning level or Pro variant, search setting, app connector, attachment/source transport, and local template boundary are materially unchanged; and the run is not an independent review, verifier, release gate, fresh-source review, contamination check, or approval gate.
-- For independent review, fresh research, contaminated prior context, topic/project/artifact/route pivot, changed mode/variant/search/official-source semantics, changed transport/app connector, wrong prior premise, stale or superseded evidence, too-long/degraded conversation, or local-template boundary changes, set `session_policy: new` or provide a concrete `session_reset_triggers` list.
-- The ChatGPT web UI does not expose exact token visibility. Use practical rotation signals: roughly 8-12 substantive turns starts a soft rotation check; 12-15 substantive turns, multiple large attachments, more than two user corrections of prior assumptions, multiple unrelated route/artifact IDs, or visible answer confusion should normally rotate to a fresh conversation with a compact state summary.
-- Explicit `chat_url` is for deliberate conversation continuation or answer retrieval and takes precedence over affinity lookup.
+- Every new Oracle stage is a one-shot session with its own exact slug. Do not add legacy `session_policy`, `session_affinity_key`, `inquiry_chain_id`, or `chat_url` fields to a new Oracle manifest.
+- Preserve semantic continuity in project-contained mission and handoff files. In comprehensive mode, the completing web stage writes the next stage's exact mission and receipt; local Codex validates bytes, paths, hashes, identity, and transition without rewriting its meaning.
+- Recovery uses only the stored exact Oracle slug with `harvest` or `live`. It never restarts, resubmits, or changes the model/reasoning level.
+- Genuine Web Multi uses distinct Oracle sessions and copied profiles for independent lanes. Use it only when simultaneous independent solvers materially help; never simulate multiple roles inside one session and never replace it with local Codex exploration.
 - Local `AGENTS.md`, local skills, and task-specific question templates outrank the shared integrity contract. Preserve their answer shape and apply only compatible evidence and session metadata.
-- Do not use session reuse to satisfy independent approval, plan-review, verifier, or release gates; those lanes need fresh or explicitly scoped evidence unless their own local rule says otherwise.
+- Independent approval, plan review, verifier, and release gates use fresh stages with explicitly scoped evidence.
 
 ## Anti-Bias Gates
 
 Before submission, check:
 
 - `one-sided context`: only the preferred plan or happy path is attached.
-- `missing negative evidence`: failures, logs, rejected alternatives, or user complaints are absent from the live connector scope or fallback packet.
-- `stale packet`: fallback attachments no longer match the current draft, diff, branch, or run.
-- `too-broad packet`: many files are attached without an evidence map or question boundary.
+- `missing negative evidence`: failures, logs, rejected alternatives, or user complaints are absent from the DevSpace-visible scope or Pro attachment packet.
+- `stale packet`: a Pro attachment no longer matches the current draft, diff, branch, or run.
+- `too-broad packet`: a mission grants a broad workspace without an evidence map or question boundary.
 - `conclusion leakage`: prompt asks for approval before asking for objections.
 - `role collapse`: prompt asks one model to both invent and approve without counterexample pressure.
 
@@ -108,7 +108,7 @@ Skip GPT/browser questioning when:
 - the prompt would ask for approval of a conclusion already proven by tests;
 - no useful counterexample, source freshness, alternative design, or external synthesis is expected.
 
-Use Multi-GPT before GPT/browser only when broad context, many attachments, or policy/architecture stakes make a bad prompt costly. Multi-GPT remains advisory and should shape questions, not replace browser/source authority.
+Use genuine Web Multi-GPT only when independent parallel solvers are worth the latency and one merger can consume their file handoffs. It does not replace DevSpace evidence authority and must not increase local Codex exploration.
 
 ## Output Checklist
 

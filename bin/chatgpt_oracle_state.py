@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 SCHEMA = "codex.chatgpt.oracle-run/v1"
+DEVSPACE_APP_NAME = "DevSpace"
 STATE_SCHEMA = "codex.chatgpt.oracle-run-state/v1"
 STATUSES = {"prepared", "running", "complete", "failed", "attention_required"}
 WAIT_OBJECT_0 = 0
@@ -55,8 +56,11 @@ class OracleConfig:
     project_root: Path
     mission_path: Path
     mission_sha256: str
-    app_name: str
+    app_name: str | None
     mode: str
+    transport: str
+    attachments: tuple[Path, ...]
+    attachment_sha256s: tuple[str, ...]
     run_root: Path
     oracle_command: tuple[str, ...]
     oracle_args: tuple[str, ...]
@@ -104,6 +108,20 @@ def absolute_path(value: Any, *, label: str, must_exist: bool) -> Path:
         return raw.resolve(strict=must_exist)
     except OSError as exc:
         raise OracleStateError(f"{label.upper()}_INVALID", f"{label} could not be resolved", {"path": str(raw)}) from exc
+
+
+def exact_regular_file(value: Any, *, label: str) -> Path:
+    raw = Path(str(value or "")).expanduser()
+    code_prefix = label.upper()
+    file_code = "MISSION_FILE_INVALID" if label == "mission_path" else f"{code_prefix}_FILE_INVALID"
+    if not raw.is_absolute():
+        raise OracleStateError(f"{code_prefix}_ABSOLUTE_REQUIRED", f"{label} must be an absolute path", {"path": str(raw)})
+    if raw.is_symlink():
+        raise OracleStateError(file_code, f"{label} must not be a symlink", {"path": str(raw)})
+    path = absolute_path(raw, label=label, must_exist=True)
+    if not path.is_file():
+        raise OracleStateError(file_code, f"{label} must identify a regular file", {"path": str(path)})
+    return path
 
 
 def is_within(root: Path, candidate: Path) -> bool:
@@ -185,18 +203,45 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
     project_root = absolute_path(payload.get("project_root"), label="project_root", must_exist=True)
     if not project_root.is_dir():
         raise OracleStateError("PROJECT_ROOT_NOT_DIRECTORY", "project_root must identify a directory")
-    mission_path = absolute_path(payload.get("mission_path"), label="mission_path", must_exist=True)
-    if not mission_path.is_file() or mission_path.is_symlink():
-        raise OracleStateError("MISSION_FILE_INVALID", "mission_path must identify a regular non-symlink file")
-    if not is_within(project_root, mission_path):
-        raise OracleStateError("MISSION_OUTSIDE_PROJECT", "mission_path must stay inside project_root")
+    mission_path = exact_regular_file(payload.get("mission_path"), label="mission_path")
     read_utf8_strict(mission_path)
-    app_name = str(payload.get("app_name") or "").strip().lstrip("@").strip()
-    if not app_name or APP_RE.fullmatch(app_name) is None:
-        raise OracleStateError("APP_NAME_INVALID", "app_name must be one nonempty line")
     mode = str(payload.get("mode") or "browser").strip().casefold()
     if mode != "browser":
         raise OracleStateError("MODE_INVALID", "Oracle foundation runner supports mode=browser only")
+    transport = str(payload.get("transport") or "devspace").strip().casefold()
+    if transport not in {"devspace", "pro-attachment-only"}:
+        raise OracleStateError("TRANSPORT_INVALID", "transport must be devspace or pro-attachment-only")
+    app_name_raw = str(payload.get("app_name") or "").strip().lstrip("@").strip()
+    if transport == "devspace":
+        if not is_within(project_root, mission_path):
+            raise OracleStateError("MISSION_OUTSIDE_PROJECT", "mission_path must stay inside project_root")
+        if not app_name_raw or APP_RE.fullmatch(app_name_raw) is None:
+            raise OracleStateError("APP_NAME_INVALID", "app_name must be one nonempty line")
+        if app_name_raw != DEVSPACE_APP_NAME:
+            raise OracleStateError(
+                "DEVSPACE_APP_REQUIRED",
+                f"new non-Pro Oracle runs require the exact app name {DEVSPACE_APP_NAME}",
+                {"app_name": app_name_raw},
+            )
+        app_name: str | None = app_name_raw
+        if payload.get("attachments"):
+            raise OracleStateError("REGULAR_ATTACHMENTS_FORBIDDEN", "DevSpace runs must not attach files")
+        attachments: tuple[Path, ...] = ()
+    else:
+        if app_name_raw:
+            raise OracleStateError("PRO_APP_FORBIDDEN", "Pro attachment-only runs must not name an app")
+        app_name = None
+        raw_attachments = payload.get("attachments")
+        if not isinstance(raw_attachments, list) or not raw_attachments:
+            raise OracleStateError("PRO_ATTACHMENTS_REQUIRED", "Pro requires one or more exact attachment files")
+        attachments = tuple(
+            exact_regular_file(value, label=f"attachment_{index}")
+            for index, value in enumerate(raw_attachments)
+        )
+        if len(set(attachments)) != len(attachments):
+            raise OracleStateError("PRO_ATTACHMENTS_DUPLICATE", "Pro attachment paths must be unique")
+        if mission_path not in attachments:
+            raise OracleStateError("PRO_MISSION_ATTACHMENT_REQUIRED", "mission_path must be one of the Pro attachments")
     state_root = oracle_state_root()
     if is_within(project_root, state_root) or is_within(state_root, project_root):
         raise OracleStateError(
@@ -230,6 +275,17 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
             "THINKING_TIME_INVALID",
             "thinking_time must be light, standard, extended, or heavy",
         )
+    if transport == "pro-attachment-only":
+        if model.casefold() != "gpt-5.5-pro":
+            raise OracleStateError(
+                "PRO_MODEL_INVALID",
+                "Pro attachment-only runs require Oracle's current Pro alias gpt-5.5-pro; no downgrade is allowed",
+                {"model": model},
+            )
+        if model_strategy != "select":
+            raise OracleStateError("PRO_MODEL_STRATEGY_INVALID", "Pro requires explicit model selection")
+        if thinking_time != "heavy":
+            raise OracleStateError("PRO_THINKING_TIME_INVALID", "Pro requires heavy reasoning")
     copy_profile_raw = str(payload.get("copy_profile") or "").strip()
     copy_profile = absolute_path(copy_profile_raw, label="copy_profile", must_exist=True) if copy_profile_raw else None
     if copy_profile is not None:
@@ -240,6 +296,8 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
     research = str(payload.get("research") or "off").strip().casefold()
     if research not in {"off", "deep"}:
         raise OracleStateError("RESEARCH_INVALID", "research must be off or deep")
+    if transport == "pro-attachment-only" and research != "off":
+        raise OracleStateError("PRO_RESEARCH_FORBIDDEN", "Pro attachment-only runs do not enable research mode")
     archive = str(payload.get("archive") or "auto").strip().casefold()
     if archive not in {"auto", "always", "never"}:
         raise OracleStateError("ARCHIVE_INVALID", "archive must be auto, always, or never")
@@ -256,6 +314,9 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
         sha256_file(mission_path),
         app_name,
         mode,
+        transport,
+        attachments,
+        tuple(sha256_file(item) for item in attachments),
         run_root,
         oracle_command,
         validate_oracle_args(payload.get("oracle_args")),
@@ -272,6 +333,8 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
 
 
 def composer_prompt(config: OracleConfig, mission_path: Path | None = None) -> str:
+    if config.transport == "pro-attachment-only":
+        return "Read the attached prompt/instructions and all attached files, then complete the task."
     effective_path = config.mission_path if mission_path is None else mission_path
     # Keep the Windows npx.cmd prompt in one argument line. A literal newline
     # truncates the prompt after the app mention before Oracle receives it.
@@ -294,7 +357,7 @@ def create_layout(config: OracleConfig, *, run_id: str | None = None) -> RunLayo
 def state_payload(config: OracleConfig, layout: RunLayout, *, status: str, resolved_version: str, exit_code: int | None = None) -> dict[str, Any]:
     return {
         "schema": STATE_SCHEMA, "run_id": layout.run_id, "project_root": str(config.project_root),
-        "mode": config.mode, "app_name": config.app_name,
+        "mode": config.mode, "transport": config.transport, "app_name": config.app_name,
         "profile": {
             "model": config.model,
             "model_strategy": config.model_strategy,
@@ -309,6 +372,10 @@ def state_payload(config: OracleConfig, layout: RunLayout, *, status: str, resol
             "transport_path": str(layout.run_dir / "mission.md"),
             "sha256": config.mission_sha256,
         },
+        "attachments": [
+            {"path": str(path), "sha256": digest, "size_bytes": path.stat().st_size}
+            for path, digest in zip(config.attachments, config.attachment_sha256s, strict=True)
+        ],
         "oracle": {
             "resolved_version": resolved_version,
             "command": list(config.oracle_command),

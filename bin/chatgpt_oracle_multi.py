@@ -123,6 +123,9 @@ def load_manifest(path: Path) -> dict[str, Any]:
     concurrency = int(value.get("max_concurrency", 5))
     if not 1 <= concurrency <= 5:
         raise MultiError("max_concurrency must be within 1..5")
+    app_name = str(value.get("app_name") or "DevSpace").strip()
+    if app_name != "DevSpace":
+        raise MultiError("app_name must be exactly DevSpace")
     return {
         **value,
         "project_root": root,
@@ -131,7 +134,7 @@ def load_manifest(path: Path) -> dict[str, Any]:
         "merger_mission_path": merger,
         "next_stage_result_path": next_stage_result,
         "max_concurrency": concurrency,
-        "app_name": str(value.get("app_name") or "DevSpace").strip(),
+        "app_name": app_name,
         "model": str(value.get("model") or "gpt-5.6").strip(),
         "copy_profile": Path(
             str(value.get("copy_profile") or (Path.home() / ".oracle" / "browser-profile"))

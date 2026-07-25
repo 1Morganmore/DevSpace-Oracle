@@ -140,7 +140,7 @@ def test_required_app_dry_run_rejects_unselected_connected_auto(tmp_path: Path) 
         raise AssertionError("connected-auto must not be accepted for required-app work")
 
 
-def test_dry_run_redacts_prompt_and_rejects_legacy_cli_flags(tmp_path: Path) -> None:
+def test_legacy_dry_run_is_frozen_without_exposing_prompt(tmp_path: Path) -> None:
     config = manifest(tmp_path, question="TOP-SECRET-PROMPT")
     script = SKILL_ROOT / "scripts" / "run_chatgpt_thinking.py"
     completed = subprocess.run(
@@ -151,10 +151,11 @@ def test_dry_run_redacts_prompt_and_rejects_legacy_cli_flags(tmp_path: Path) -> 
         check=False,
     )
 
-    assert completed.returncode == 0
+    assert completed.returncode == 2
     result = json.loads(completed.stdout)
     assert "TOP-SECRET-PROMPT" not in completed.stdout
-    assert result["command"][result["command"].index("--prompt") + 1] == "<prompt>"
+    assert result["ok"] is False
+    assert result["error"]["code"] == "LEGACY_NEW_SUBMISSION_FROZEN"
 
     rejected = subprocess.run(
         [sys.executable, str(script), "--config", str(config), "--contract", str(CONTRACT), "--dry-run", "--browser-backend", "chrome-cdp"],
@@ -167,7 +168,7 @@ def test_dry_run_redacts_prompt_and_rejects_legacy_cli_flags(tmp_path: Path) -> 
     assert "unsupported legacy arguments" in rejected.stderr
 
 
-def test_compatibility_wrapper_delegates_to_same_agbrowse_entrypoint(tmp_path: Path) -> None:
+def test_compatibility_wrapper_is_recovery_only_and_cannot_submit(tmp_path: Path) -> None:
     config = manifest(tmp_path)
     script = SKILL_ROOT / "scripts" / "run_thinking_browser.py"
     completed = subprocess.run(
@@ -178,11 +179,10 @@ def test_compatibility_wrapper_delegates_to_same_agbrowse_entrypoint(tmp_path: P
         check=False,
     )
 
-    assert completed.returncode == 0
+    assert completed.returncode == 2
     result = json.loads(completed.stdout)
-    assert result["ok"] is True
-    assert result["command"][1:3] == ["web-ai", "send"]
-    assert "--reuse-tab" in result["command"]
+    assert result["ok"] is False
+    assert result["error"]["code"] == "LEGACY_NEW_SUBMISSION_FROZEN"
 
 
 def test_regular_gpt_rejects_optional_app_policy(tmp_path: Path) -> None:
