@@ -136,7 +136,6 @@ def test_prompt_composer_app_pill_probe_uses_the_composer_form_scope() -> None:
 
     assert "root.closest('form') || root.parentElement || root" in patch
     assert "scope.querySelectorAll(" in patch
-    assert "Exact ChatGPT app suggestion could not be clicked." in patch
     assert "target.click();" in patch
     assert "group.querySelectorAll('*')" in patch
     assert "if (pill) return true;" in patch
@@ -148,6 +147,29 @@ def test_prompt_composer_app_pill_probe_uses_the_composer_form_scope() -> None:
     assert "이 대화에 기억" in patch
     assert "remember for this chat" in patch
     assert "allowLabels.has" in patch
+
+
+def test_app_mention_ui_observation_is_a_warning_not_a_hard_block() -> None:
+    patch = (
+        MODULE_PATH.parent
+        / "oracle-compat"
+        / "0.16.1"
+        / "promptComposer.patch"
+    ).read_text(encoding="utf-8")
+
+    # The app is routed by the literal @name text in the submitted prompt, so an
+    # unobservable suggestion overlay or pill must not fail the run.
+    for removed in (
+        'BrowserAutomationError("ChatGPT app mention suggestion did not appear."',
+        'BrowserAutomationError("Exact ChatGPT app suggestion could not be clicked."',
+        "BrowserAutomationError(`ChatGPT app mention was not confirmed in the composer",
+    ):
+        assert removed not in patch
+
+    assert "let mentionUiConfirmed = true;" in patch
+    assert patch.count("mentionUiConfirmed = false;") == 3
+    assert "was sent as literal text without UI confirmation" in patch
+    assert "confirmed in the composer.`" in patch
 
 
 def test_copy_profile_recovery_patch_reuses_only_the_persisted_profile_seed() -> None:

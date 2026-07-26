@@ -39,10 +39,13 @@ PATCHES = {
     "dist/src/browser/actions/promptComposer.js": {
         "patch": "promptComposer.patch",
         "pristine": "db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000",
-        "patched": "446ee00d52111c6ba41eea9b60752374603bd4ae3e52985e129e9f5625dadb28",
+        "patched": "02874d0f2fcd0f45c2c50385893a210e2be5822e1831fa81b99944728ed1cb79",
         "legacy_patched": [
             "a4bd36940deca4fd4ca63536df863fff330e438c82d47871834d56cdc064f2b5",
             "3eb83d2b1fc0d9e097a26eca282dc36c93dac1e8485410f8c3617c826538e409",
+            # Pre-downgrade build that hard-failed a run when the app mention
+            # overlay or pill could not be observed.
+            "446ee00d52111c6ba41eea9b60752374603bd4ae3e52985e129e9f5625dadb28",
         ],
     },
     "dist/src/browser/actions/modelSelection.js": {
