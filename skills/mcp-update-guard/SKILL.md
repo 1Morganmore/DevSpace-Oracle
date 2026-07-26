@@ -33,6 +33,27 @@ preserve unrelated local customizations.
    `codexpro-automation` source, install the verified bytes, commit with a
    descriptive message, push public-safe changes, and check CI.
 
+## Single repair owner
+
+Automation sources have exactly one repair owner. A project session that hits an
+automation defect reports it and stops; it does not edit runners, state, patches,
+or their tests. Cross-session patching previously produced duplicate fixes,
+conflicting state rules, and repairs aimed at the layer that reported the symptom
+instead of the layer that failed.
+
+- Build the handover with
+  `python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_incident.py" report --run-dir <exact-run-dir>`.
+  The packet carries the exact run directory, the classified bucket, the
+  lifecycle verdict with its authority source, and existing evidence paths.
+- Classify before repairing. Run
+  `python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_diagnose.py" --summary-only`
+  and fix the largest bucket rather than the newest report. A `pre-submit-*`
+  bucket proves no web submission occurred and is safe to retry; a
+  `post-submit-*` bucket requires exact-slug recovery and never a replacement
+  submission.
+- Treat `safe_for_fresh_run: false` as binding. Do not resubmit, stop, or close
+  another session's work while repairing code.
+
 ## Safety boundaries
 
 - Do not delete or recreate credential-bearing state during a normal update.
