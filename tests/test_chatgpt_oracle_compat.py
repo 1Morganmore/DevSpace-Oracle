@@ -172,6 +172,26 @@ def test_app_mention_ui_observation_is_a_warning_not_a_hard_block() -> None:
     assert "confirmed in the composer.`" in patch
 
 
+def test_model_selection_verifies_the_family_row_and_defers_effort_to_thinking_time() -> None:
+    patch = (
+        MODULE_PATH.parent
+        / "oracle-compat"
+        / "0.16.1"
+        / "modelSelection.patch"
+    ).read_text(encoding="utf-8")
+
+    # The 2026 picker exposes "GPT-5.6 Sol" as a family row whose children are
+    # the selectable Medium/High/Extra High effort rows.  Requiring an exact
+    # selectable label named after the model made every run fail before the
+    # composer, so the family row now verifies the model and the separate
+    # thinking-time step chooses the effort tier.
+    assert "matchedVisibleSolFamily" in patch
+    assert "versionFromLabel(match.normalizedText) === desiredVersion" in patch
+    assert "aria-haspopup" in patch
+    assert "resolve({ status: 'already-selected', label: match.label })" in patch
+    assert "Medium/High/Extra High" in patch
+
+
 def test_copy_profile_recovery_patch_reuses_only_the_persisted_profile_seed() -> None:
     compat = load_compat()
     contract = compat.PATCHES["dist/src/browser/recoverConversation.js"]
