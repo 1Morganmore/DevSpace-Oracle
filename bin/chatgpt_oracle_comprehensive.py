@@ -19,6 +19,11 @@ PRO_OUTPUT_KEYS = {
     "status", "output_text", "next_stage", "next_mission_text", "ready_for_next", "blocker",
 }
 STATE_SCHEMA = "codex.chatgpt.oracle-comprehensive-state/v1"
+UNAMBIGUOUS_PRE_SUBMIT_MARKERS = (
+    "ChatGPT app mention suggestion did not appear.",
+    "ChatGPT app mention was not confirmed in the composer.",
+    "Exact ChatGPT app suggestion could not be clicked.",
+)
 STAGES = {"plan", "pro", "web-multi", "review", "implementation", "final-web-gate"}
 TRANSITIONS = {
     "plan": {"plan", "review", "web-multi", "pro"},
@@ -354,6 +359,17 @@ def _state_path(config: dict[str, Any], workflow_id: str) -> Path:
     return RUNNER.STATE.oracle_state_root() / "workflows" / project_key / f"{workflow_id}.json"
 
 
+def _is_unambiguous_pre_submit_failure(run_dir: Path) -> bool:
+    output = run_dir / "output.md"
+    if output.is_file() and output.read_bytes().strip():
+        return False
+    stdout = run_dir / "stdout.log"
+    if not stdout.is_file():
+        return False
+    text = stdout.read_text(encoding="utf-8", errors="replace")
+    return any(marker in text for marker in UNAMBIGUOUS_PRE_SUBMIT_MARKERS)
+
+
 def _run_local_gate(config: dict[str, Any], runner: Callable[..., Any]) -> dict[str, Any]:
     completed = runner(
         config["local_gate_command"],
@@ -598,6 +614,35 @@ def _run_workflow_locked(
                     manifest_path, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
                     multi_execute=multi_execute, local_gate_runner=local_gate_runner,
                 )
+            persisted_run_dir = Path(str(stored.get("oracle_run_dir") or "")).resolve()
+            pre_submit_retries = int(stored.get("pre_submit_retries") or 0)
+            if (
+                pre_submit_retries < 1
+                and persisted_run_dir.is_dir()
+                and _is_unambiguous_pre_submit_failure(persisted_run_dir)
+            ):
+                source = Path(str(stored["current_mission_path"])).resolve(strict=True)
+                prepared = {
+                    "schema": STATE_SCHEMA,
+                    "status": "prepared",
+                    "workflow_id": workflow_id,
+                    "manifest_sha256": config["manifest_sha256"],
+                    "next_stage": str(stored["current_stage"]),
+                    "next_mission_path": str(source),
+                    "next_mission_sha256": sha(source),
+                    "next_index": int(stored["next_index"]),
+                    "records": list(stored.get("records") or []) + [{
+                        "stage": stored["current_stage"],
+                        "run_dir": str(persisted_run_dir),
+                        "pre_submit_failure": True,
+                    }],
+                    "pre_submit_retries": pre_submit_retries + 1,
+                }
+                _write(state_path, prepared)
+                return _run_workflow_locked(
+                    manifest_path, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
+                    multi_execute=multi_execute, local_gate_runner=local_gate_runner,
+                )
             recovered = _recover_exact_oracle_stage(stored, oracle_recover=oracle_recover)
             records = list(stored.get("records") or [])
             records.append({
@@ -704,13 +749,14 @@ def _run_workflow_locked(
         oracle_manifest = _oracle_manifest(config, mission, stage_dir, attempt_id, stage=stage)
         oracle_config = RUNNER.STATE.load_manifest(oracle_manifest)
         oracle_layout = RUNNER.STATE.create_layout(oracle_config, run_id=attempt_id)
+        stage_pre_submit_retries = int(_json(state_path).get("pre_submit_retries") or 0)
         _write(state_path, {
             "schema": STATE_SCHEMA, "status": "running", "workflow_id": workflow_id,
             "manifest_sha256": config["manifest_sha256"], "current_stage": stage,
             "current_attempt_id": attempt_id, "current_input_sha256": input_sha,
             "current_mission_path": str(source), "receipt_path": str(receipt_path),
             "oracle_run_id": attempt_id, "oracle_run_dir": str(oracle_layout.run_dir), "oracle_manifest_path": str(oracle_manifest),
-            "next_index": index, "records": records,
+            "next_index": index, "records": records, "pre_submit_retries": stage_pre_submit_retries,
         })
         run = oracle_execute(oracle_manifest, dry_run=False)
         records.append({"stage": stage, "run_dir": run.get("run_dir"), "ok": bool(run.get("ok"))})
@@ -735,6 +781,29 @@ def _run_workflow_locked(
         if run.get("ok") and not receipt_path.is_file():
             return {"ok": False, **_json(state_path)}
         if not run.get("ok"):
+            failed_run_dir = Path(str(run.get("run_dir") or "")).resolve()
+            pre_submit_retries = int(_json(state_path).get("pre_submit_retries") or 0)
+            if (
+                pre_submit_retries < 1
+                and failed_run_dir.is_dir()
+                and _is_unambiguous_pre_submit_failure(failed_run_dir)
+            ):
+                _write(state_path, {
+                    "schema": STATE_SCHEMA,
+                    "status": "prepared",
+                    "workflow_id": workflow_id,
+                    "manifest_sha256": config["manifest_sha256"],
+                    "next_stage": stage,
+                    "next_mission_path": str(source),
+                    "next_mission_sha256": sha(source),
+                    "next_index": index,
+                    "records": records,
+                    "pre_submit_retries": pre_submit_retries + 1,
+                })
+                return _run_workflow_locked(
+                    manifest_path, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
+                    multi_execute=multi_execute, local_gate_runner=local_gate_runner,
+                )
             retained = {
                 **_json(state_path), "status": "attention_required", "records": records,
                 "blocker": "Oracle stage needs exact recovery; no replacement was submitted",

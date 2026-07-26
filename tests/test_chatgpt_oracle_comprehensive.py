@@ -461,6 +461,31 @@ def test_running_oracle_stage_recovers_exact_run_without_resubmission(tmp_path: 
     assert second["recovery"]["status"] == "recovered"
 
 
+def test_unambiguous_app_mention_pre_submit_failure_retries_once(tmp_path: Path) -> None:
+    module = load()
+    submitted = 0
+
+    def fake_execute(oracle_manifest: Path, *, dry_run: bool):
+        nonlocal submitted
+        submitted += 1
+        run_dir = _oracle_running_state(module, oracle_manifest)
+        stdout = run_dir / "stdout.log"
+        if submitted == 1:
+            stdout.write_text(
+                "ERROR: ChatGPT app mention suggestion did not appear.\n",
+                encoding="utf-8",
+            )
+        else:
+            stdout.write_text("ERROR: unrelated terminal failure\n", encoding="utf-8")
+        return {"ok": False, "run_dir": str(run_dir)}
+
+    result = module.run_workflow(manifest(tmp_path), oracle_execute=fake_execute)
+
+    assert result["status"] == "attention_required"
+    assert submitted == 2
+    assert result["next_index"] == 0
+
+
 def test_running_stage_prefers_existing_bound_receipt_over_provider_recovery(tmp_path: Path) -> None:
     module = load()
     submitted = []
