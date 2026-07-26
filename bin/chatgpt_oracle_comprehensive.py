@@ -21,7 +21,7 @@ PRO_OUTPUT_KEYS = {
 STATE_SCHEMA = "codex.chatgpt.oracle-comprehensive-state/v1"
 STAGES = {"plan", "pro", "web-multi", "review", "implementation", "final-web-gate"}
 TRANSITIONS = {
-    "plan": {"review", "web-multi", "pro"},
+    "plan": {"plan", "review", "web-multi", "pro"},
     "web-multi": {"review"},
     "pro": {"review"},
     "review": {"plan", "implementation"},
@@ -317,10 +317,17 @@ def _validate_receipt(
         and ((stage == "review" and next_stage == "plan")
              or (stage == "final-web-gate" and next_stage == "implementation"))
     )
+    blocked_plan_continuation = (
+        value.get("status") == "BLOCKED_PLAN"
+        and stage == "plan"
+        and next_stage == "plan"
+        and bool(value.get("blocker"))
+    )
     if (
         value.get("status") not in {"PASS", "COMPLETE"}
         and not revision_transition
-    ) or value.get("ready_for_next") is not True or value.get("blocker"):
+        and not blocked_plan_continuation
+    ) or value.get("ready_for_next") is not True or (value.get("blocker") and not blocked_plan_continuation):
         raise WorkflowError("stage receipt did not pass")
     output = _inside(config["project_root"], value.get("output_path"))
     if not output.is_file() or not output.read_bytes().strip() or value.get("output_sha256") != sha(output):
