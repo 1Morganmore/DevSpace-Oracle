@@ -27,6 +27,11 @@ Oracle explicitly selects `GPT-5.6 Sol` and `heavy`, verifies the visible
 compatibility layer is hash-gated and fails closed on an unknown version or
 third-party file. Never invent xhigh or silently downgrade.
 
+Every new run copies the manually signed-in Oracle profile into a throwaway
+per-run profile and asks Oracle to hide its owned window. This isolates
+different projects: one completed run cannot close another run's live Chrome.
+Do not replace this with the shared manual-login profile.
+
 Control state and final Oracle output are host-only below
 `%USERPROFILE%\.codex\state\chatgpt-oracle`. Complete requires exit zero and
 fresh nonempty host output. Recovery uses the stored slug:
@@ -35,8 +40,11 @@ fresh nonempty host output. Recovery uses the stored slug:
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_run.py" recover --run-dir C:\exact\host-run --action harvest
 ```
 
-Recovery never restarts/resubmits, never downgrades durable COMPLETE, and uses
-Oracle `--no-recover`.
+Recovery never restarts/resubmits and never downgrades durable COMPLETE. If the
+persisted CDP endpoint died, Oracle may launch a bounded recovery browser from
+the run's recorded profile seed and open only that slug's exact persisted
+conversation URL for harvest. It must not use a prompt or create a replacement
+conversation.
 
 For an already persisted agbrowse run only, use its exact legacy
 `chatgpt_agbrowse_run.py --observe-run|--recover-run <run-dir>` command. Do not

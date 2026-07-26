@@ -35,11 +35,23 @@ rewrite them.
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_comprehensive.py" --manifest C:\project\workflow.json --dry-run
 ```
 
-Only PASS can reach implementation. Only final web PASS plus a zero-exit local
-gate can complete. A Pro selection launches an explicit Oracle attachment-only
-stage and waits for a bound receipt; it is never downgraded. Missing
-receipt/output, crash, or ambiguity returns attention-required without a
-replacement submit.
+Review uses `PASS`, `PASS_WITH_NOTES`, `REVISE`, or `FAIL`. `PASS` and
+`PASS_WITH_NOTES` proceed to implementation. `REVISE` is reserved for unresolved
+critical future-information, safety, execution-impossibility, or required-input
+defects. The first review fixes the critical finding IDs and hash; later reviews
+may only verify those findings and may not add noncritical requirements,
+reconsider accepted work, or request stylistic improvements. At most two
+semantic plan revisions are allowed across retries for the same project and
+workflow directory. A third `REVISE` ends in attention-required without
+creating another plan.
+
+Transport or runner recovery keeps the same workflow and stage identity. It
+must never create a `workflow-retryN` replacement. The revision budget and
+remaining critical finding set are persisted in the workflow state for
+operator visibility. Only final web PASS plus a zero-exit local gate can
+complete. A Pro selection launches an explicit Oracle attachment-only stage
+and waits for a bound receipt; it is never downgraded. Missing receipt/output,
+crash, or ambiguity returns attention-required without a replacement submit.
 
 Existing v1-v4 agbrowse comprehensive state and v3 parallel implementation are
 legacy recovery-only. Their files remain installed for exact recovery but are

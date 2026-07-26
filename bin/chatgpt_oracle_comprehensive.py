@@ -19,6 +19,9 @@ PRO_OUTPUT_KEYS = {
     "status", "output_text", "next_stage", "next_mission_text", "ready_for_next", "blocker",
 }
 STATE_SCHEMA = "codex.chatgpt.oracle-comprehensive-state/v1"
+SCOPE_SCHEMA = "codex.chatgpt.oracle-comprehensive-scope/v1"
+MAX_PLAN_REVISIONS = 2
+REVIEW_STATUSES = {"PASS", "PASS_WITH_NOTES", "REVISE", "FAIL"}
 UNAMBIGUOUS_PRE_SUBMIT_MARKERS = (
     "ChatGPT app mention suggestion did not appear.",
     "ChatGPT app mention was not confirmed in the composer.",
@@ -118,6 +121,124 @@ def _write(path: Path, value: dict[str, Any]) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _finding_hash(ids: list[str]) -> str:
+    payload = json.dumps(ids, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _receipt_finding_ids(value: dict[str, Any], *, legacy_fallback: bool) -> list[str]:
+    raw = value.get("critical_finding_ids")
+    if raw is None and legacy_fallback:
+        output_hash = str(value.get("output_sha256") or "")
+        return [f"legacy-{output_hash[:24]}"] if output_hash else []
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not all(isinstance(item, str) and item.strip() for item in raw):
+        raise WorkflowError("review critical_finding_ids must be a string list")
+    normalized = [item.strip() for item in raw]
+    if normalized != sorted(set(normalized)):
+        raise WorkflowError("review critical finding IDs must be unique and sorted")
+    claimed = str(value.get("critical_findings_sha256") or "")
+    if claimed and claimed != _finding_hash(normalized):
+        raise WorkflowError("review critical findings hash mismatch")
+    return normalized
+
+
+def _default_review_policy() -> dict[str, Any]:
+    return {
+        "max_plan_revisions": MAX_PLAN_REVISIONS,
+        "plan_revisions_used": 0,
+        "plan_revisions_remaining": MAX_PLAN_REVISIONS,
+        "baseline_critical_finding_ids": [],
+        "baseline_critical_findings_sha256": None,
+    }
+
+
+def _review_policy_from_history(config: dict[str, Any]) -> dict[str, Any]:
+    if "workflow_dir" not in config:
+        return _default_review_policy()
+    parent = config["workflow_dir"].parent
+    receipts: list[tuple[int, Path, dict[str, Any]]] = []
+    seen_attempts: set[str] = set()
+    for workflow_dir in sorted(
+        (item for item in parent.iterdir() if item.is_dir() and item.name.startswith("workflow")),
+        key=lambda item: item.name,
+    ):
+        stages = workflow_dir / "stages"
+        if not stages.is_dir():
+            continue
+        for path in sorted(stages.glob("*-review-*/stage-result.json")):
+            try:
+                value = _json(path)
+                attempt = str(value.get("attempt_id") or "")
+                if (
+                    value.get("schema") != RECEIPT_SCHEMA
+                    or value.get("stage") != "review"
+                    or not attempt
+                    or attempt in seen_attempts
+                    or value.get("status") not in REVIEW_STATUSES
+                ):
+                    continue
+                seen_attempts.add(attempt)
+                receipts.append((path.stat().st_mtime_ns, path, value))
+            except (OSError, ValueError, WorkflowError, json.JSONDecodeError):
+                continue
+    receipts.sort(key=lambda item: (item[0], str(item[1])))
+    revisions = [value for _, _, value in receipts if value.get("status") == "REVISE"]
+    baseline_ids: list[str] = []
+    if revisions:
+        baseline_ids = _receipt_finding_ids(revisions[0], legacy_fallback=True)
+    return {
+        "max_plan_revisions": MAX_PLAN_REVISIONS,
+        "plan_revisions_used": len(revisions),
+        "plan_revisions_remaining": max(0, MAX_PLAN_REVISIONS - len(revisions)),
+        "baseline_critical_finding_ids": baseline_ids,
+        "baseline_critical_findings_sha256": _finding_hash(baseline_ids) if baseline_ids else None,
+    }
+
+
+def _scope_path(config: dict[str, Any]) -> Path:
+    project_key = hashlib.sha256(str(config["project_root"]).casefold().encode("utf-8")).hexdigest()[:24]
+    scope_material = f"{config['project_root']}|{config['workflow_dir'].parent}".casefold()
+    scope_key = hashlib.sha256(scope_material.encode("utf-8")).hexdigest()[:32]
+    return RUNNER.STATE.oracle_state_root() / "comprehensive-scopes" / project_key / f"{scope_key}.json"
+
+
+def _claim_scope(config: dict[str, Any], workflow_id: str) -> None:
+    path = _scope_path(config)
+    if path.is_file():
+        stored = _json(path)
+        active = str(stored.get("active_workflow_id") or "")
+        status = str(stored.get("status") or "")
+        if active and active != workflow_id and status != "complete":
+            raise WorkflowError(
+                f"comprehensive scope already belongs to active workflow {active}; recover that exact workflow"
+            )
+    _write(path, {
+        "schema": SCOPE_SCHEMA,
+        "status": "active",
+        "active_workflow_id": workflow_id,
+        "project_root": str(config["project_root"]),
+        "workflow_parent": str(config["workflow_dir"].parent),
+        "review_policy": config["_review_policy"],
+    })
+
+
+def _write_workflow_state(path: Path, config: dict[str, Any], value: dict[str, Any]) -> None:
+    payload = {**value, "review_policy": dict(config["_review_policy"])}
+    _write(path, payload)
+    scope_status = str(payload.get("status") or "active")
+    _write(_scope_path(config), {
+        "schema": SCOPE_SCHEMA,
+        "status": scope_status if scope_status in {"complete", "attention_required", "failed"} else "active",
+        "active_workflow_id": config["workflow_id"],
+        "project_root": str(config["project_root"]),
+        "workflow_parent": str(config["workflow_dir"].parent),
+        "workflow_state_path": str(path),
+        "review_policy": dict(config["_review_policy"]),
+    })
+
+
 def _stage_mission(
     config: dict[str, Any],
     workflow_id: str,
@@ -144,6 +265,23 @@ def _stage_mission(
         "The supplied input_mission_sha256 binds the upstream source mission bytes before this HOST_STAGE_CONTRACT "
         "was appended; copy it exactly into the receipt and do not replace it with a hash of this augmented mission.md.\n"
     )
+    if stage == "review":
+        config.setdefault("_review_policy", _review_policy_from_history(config))
+        policy = config["_review_policy"]
+        protocol += (
+            "\n[REVIEW_ADJUDICATION_CONTRACT]\n"
+            "Allowed status values are PASS, PASS_WITH_NOTES, REVISE, FAIL. "
+            "PASS_WITH_NOTES must proceed to implementation. REVISE is reserved only for an unresolved critical "
+            "future-information, safety, executable-impossibility, or required-input defect; wording, style, optional "
+            "improvement, a new noncritical request, or reconsidering an already accepted item must not cause REVISE. "
+            "Include sorted unique critical_finding_ids and critical_findings_sha256, where the hash is SHA-256 of the "
+            "compact UTF-8 JSON array. A follow-up review may report only unresolved IDs from the fixed baseline below; "
+            "it must not add a new ID. FAIL must include a nonempty blocker and stops the workflow.\n"
+            f"plan_revisions_used={policy['plan_revisions_used']}\n"
+            f"plan_revisions_max={policy['max_plan_revisions']}\n"
+            f"baseline_critical_finding_ids={json.dumps(policy['baseline_critical_finding_ids'], ensure_ascii=False, separators=(',', ':'))}\n"
+            f"baseline_critical_findings_sha256={policy['baseline_critical_findings_sha256'] or ''}\n"
+        )
     target.write_text(body.rstrip() + protocol, encoding="utf-8")
     return target, receipt, input_sha
 
@@ -318,34 +456,90 @@ def _validate_receipt(
         or value.get("input_mission_sha256") != input_sha
     ):
         raise WorkflowError("stage receipt identity mismatch")
+    status = str(value.get("status") or "")
     next_stage = str(value.get("next_stage") or "")
+    if stage == "review":
+        if status not in REVIEW_STATUSES:
+            raise WorkflowError("review status must be PASS, PASS_WITH_NOTES, REVISE, or FAIL")
+        if status in {"PASS", "PASS_WITH_NOTES"} and next_stage != "implementation":
+            raise WorkflowError("passing review must proceed to implementation")
+        if status == "REVISE" and next_stage != "plan":
+            raise WorkflowError("REVISE review must return to plan")
+        if status == "FAIL":
+            if value.get("ready_for_next") is not False or not value.get("blocker"):
+                raise WorkflowError("FAIL review must stop with a nonempty blocker")
+        else:
+            if value.get("ready_for_next") is not True or value.get("blocker"):
+                raise WorkflowError("non-FAIL review receipt has invalid readiness")
     revision_transition = (
-        value.get("status") == "REVISE"
+        status == "REVISE"
         and ((stage == "review" and next_stage == "plan")
              or (stage == "final-web-gate" and next_stage == "implementation"))
     )
     blocked_plan_continuation = (
-        value.get("status") == "BLOCKED_PLAN"
+        status == "BLOCKED_PLAN"
         and stage == "plan"
         and next_stage == "plan"
         and bool(value.get("blocker"))
     )
     ready_plan_transition = (
-        str(value.get("status") or "").endswith("PLAN_READY")
+        status.endswith("PLAN_READY")
         and stage == "plan"
         and next_stage in {"review", "web-multi", "pro"}
         and not value.get("blocker")
     )
     if (
-        value.get("status") not in {"PASS", "COMPLETE"}
+        status not in {"PASS", "PASS_WITH_NOTES", "COMPLETE"}
         and not revision_transition
         and not blocked_plan_continuation
         and not ready_plan_transition
-    ) or value.get("ready_for_next") is not True or (value.get("blocker") and not blocked_plan_continuation):
+        and not (stage == "review" and status == "FAIL")
+    ) or (
+        not (stage == "review" and status == "FAIL")
+        and value.get("ready_for_next") is not True
+    ) or (
+        value.get("blocker")
+        and not blocked_plan_continuation
+        and not (stage == "review" and status == "FAIL")
+    ):
         raise WorkflowError("stage receipt did not pass")
     output = _inside(config["project_root"], value.get("output_path"))
     if not output.is_file() or not output.read_bytes().strip() or value.get("output_sha256") != sha(output):
         raise WorkflowError("stage output is missing or hash-mismatched")
+    if stage == "review":
+        config.setdefault("_review_policy", _review_policy_from_history(config))
+        finding_ids = _receipt_finding_ids(value, legacy_fallback=status == "REVISE")
+        policy = config["_review_policy"]
+        if status in {"PASS", "PASS_WITH_NOTES"} and finding_ids:
+            raise WorkflowError("passing review cannot retain critical findings")
+        if status == "FAIL":
+            return {
+                **value,
+                "_next_mission": None,
+                "_terminal_attention": str(value["blocker"]),
+            }
+        if status == "REVISE":
+            baseline = list(policy["baseline_critical_finding_ids"])
+            terminal_reason = None
+            if int(policy["plan_revisions_used"]) >= MAX_PLAN_REVISIONS:
+                terminal_reason = "plan revision budget exhausted; third REVISE cannot create another plan"
+            elif not finding_ids:
+                terminal_reason = "REVISE requires at least one critical finding ID"
+            elif baseline and not set(finding_ids).issubset(set(baseline)):
+                terminal_reason = "follow-up review introduced a new finding outside the fixed baseline"
+            if terminal_reason:
+                return {
+                    **value,
+                    "_next_mission": None,
+                    "_terminal_attention": terminal_reason,
+                }
+            if not baseline:
+                policy["baseline_critical_finding_ids"] = finding_ids
+                policy["baseline_critical_findings_sha256"] = _finding_hash(finding_ids)
+            policy["plan_revisions_used"] = int(policy["plan_revisions_used"]) + 1
+            policy["plan_revisions_remaining"] = max(
+                0, MAX_PLAN_REVISIONS - int(policy["plan_revisions_used"])
+            )
     if next_stage not in TRANSITIONS[stage]:
         raise WorkflowError(f"invalid transition {stage}->{next_stage}")
     if next_stage == "complete":
@@ -389,6 +583,28 @@ def _run_local_gate(config: dict[str, Any], runner: Callable[..., Any]) -> dict[
     }
 
 
+def _terminal_review_state(
+    config: dict[str, Any],
+    workflow_id: str,
+    receipt: dict[str, Any],
+    records: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    blocker = str(receipt.get("_terminal_attention") or "").strip()
+    if not blocker:
+        return None
+    return {
+        "schema": STATE_SCHEMA,
+        "status": "attention_required",
+        "workflow_id": workflow_id,
+        "manifest_sha256": config["manifest_sha256"],
+        "records": records,
+        "review_status": receipt.get("status"),
+        "review_output_path": receipt.get("output_path"),
+        "blocker": blocker,
+        "next_stage": None,
+    }
+
+
 def _recover_exact_oracle_stage(
     stored: dict[str, Any],
     *,
@@ -406,6 +622,9 @@ def _recover_exact_oracle_stage(
         return {"ok": False, "error": "ORACLE_RECOVERY_RUN_UNAVAILABLE", "detail": str(exc)}
     if str(run_state.get("run_id") or "") != expected_run_id:
         return {"ok": False, "error": "ORACLE_RECOVERY_IDENTITY_MISMATCH"}
+    # Oracle harvest reports the exact saved conversation state.  The runner
+    # discards a candidate when that state is still running and publishes it
+    # only when the same bounded call proves terminal completion.
     return oracle_recover(directory, action="harvest", dry_run=False)
 
 
@@ -464,6 +683,7 @@ def _run_workflow_locked(
 ) -> dict[str, Any]:
     config = load_manifest(manifest_path)
     workflow_id = config["workflow_id"]
+    config["_review_policy"] = _review_policy_from_history(config)
     config["_parallel_parent_id"] = hashlib.sha256(workflow_id.encode("utf-8")).hexdigest()
     config["workflow_dir"].mkdir(parents=True, exist_ok=True)
     if dry_run:
@@ -484,6 +704,7 @@ def _run_workflow_locked(
             "receipt_path": str(receipt_path),
             "oracle_preview": preview,
         }
+    _claim_scope(config, workflow_id)
     state_path = _state_path(config, workflow_id)
     if state_path.is_file():
         stored = _json(state_path)
@@ -504,21 +725,25 @@ def _run_workflow_locked(
                 str(stored["current_input_sha256"]),
             )
             records = list(stored.get("records") or [])
+            terminal_review = _terminal_review_state(config, workflow_id, receipt, records)
+            if terminal_review is not None:
+                _write_workflow_state(state_path, config, terminal_review)
+                return {"ok": False, **terminal_review}
             if receipt["next_stage"] == "complete":
                 gate = _run_local_gate(config, local_gate_runner)
                 if gate["exit_code"] != 0:
                     blocked = {**stored, "status": "attention_required", "blocker": "deterministic local gate failed", "local_gate": gate}
-                    _write(state_path, blocked)
+                    _write_workflow_state(state_path, config, blocked)
                     return {"ok": False, **blocked}
                 complete = {
                     **stored, "status": "complete", "final_output_path": receipt["output_path"], "local_gate": gate
                 }
-                _write(state_path, complete)
+                _write_workflow_state(state_path, config, complete)
                 return {"ok": True, **complete}
             stage = str(receipt["next_stage"])
             source = receipt["_next_mission"]
             start_index = int(stored["next_index"]) + 1
-            _write(state_path, {
+            _write_workflow_state(state_path, config, {
                 "schema": STATE_SCHEMA, "status": "prepared", "workflow_id": workflow_id,
                 "manifest_sha256": config["manifest_sha256"], "next_stage": stage,
                 "next_mission_path": str(source), "next_mission_sha256": receipt["next_mission_sha256"],
@@ -540,7 +765,7 @@ def _run_workflow_locked(
             source = receipt["_next_mission"]
             records = list(stored.get("records") or []) + [{"stage": "pro", "receipt_path": str(pro_receipt)}]
             start_index = int(stored["next_index"]) + 1
-            _write(state_path, {
+            _write_workflow_state(state_path, config, {
                 "schema": STATE_SCHEMA, "status": "prepared", "workflow_id": workflow_id,
                 "manifest_sha256": config["manifest_sha256"], "next_stage": stage,
                 "next_mission_path": str(source), "next_mission_sha256": receipt["next_mission_sha256"],
@@ -557,7 +782,7 @@ def _run_workflow_locked(
                     "recovery": recovered,
                     "records": records,
                 }
-                _write(state_path, blocked)
+                _write_workflow_state(state_path, config, blocked)
                 return {"ok": False, **blocked}
             result_path = Path(str(recovered.get("next_stage_result_path") or ""))
             if not result_path.is_file():
@@ -568,7 +793,7 @@ def _run_workflow_locked(
                     "recovery": recovered,
                     "records": records,
                 }
-                _write(state_path, blocked)
+                _write_workflow_state(state_path, config, blocked)
                 return {"ok": False, **blocked}
             attempt_id = str(recovered["parent_id"])
             receipt = _validate_receipt(config, result_path, workflow_id, "web-multi", attempt_id, sha(Path(str(stored["current_mission_path"]))))
@@ -581,41 +806,13 @@ def _run_workflow_locked(
                 "next_index": int(stored["next_index"]) + 1,
                 "records": records,
             }
-            _write(state_path, prepared)
+            _write_workflow_state(state_path, config, prepared)
             return _run_workflow_locked(
                 manifest_path, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
                 multi_execute=multi_execute, local_gate_runner=local_gate_runner,
             )
         elif stored.get("status") in {"running", "attention_required"} and stored.get("current_stage"):
             persisted_receipt = Path(str(stored.get("receipt_path") or "")).resolve()
-            if persisted_receipt.is_file():
-                _validate_receipt(
-                    config,
-                    persisted_receipt,
-                    workflow_id,
-                    str(stored["current_stage"]),
-                    str(stored["current_attempt_id"]),
-                    str(stored["current_input_sha256"]),
-                )
-                awaiting = {
-                    **stored,
-                    "status": "awaiting_receipt",
-                    "records": list(stored.get("records") or []) + [{
-                        "stage": stored["current_stage"],
-                        "receipt_path": str(persisted_receipt),
-                        "recovered_from_bound_receipt": True,
-                    }],
-                    "recovery": {
-                        "status": "bound_receipt_recovered",
-                        "run_id": stored.get("oracle_run_id") or stored.get("current_attempt_id"),
-                        "run_dir": stored.get("oracle_run_dir"),
-                    },
-                }
-                _write(state_path, awaiting)
-                return _run_workflow_locked(
-                    manifest_path, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
-                    multi_execute=multi_execute, local_gate_runner=local_gate_runner,
-                )
             persisted_run_dir = Path(str(stored.get("oracle_run_dir") or "")).resolve()
             pre_submit_retries = int(stored.get("pre_submit_retries") or 0)
             if (
@@ -640,7 +837,7 @@ def _run_workflow_locked(
                     }],
                     "pre_submit_retries": pre_submit_retries + 1,
                 }
-                _write(state_path, prepared)
+                _write_workflow_state(state_path, config, prepared)
                 return _run_workflow_locked(
                     manifest_path, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
                     multi_execute=multi_execute, local_gate_runner=local_gate_runner,
@@ -654,12 +851,16 @@ def _run_workflow_locked(
             if not recovered.get("ok"):
                 blocked = {
                     **stored,
-                    "status": "attention_required",
-                    "blocker": "exact Oracle recovery did not produce a terminal output; no retry was submitted",
+                    "status": "running" if recovered.get("status") == "session_live" else "attention_required",
+                    "blocker": (
+                        "exact Oracle session is still live; project ownership and archive:auto remain bound"
+                        if recovered.get("status") == "session_live"
+                        else "exact Oracle recovery did not prove terminal output; no retry was submitted"
+                    ),
                     "recovery": recovered,
                     "records": records,
                 }
-                _write(state_path, blocked)
+                _write_workflow_state(state_path, config, blocked)
                 return {"ok": False, **blocked}
             if stored.get("current_stage") == "pro" and not Path(str(stored["receipt_path"])).is_file():
                 _materialize_pro_receipt(
@@ -675,7 +876,7 @@ def _run_workflow_locked(
                 **stored, "status": "awaiting_receipt", "records": records,
                 "recovery": {"status": "recovered", "run_id": stored.get("oracle_run_id") or stored.get("current_attempt_id"), "run_dir": stored.get("oracle_run_dir")},
             }
-            _write(state_path, awaiting)
+            _write_workflow_state(state_path, config, awaiting)
             return _run_workflow_locked(
                 manifest_path, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
                 multi_execute=multi_execute, local_gate_runner=local_gate_runner,
@@ -691,7 +892,7 @@ def _run_workflow_locked(
             start_index = int(stored.get("next_index") or 0)
     else:
         stage, source, records, start_index = "plan", config["initial_mission_path"], [], 0
-        _write(state_path, {
+        _write_workflow_state(state_path, config, {
             "schema": STATE_SCHEMA, "status": "prepared", "workflow_id": workflow_id,
             "manifest_sha256": config["manifest_sha256"], "next_stage": stage,
             "next_mission_path": str(source), "next_mission_sha256": sha(source),
@@ -712,7 +913,7 @@ def _run_workflow_locked(
             multi_execution_id = hashlib.sha256(
                 f"{workflow_id}:{index}:{sha(source)}".encode("utf-8")
             ).hexdigest()
-            _write(state_path, {
+            _write_workflow_state(state_path, config, {
                 "schema": STATE_SCHEMA, "status": "running", "workflow_id": workflow_id,
                 "manifest_sha256": config["manifest_sha256"], "current_stage": stage,
                 "current_mission_path": str(source), "next_index": index, "records": records,
@@ -731,7 +932,7 @@ def _run_workflow_locked(
             attempt_id = str(multi_result.get("parent_id") or "")
             receipt = _validate_receipt(config, result_path, workflow_id, "web-multi", attempt_id, sha(source))
             stage, source = str(receipt["next_stage"]), receipt["_next_mission"]
-            _write(state_path, {
+            _write_workflow_state(state_path, config, {
                 "schema": STATE_SCHEMA, "status": "prepared", "workflow_id": workflow_id,
                 "manifest_sha256": config["manifest_sha256"], "next_stage": stage,
                 "next_mission_path": str(source), "next_mission_sha256": receipt["next_mission_sha256"],
@@ -752,7 +953,7 @@ def _run_workflow_locked(
         oracle_config = RUNNER.STATE.load_manifest(oracle_manifest)
         oracle_layout = RUNNER.STATE.create_layout(oracle_config, run_id=attempt_id)
         stage_pre_submit_retries = int(_json(state_path).get("pre_submit_retries") or 0)
-        _write(state_path, {
+        _write_workflow_state(state_path, config, {
             "schema": STATE_SCHEMA, "status": "running", "workflow_id": workflow_id,
             "manifest_sha256": config["manifest_sha256"], "current_stage": stage,
             "current_attempt_id": attempt_id, "current_input_sha256": input_sha,
@@ -773,7 +974,7 @@ def _run_workflow_locked(
                 run_dir=run.get("run_dir"),
             )
         if run.get("ok"):
-            _write(state_path, {
+            _write_workflow_state(state_path, config, {
                 "schema": STATE_SCHEMA, "status": "awaiting_receipt", "workflow_id": workflow_id,
                 "manifest_sha256": config["manifest_sha256"], "current_stage": stage,
                 "current_attempt_id": attempt_id, "current_input_sha256": input_sha,
@@ -790,7 +991,7 @@ def _run_workflow_locked(
                 and failed_run_dir.is_dir()
                 and _is_unambiguous_pre_submit_failure(failed_run_dir)
             ):
-                _write(state_path, {
+                _write_workflow_state(state_path, config, {
                     "schema": STATE_SCHEMA,
                     "status": "prepared",
                     "workflow_id": workflow_id,
@@ -810,24 +1011,28 @@ def _run_workflow_locked(
                 **_json(state_path), "status": "attention_required", "records": records,
                 "blocker": "Oracle stage needs exact recovery; no replacement was submitted",
             }
-            _write(state_path, retained)
+            _write_workflow_state(state_path, config, retained)
             return {"ok": False, **retained}
         receipt = _validate_receipt(config, receipt_path, workflow_id, stage, attempt_id, input_sha)
+        terminal_review = _terminal_review_state(config, workflow_id, receipt, records)
+        if terminal_review is not None:
+            _write_workflow_state(state_path, config, terminal_review)
+            return {"ok": False, **terminal_review}
         if receipt["next_stage"] == "complete":
             gate = _run_local_gate(config, local_gate_runner)
             if gate["exit_code"] != 0:
                 result = {"schema": STATE_SCHEMA, "status": "attention_required", "workflow_id": workflow_id,
                           "manifest_sha256": config["manifest_sha256"], "records": records,
                           "blocker": "deterministic local gate failed", "local_gate": gate}
-                _write(state_path, result)
+                _write_workflow_state(state_path, config, result)
                 return {"ok": False, **result}
             result = {"schema": STATE_SCHEMA, "status": "complete", "workflow_id": workflow_id,
                       "manifest_sha256": config["manifest_sha256"], "records": records,
                       "final_output_path": receipt["output_path"], "local_gate": gate}
-            _write(state_path, result)
+            _write_workflow_state(state_path, config, result)
             return {"ok": True, **result}
         stage, source = str(receipt["next_stage"]), receipt["_next_mission"]
-        _write(state_path, {
+        _write_workflow_state(state_path, config, {
             "schema": STATE_SCHEMA, "status": "prepared", "workflow_id": workflow_id,
             "manifest_sha256": config["manifest_sha256"], "next_stage": stage,
             "next_mission_path": str(source), "next_mission_sha256": receipt["next_mission_sha256"],
@@ -835,7 +1040,7 @@ def _run_workflow_locked(
         })
     result = {"schema": STATE_SCHEMA, "status": "attention_required", "workflow_id": workflow_id,
               "records": records, "next_stage": stage, "blocker": "stage failed or maximum stage count reached"}
-    _write(state_path, {**result, "manifest_sha256": config["manifest_sha256"]})
+    _write_workflow_state(state_path, config, {**result, "manifest_sha256": config["manifest_sha256"]})
     return {"ok": False, **result}
 
 

@@ -11,6 +11,16 @@ from typing import Any, Sequence
 SUPPORTED_VERSION = "0.16.1"
 CREATE_NO_WINDOW = 0x08000000
 PATCHES = {
+    "dist/src/browser/chromeLifecycle.js": {
+        "patch": "chromeLifecycle.patch",
+        "pristine": "9eaffd8264051266581548ea9dbee1152bd94b7a6032ed0441b1ba3c11c5b5e9",
+        "patched": "d852372c9c16c9a130a280001e62312542092b0c38397907897217f8af0c559d",
+    },
+    "dist/src/browser/recoverConversation.js": {
+        "patch": "recoverConversation.patch",
+        "pristine": "8c7d841bc078af20c8922ec435f62e00df7a40605583fbd89334696b3ddb386b",
+        "patched": "650ffe9bdbbaf799510e8cacaa8ba8407322bbbb175e790a3cf7777fa14772fe",
+    },
     "dist/src/browser/profileCopy.js": {
         "patch": "profileCopy.patch",
         "pristine": "06c692861f8a4c1a8769f957b9c582426a13bf4972262c47c1f24a87b239064f",

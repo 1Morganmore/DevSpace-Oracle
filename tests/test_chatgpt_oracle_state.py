@@ -158,6 +158,29 @@ def test_nonempty_output_mutex_and_windows_flags(tmp_path: Path) -> None:
     assert state.windows_subprocess_kwargs(platform_name="nt")["creationflags"] & state.CREATE_NO_WINDOW
 
 
+def test_run_owned_browser_temp_is_removed_and_prior_boot_orphans_are_swept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = load_state()
+    run_root = tmp_path / "runs"
+    stale = run_root / "old-run" / "browser-temp"
+    live = run_root / "live-run" / "browser-temp"
+    monkeypatch.setattr(state, "host_uptime_ms", lambda **kwargs: 500)
+    state.browser_temp_environment(stale)
+    state.browser_temp_environment(live)
+    stale_marker = json.loads((stale / ".owner.json").read_text(encoding="utf-8"))
+    stale_marker["host_uptime_ms"] = 900
+    state.write_json_atomic(stale / ".owner.json", stale_marker)
+
+    cleaned = state.cleanup_prior_boot_browser_temps(run_root, current_uptime_ms=600)
+
+    assert cleaned == [str(stale.resolve())]
+    assert not stale.exists()
+    assert live.exists()
+    assert state.cleanup_owned_browser_temp(live) is True
+    assert not live.exists()
+
+
 def test_unsafe_oracle_args_are_rejected(tmp_path: Path) -> None:
     state = load_state()
     mission = tmp_path / "mission.md"
@@ -173,9 +196,19 @@ def test_unsafe_oracle_args_are_rejected(tmp_path: Path) -> None:
             state.load_manifest(manifest(tmp_path, mission.resolve(), oracle_args=unsafe))
         assert exc.value.code == "ORACLE_ARG_FORBIDDEN"
     config = state.load_manifest(
-        manifest(tmp_path, mission.resolve(), oracle_args=["--timeout", "45m", "--no-notify", "--heartbeat=20"])
+        manifest(
+            tmp_path,
+            mission.resolve(),
+            oracle_args=["--timeout", "45m", "--no-notify", "--heartbeat=20", "--browser-hide-window"],
+        )
     )
-    assert config.oracle_args == ("--timeout", "45m", "--no-notify", "--heartbeat=20")
+    assert config.oracle_args == (
+        "--timeout",
+        "45m",
+        "--no-notify",
+        "--heartbeat=20",
+        "--browser-hide-window",
+    )
     assert config.model_strategy == "select"
     assert config.thinking_time == "heavy"
     with pytest.raises(state.OracleStateError) as exc:

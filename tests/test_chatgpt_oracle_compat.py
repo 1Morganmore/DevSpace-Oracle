@@ -148,3 +148,37 @@ def test_prompt_composer_app_pill_probe_uses_the_composer_form_scope() -> None:
     assert "이 대화에 기억" in patch
     assert "remember for this chat" in patch
     assert "allowLabels.has" in patch
+
+
+def test_copy_profile_recovery_patch_reuses_only_the_persisted_profile_seed() -> None:
+    compat = load_compat()
+    contract = compat.PATCHES["dist/src/browser/recoverConversation.js"]
+    patch = (
+        MODULE_PATH.parent
+        / "oracle-compat"
+        / "0.16.1"
+        / contract["patch"]
+    ).read_text(encoding="utf-8")
+
+    assert "resolved.copyProfileSource" in patch
+    assert "return copyProfileSource.trim();" in patch
+    assert 'mkdtemp(path.join(os.tmpdir(), "oracle-recovery-"))' in patch
+    assert "wrapEphemeralRecoveryChrome" in patch
+    assert contract["pristine"] == "8c7d841bc078af20c8922ec435f62e00df7a40605583fbd89334696b3ddb386b"
+    assert contract["patched"] == "650ffe9bdbbaf799510e8cacaa8ba8407322bbbb175e790a3cf7777fa14772fe"
+
+
+def test_hidden_window_patch_supports_windows_without_headless_mode() -> None:
+    compat = load_compat()
+    contract = compat.PATCHES["dist/src/browser/chromeLifecycle.js"]
+    patch = (
+        MODULE_PATH.parent
+        / "oracle-compat"
+        / "0.16.1"
+        / contract["patch"]
+    ).read_text(encoding="utf-8")
+
+    assert 'process.platform === "win32"' in patch
+    assert "--window-position=-32000,-32000" in patch
+    assert contract["pristine"] == "9eaffd8264051266581548ea9dbee1152bd94b7a6032ed0441b1ba3c11c5b5e9"
+    assert contract["patched"] == "d852372c9c16c9a130a280001e62312542092b0c38397907897217f8af0c559d"

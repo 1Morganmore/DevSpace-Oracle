@@ -105,6 +105,7 @@ def test_dry_run_never_executes_and_has_no_file_flag(tmp_path: Path) -> None:
     assert "--file" not in result["argv"]
     assert result["argv"][result["argv"].index("--browser-model-strategy") + 1] == "select"
     assert result["argv"][result["argv"].index("--browser-thinking-time") + 1] == "heavy"
+    assert result["argv"].count("--browser-hide-window") == 1
     assert calls == []
     assert not (tmp_path / "runs").exists()
 
@@ -115,6 +116,30 @@ def test_copy_profile_is_first_class_and_outside_project(tmp_path: Path) -> None
     profile.mkdir()
     result = execute_run(runner, manifest(tmp_path, copy_profile=str(profile.resolve())), dry_run=True)
     assert result["argv"][result["argv"].index("--copy-profile") + 1] == str(profile.resolve())
+
+
+def test_default_signed_in_profile_is_copied_per_run_and_window_is_hidden(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = load_runner()
+    profile = tmp_path.parent / f"{tmp_path.name}-signed-in-oracle-profile"
+    profile.mkdir()
+    monkeypatch.setenv("ORACLE_BROWSER_PROFILE_DIR", str(profile.resolve()))
+
+    result = execute_run(runner, manifest(tmp_path), dry_run=True)
+
+    assert result["argv"][result["argv"].index("--copy-profile") + 1] == str(profile.resolve())
+    assert result["argv"].count("--browser-hide-window") == 1
+
+
+def test_explicit_hide_window_arg_is_safe_and_not_duplicated(tmp_path: Path) -> None:
+    runner = load_runner()
+    result = execute_run(
+        runner,
+        manifest(tmp_path, oracle_args=["--browser-hide-window"]),
+        dry_run=True,
+    )
+    assert result["argv"].count("--browser-hide-window") == 1
 
 
 def test_pro_dry_run_uses_oracle_attachments_and_no_app_mention(tmp_path: Path) -> None:
@@ -166,6 +191,7 @@ def test_failure_does_not_resubmit_and_recovery_never_restarts(tmp_path: Path) -
         recovery = runner.recover_run(Path(result["run_dir"]), action=action, dry_run=True, oracle_command=["oracle"])
         assert f"--{action}" in recovery["argv"]
         assert "--write-output" in recovery["argv"]
+        assert "--no-recover" not in recovery["argv"]
         assert "restart" not in recovery["argv"]
         assert "--prompt" not in recovery["argv"]
 
@@ -190,6 +216,7 @@ def test_pro_recovery_uses_exact_slug_without_attachments_or_resubmit(tmp_path: 
     assert "--prompt" not in argv
     assert "--file" not in argv
     assert "--browser-attachments" not in argv
+    assert "--no-recover" not in argv
 
 
 def test_windows_launch_uses_no_window_and_waits(tmp_path: Path) -> None:
@@ -210,6 +237,9 @@ def test_windows_launch_uses_no_window_and_waits(tmp_path: Path) -> None:
     )
     assert result["ok"] is True
     assert captured["kwargs"]["creationflags"] & runner.STATE.CREATE_NO_WINDOW
+    assert Path(captured["kwargs"]["env"]["TEMP"]).name == "browser-temp"
+    assert captured["kwargs"]["env"]["TMP"] == captured["kwargs"]["env"]["TEMP"]
+    assert not Path(captured["kwargs"]["env"]["TEMP"]).exists()
     assert events == ["enter", "popen", "wait", "exit"]
 
 
@@ -281,10 +311,14 @@ def test_recovery_captures_output_and_updates_state(tmp_path: Path) -> None:
     run_dir = Path(result["run_dir"])
 
     def recovery_popen(command, **kwargs):
+        captured_env.update(kwargs["env"])
         output = Path(command[command.index("--write-output") + 1])
         output.write_text("recovered answer", encoding="utf-8")
+        kwargs["stdout"].write(b"State: complete\n")
+        kwargs["stdout"].flush()
         return Process(0, [])
 
+    captured_env = {}
     recovered = runner.recover_run(
         run_dir,
         action="harvest",
@@ -295,8 +329,99 @@ def test_recovery_captures_output_and_updates_state(tmp_path: Path) -> None:
     assert recovered["status"] == "complete"
     assert Path(recovered["output_path"]).read_text(encoding="utf-8") == "recovered answer"
     assert recovered["result"]["status"] == "complete"
+    assert Path(captured_env["TEMP"]).name == "recovery-harvest-browser-temp"
+    assert not Path(captured_env["TEMP"]).exists()
     transcript = Path(recovered["result"]["artifacts"]["transcript"]).read_text(encoding="utf-8")
     assert "recovered answer" in transcript
+
+
+def test_running_exact_session_cannot_publish_partial_harvest(tmp_path: Path) -> None:
+    runner = load_runner()
+    result = execute_run(
+        runner,
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(0, None, {}, []),
+    )
+    run_dir = Path(result["run_dir"])
+
+    def live_harvest(command, **kwargs):
+        candidate = Path(command[command.index("--write-output") + 1])
+        candidate.write_text("partial answer still flushing", encoding="utf-8")
+        kwargs["stdout"].write(b"State: running\nSignals: stop=yes send=no\n")
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    recovered = runner.recover_run(
+        run_dir,
+        action="harvest",
+        oracle_command=["oracle"],
+        popen_factory=live_harvest,
+    )
+
+    state = runner.STATE.load_state(run_dir / "state.json")
+    assert recovered["status"] == "session_live"
+    assert recovered["ok"] is False
+    assert state["session_authority"] == "live"
+    assert state["terminal_harvested"] is False
+    assert not Path(state["artifacts"]["output"]).exists()
+    assert not (run_dir / "recovery-harvest-candidate.md").exists()
+
+
+def test_unresolved_exact_session_blocks_different_parent_submission(tmp_path: Path) -> None:
+    runner = load_runner()
+    first_parent = "a" * 64
+    second_parent = "b" * 64
+    first = execute_run(
+        runner,
+        manifest(tmp_path, run_id="a" * 32, parallel_parent_id=first_parent),
+        run_factory=version_runner,
+        popen_factory=popen_for(0, None, {}, []),
+    )
+    launches: list[list[str]] = []
+
+    def forbidden_launch(command, **kwargs):
+        launches.append(list(command))
+        raise AssertionError("a different workflow must not submit while the exact session owns the project")
+
+    second = execute_run(
+        runner,
+        manifest(tmp_path, run_id="b" * 32, parallel_parent_id=second_parent),
+        run_factory=version_runner,
+        popen_factory=forbidden_launch,
+    )
+
+    assert first["result"]["session_authority"] == "submitted_unknown"
+    assert second["ok"] is False
+    assert second["result"]["status"] == "failed"
+    assert launches == []
+    assert "still owns this project" in Path(second["result"]["artifacts"]["stderr"]).read_text(encoding="utf-8")
+
+
+def test_legacy_attention_without_session_authority_is_not_a_permanent_project_lock(tmp_path: Path) -> None:
+    runner = load_runner()
+    first = execute_run(
+        runner,
+        manifest(tmp_path, run_id="a" * 32),
+        run_factory=version_runner,
+        popen_factory=popen_for(0, None, {}, []),
+    )
+    first_state_path = Path(first["run_dir"]) / "state.json"
+    first_state = json.loads(first_state_path.read_text(encoding="utf-8"))
+    first_state["status"] = "attention_required"
+    first_state.pop("session_authority", None)
+    first_state_path.write_text(json.dumps(first_state), encoding="utf-8")
+
+    launches: list[list[str]] = []
+    second = execute_run(
+        runner,
+        manifest(tmp_path, run_id="b" * 32),
+        run_factory=version_runner,
+        popen_factory=popen_for(0, b"answer", {}, launches),
+    )
+
+    assert second["ok"] is True
+    assert launches
 
 
 def test_recovery_never_downgrades_durable_complete(tmp_path: Path) -> None:

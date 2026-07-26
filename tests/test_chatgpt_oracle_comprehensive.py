@@ -205,6 +205,7 @@ def test_pro_exact_recovery_materializes_output_without_resubmission(tmp_path: P
 
     def fake_recover(exact_run_dir: Path, *, action: str, dry_run: bool):
         assert exact_run_dir == run_dir
+        assert action == "harvest"
         return {"ok": True, "status": "complete", "run_dir": str(run_dir), "output_path": str(oracle_output)}
 
     result = module.run_workflow(
@@ -456,8 +457,7 @@ def test_running_oracle_stage_recovers_exact_run_without_resubmission(tmp_path: 
     second = module.run_workflow(path, oracle_execute=fake_execute, oracle_recover=fake_recover)
     assert second["status"] == "awaiting_receipt"
     assert submitted == 1
-    assert len(recovered) == 1
-    assert recovered[0][1:] == ("harvest", False)
+    assert [item[1:] for item in recovered] == [("harvest", False)]
     assert second["recovery"]["status"] == "recovered"
 
 
@@ -486,7 +486,7 @@ def test_unambiguous_app_mention_pre_submit_failure_retries_once(tmp_path: Path)
     assert result["next_index"] == 0
 
 
-def test_running_stage_prefers_existing_bound_receipt_over_provider_recovery(tmp_path: Path) -> None:
+def test_running_stage_does_not_trust_existing_receipt_before_terminal_authority(tmp_path: Path) -> None:
     module = load()
     submitted = []
     recovered = []
@@ -501,7 +501,7 @@ def test_running_stage_prefers_existing_bound_receipt_over_provider_recovery(tmp
 
     def fake_recover(*args, **kwargs):
         recovered.append((args, kwargs))
-        raise AssertionError("a valid bound receipt must outrank provider recovery")
+        return {"ok": False, "status": "session_live", "run_dir": str(args[0])}
 
     path = manifest(tmp_path)
     first = module.run_workflow(path, oracle_execute=fake_execute, oracle_recover=fake_recover)
@@ -526,10 +526,11 @@ def test_running_stage_prefers_existing_bound_receipt_over_provider_recovery(tmp
 
     second = module.run_workflow(path, oracle_execute=fake_execute, oracle_recover=fake_recover)
 
-    assert second["status"] == "attention_required"
-    assert second["current_stage"] == "review"
-    assert len(submitted) == 2
-    assert recovered == []
+    assert second["status"] == "running"
+    assert second["current_stage"] == "plan"
+    assert len(submitted) == 1
+    assert len(recovered) == 1
+    assert recovered[0][1]["action"] == "harvest"
 
 
 def test_review_revise_receipt_can_return_to_plan(tmp_path: Path) -> None:
@@ -566,6 +567,183 @@ def test_review_revise_receipt_can_return_to_plan(tmp_path: Path) -> None:
 
     assert value["status"] == "REVISE"
     assert value["next_stage"] == "plan"
+
+
+def _review_receipt(
+    module,
+    tmp_path: Path,
+    *,
+    status: str,
+    attempt: str,
+    ids: list[str],
+    next_stage: str,
+    blocker: str = "",
+) -> Path:
+    output = tmp_path / f"{attempt}-output.md"
+    output.write_text(status, encoding="utf-8")
+    next_mission = tmp_path / f"{attempt}-next.md"
+    next_mission.write_text(next_stage, encoding="utf-8")
+    receipt = tmp_path / f"{attempt}-receipt.json"
+    value = {
+        "schema": module.RECEIPT_SCHEMA,
+        "workflow_id": "a" * 32,
+        "stage": "review",
+        "attempt_id": attempt,
+        "input_mission_sha256": "c" * 64,
+        "status": status,
+        "output_path": str(output),
+        "output_sha256": module.sha(output),
+        "next_stage": next_stage,
+        "next_mission_path": str(next_mission),
+        "next_mission_sha256": module.sha(next_mission),
+        "ready_for_next": status != "FAIL",
+        "blocker": blocker,
+        "critical_finding_ids": ids,
+        "critical_findings_sha256": module._finding_hash(ids),
+    }
+    receipt.write_text(json.dumps(value), encoding="utf-8")
+    return receipt
+
+
+def test_review_revision_budget_caps_third_revise_without_new_plan(tmp_path: Path) -> None:
+    module = load()
+    config = {
+        "project_root": tmp_path,
+        "_review_policy": module._default_review_policy(),
+    }
+    first = _review_receipt(
+        module, tmp_path, status="REVISE", attempt="1" * 32,
+        ids=["critical-input"], next_stage="plan",
+    )
+    second = _review_receipt(
+        module, tmp_path, status="REVISE", attempt="2" * 32,
+        ids=["critical-input"], next_stage="plan",
+    )
+    third = _review_receipt(
+        module, tmp_path, status="REVISE", attempt="3" * 32,
+        ids=["critical-input"], next_stage="plan",
+    )
+
+    first_value = module._validate_receipt(config, first, "a" * 32, "review", "1" * 32, "c" * 64)
+    second_value = module._validate_receipt(config, second, "a" * 32, "review", "2" * 32, "c" * 64)
+    third_value = module._validate_receipt(config, third, "a" * 32, "review", "3" * 32, "c" * 64)
+
+    assert first_value["_next_mission"].name.endswith("-next.md")
+    assert second_value["_next_mission"].name.endswith("-next.md")
+    assert third_value["_next_mission"] is None
+    assert "budget exhausted" in third_value["_terminal_attention"]
+    assert config["_review_policy"]["plan_revisions_used"] == 2
+    assert config["_review_policy"]["plan_revisions_remaining"] == 0
+
+
+def test_pass_with_notes_proceeds_to_implementation(tmp_path: Path) -> None:
+    module = load()
+    receipt = _review_receipt(
+        module, tmp_path, status="PASS_WITH_NOTES", attempt="4" * 32,
+        ids=[], next_stage="implementation",
+    )
+    value = module._validate_receipt(
+        {"project_root": tmp_path},
+        receipt,
+        "a" * 32,
+        "review",
+        "4" * 32,
+        "c" * 64,
+    )
+    assert value["status"] == "PASS_WITH_NOTES"
+    assert value["next_stage"] == "implementation"
+
+
+def test_followup_review_cannot_add_or_duplicate_finding_ids(tmp_path: Path) -> None:
+    module = load()
+    config = {
+        "project_root": tmp_path,
+        "_review_policy": {
+            **module._default_review_policy(),
+            "plan_revisions_used": 1,
+            "plan_revisions_remaining": 1,
+            "baseline_critical_finding_ids": ["fixed-a"],
+            "baseline_critical_findings_sha256": module._finding_hash(["fixed-a"]),
+        },
+    }
+    added = _review_receipt(
+        module, tmp_path, status="REVISE", attempt="5" * 32,
+        ids=["new-b"], next_stage="plan",
+    )
+    added_value = module._validate_receipt(
+        config, added, "a" * 32, "review", "5" * 32, "c" * 64
+    )
+    assert added_value["_next_mission"] is None
+    assert "outside the fixed baseline" in added_value["_terminal_attention"]
+
+    duplicate = json.loads(added.read_text(encoding="utf-8"))
+    duplicate["attempt_id"] = "6" * 32
+    duplicate["critical_finding_ids"] = ["fixed-a", "fixed-a"]
+    duplicate["critical_findings_sha256"] = module._finding_hash(["fixed-a", "fixed-a"])
+    duplicate_path = tmp_path / "duplicate.json"
+    duplicate_path.write_text(json.dumps(duplicate), encoding="utf-8")
+    with pytest.raises(module.WorkflowError, match="unique and sorted"):
+        module._validate_receipt(
+            config, duplicate_path, "a" * 32, "review", "6" * 32, "c" * 64
+        )
+
+
+def test_active_scope_blocks_retry_workflow_and_exposes_revision_budget(tmp_path: Path) -> None:
+    module = load()
+    first_path = manifest(tmp_path)
+    first = module.load_manifest(first_path)
+    first["_review_policy"] = {
+        **module._default_review_policy(),
+        "plan_revisions_used": 2,
+        "plan_revisions_remaining": 0,
+    }
+    module._claim_scope(first, first["workflow_id"])
+    scope = module._json(module._scope_path(first))
+    assert scope["review_policy"]["plan_revisions_remaining"] == 0
+
+    second = dict(first)
+    second["workflow_id"] = "b" * 32
+    with pytest.raises(module.WorkflowError, match="recover that exact workflow"):
+        module._claim_scope(second, second["workflow_id"])
+
+
+def test_review_history_budget_spans_retry_workflow_directories(tmp_path: Path) -> None:
+    module = load()
+    root = tmp_path / "project"
+    root.mkdir()
+    for index, attempt in enumerate(("1" * 32, "2" * 32, "3" * 32), start=1):
+        stage_dir = tmp_path / f"workflow-retry{index}" / "stages" / f"001-review-{attempt}"
+        stage_dir.mkdir(parents=True)
+        output = stage_dir / "review.md"
+        output.write_text("critical", encoding="utf-8")
+        receipt = {
+            "schema": module.RECEIPT_SCHEMA,
+            "workflow_id": str(index) * 32,
+            "stage": "review",
+            "attempt_id": attempt,
+            "input_mission_sha256": "c" * 64,
+            "status": "REVISE",
+            "output_path": str(output),
+            "output_sha256": module.sha(output),
+            "next_stage": "plan",
+            "next_mission_path": str(output),
+            "next_mission_sha256": module.sha(output),
+            "ready_for_next": True,
+            "blocker": "",
+        }
+        (stage_dir / "stage-result.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+    config = {
+        "project_root": root,
+        "workflow_dir": tmp_path / "workflow-retry11",
+    }
+    policy = module._review_policy_from_history(config)
+
+    assert policy["plan_revisions_used"] == 3
+    assert policy["plan_revisions_remaining"] == 0
+    assert policy["baseline_critical_finding_ids"] == [
+        f"legacy-{module.sha(tmp_path / 'workflow-retry1' / 'stages' / ('001-review-' + '1' * 32) / 'review.md')[:24]}"
+    ]
 
 
 def test_blocked_plan_receipt_can_continue_to_bound_source_repair_plan(tmp_path: Path) -> None:

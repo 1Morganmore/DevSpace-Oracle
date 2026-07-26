@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -31,7 +32,14 @@ BLOCKED_OPTIONS = {
     "--dry-run", "--render", "--render-markdown", "--copy",
 }
 BLOCKED_COMMANDS = {"restart", "session", "status", "serve", "tui"}
-SAFE_ORACLE_SWITCHES = {"--no-notify", "--notify", "--no-notify-sound", "--notify-sound", "--verbose"}
+SAFE_ORACLE_SWITCHES = {
+    "--no-notify",
+    "--notify",
+    "--no-notify-sound",
+    "--notify-sound",
+    "--verbose",
+    "--browser-hide-window",
+}
 SAFE_ORACLE_VALUE_OPTIONS = {"--heartbeat", "--timeout", "--zombie-timeout"}
 APP_RE = re.compile(r"^[^\r\n]+$")
 MODEL_RE = re.compile(r"^[a-zA-Z0-9._ -]+$")
@@ -85,6 +93,7 @@ class RunLayout:
     transcript_path: Path
     stdout_path: Path
     stderr_path: Path
+    browser_temp_path: Path
 
 
 def sha256_file(path: Path) -> str:
@@ -287,7 +296,17 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
         if thinking_time != "heavy":
             raise OracleStateError("PRO_THINKING_TIME_INVALID", "Pro requires heavy reasoning")
     copy_profile_raw = str(payload.get("copy_profile") or "").strip()
-    copy_profile = absolute_path(copy_profile_raw, label="copy_profile", must_exist=True) if copy_profile_raw else None
+    if copy_profile_raw:
+        copy_profile = absolute_path(copy_profile_raw, label="copy_profile", must_exist=True)
+    else:
+        # The manually signed-in Oracle profile is the immutable seed for a
+        # throwaway per-run copy.  This prevents different projects from
+        # sharing one Chrome process and closing each other's live work.
+        profile_override = str(os.environ.get("ORACLE_BROWSER_PROFILE_DIR") or "").strip()
+        default_profile = Path(profile_override).expanduser().resolve() if profile_override else (
+            Path.home() / ".oracle" / "browser-profile"
+        ).resolve()
+        copy_profile = default_profile if default_profile.is_dir() else None
     if copy_profile is not None:
         if not copy_profile.is_dir():
             raise OracleStateError("COPY_PROFILE_NOT_DIRECTORY", "copy_profile must identify a directory")
@@ -351,7 +370,17 @@ def create_layout(config: OracleConfig, *, run_id: str | None = None) -> RunLayo
     run_token = actual.rsplit("-", 1)[-1][:10]
     slug = f"oracle-{project_token}-{run_token}"
     run_dir = config.run_root / actual
-    return RunLayout(actual, slug, run_dir, run_dir / "state.json", run_dir / "output.md", run_dir / "transcript.md", run_dir / "stdout.log", run_dir / "stderr.log")
+    return RunLayout(
+        actual,
+        slug,
+        run_dir,
+        run_dir / "state.json",
+        run_dir / "output.md",
+        run_dir / "transcript.md",
+        run_dir / "stdout.log",
+        run_dir / "stderr.log",
+        run_dir / "browser-temp",
+    )
 
 
 def state_payload(config: OracleConfig, layout: RunLayout, *, status: str, resolved_version: str, exit_code: int | None = None) -> dict[str, Any]:
@@ -382,9 +411,99 @@ def state_payload(config: OracleConfig, layout: RunLayout, *, status: str, resol
             "slug": layout.slug,
             "session_locator": layout.slug,
         },
-        "artifacts": {"output": str(layout.output_path), "transcript": str(layout.transcript_path), "stdout": str(layout.stdout_path), "stderr": str(layout.stderr_path)},
-        "status": status, "exit_code": exit_code,
+        "artifacts": {
+            "output": str(layout.output_path),
+            "transcript": str(layout.transcript_path),
+            "stdout": str(layout.stdout_path),
+            "stderr": str(layout.stderr_path),
+            "browser_temp": str(layout.browser_temp_path),
+        },
+        "status": status,
+        "exit_code": exit_code,
+        "session_authority": "pre_submit",
+        "terminal_harvested": False,
+        "artifact_sha256": None,
     }
+
+
+def host_uptime_ms(*, platform_name: str | None = None) -> int:
+    platform = os.name if platform_name is None else platform_name
+    if platform == "nt":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetTickCount64.restype = ctypes.c_ulonglong
+        return int(kernel32.GetTickCount64())
+    return int(time.monotonic() * 1000)
+
+
+def browser_temp_environment(
+    browser_temp_path: Path,
+    *,
+    platform_name: str | None = None,
+    base_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    root = browser_temp_path.expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    marker = {
+        "schema": "codex.chatgpt.oracle-browser-temp-owner/v1",
+        "controller_pid": os.getpid(),
+        "host_uptime_ms": host_uptime_ms(platform_name=platform_name),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    write_json_atomic(root / ".owner.json", marker)
+    env = dict(os.environ if base_env is None else base_env)
+    value = str(root)
+    env.update({"TEMP": value, "TMP": value, "TMPDIR": value})
+    return env
+
+
+def cleanup_owned_browser_temp(browser_temp_path: Path) -> bool:
+    root = browser_temp_path.expanduser().resolve()
+    if not root.exists():
+        return True
+    marker = root / ".owner.json"
+    if not marker.is_file():
+        return False
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if payload.get("schema") != "codex.chatgpt.oracle-browser-temp-owner/v1":
+        return False
+    try:
+        shutil.rmtree(root)
+    except OSError:
+        return False
+    return not root.exists()
+
+
+def cleanup_prior_boot_browser_temps(
+    run_root: Path,
+    *,
+    platform_name: str | None = None,
+    current_uptime_ms: int | None = None,
+) -> list[str]:
+    root = run_root.expanduser().resolve()
+    if not root.is_dir():
+        return []
+    now_uptime = host_uptime_ms(platform_name=platform_name) if current_uptime_ms is None else int(current_uptime_ms)
+    cleaned: list[str] = []
+    for run_dir in sorted((item for item in root.iterdir() if item.is_dir()), key=lambda item: item.name):
+        browser_temp = run_dir / "browser-temp"
+        marker = browser_temp / ".owner.json"
+        if not marker.is_file():
+            continue
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            owner_uptime = int(payload["host_uptime_ms"])
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            continue
+        # GetTickCount/monotonic reset on reboot. Only a prior-boot owner is
+        # eligible here; same-boot crashes remain preserved for exact recovery.
+        if now_uptime >= owner_uptime:
+            continue
+        if cleanup_owned_browser_temp(browser_temp):
+            cleaned.append(str(browser_temp))
+    return cleaned
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -404,7 +523,16 @@ def load_state(path: Path) -> dict[str, Any]:
     return payload
 
 
-def update_state(state_path: Path, *, status: str, resolved_version: str | None = None, exit_code: int | None = None) -> dict[str, Any]:
+def update_state(
+    state_path: Path,
+    *,
+    status: str,
+    resolved_version: str | None = None,
+    exit_code: int | None = None,
+    session_authority: str | None = None,
+    terminal_harvested: bool | None = None,
+    artifact_sha256: str | None = None,
+) -> dict[str, Any]:
     if status not in STATUSES:
         raise OracleStateError("STATUS_INVALID", "invalid Oracle run status")
     payload = load_state(state_path)
@@ -412,6 +540,12 @@ def update_state(state_path: Path, *, status: str, resolved_version: str | None 
     payload["exit_code"] = exit_code
     if resolved_version is not None:
         payload["oracle"]["resolved_version"] = resolved_version
+    if session_authority is not None:
+        payload["session_authority"] = session_authority
+    if terminal_harvested is not None:
+        payload["terminal_harvested"] = terminal_harvested
+    if artifact_sha256 is not None:
+        payload["artifact_sha256"] = artifact_sha256
     write_json_atomic(state_path, payload)
     return payload
 
@@ -421,6 +555,56 @@ def output_is_nonempty(path: Path) -> bool:
         return bool(path.read_bytes().strip())
     except OSError:
         return False
+
+
+def unresolved_project_sessions(
+    run_root: Path,
+    project_root: Path,
+    *,
+    parallel_parent_id: str | None = None,
+    exclude_run_id: str | None = None,
+) -> list[dict[str, str]]:
+    """Return exact submitted sessions that still own this project.
+
+    A local Oracle exit is not web-terminal authority.  Ownership therefore
+    survives ``running``/``attention_required`` host states until exact-session
+    recovery records terminal completion.  Parallel children from the same
+    persisted parent are allowed to coexist; a different parent is not.
+    """
+    root = run_root.expanduser().resolve()
+    expected_project = str(project_root.expanduser().resolve()).casefold()
+    expected_parent = str(parallel_parent_id or "").strip().casefold()
+    active_authorities = {"submitted_unknown", "live", "terminal_observed"}
+    owners: list[dict[str, str]] = []
+    if not root.is_dir():
+        return owners
+    for candidate in sorted(root.glob("*/state.json"), key=lambda item: str(item)):
+        try:
+            payload = load_state(candidate)
+        except (OSError, OracleStateError):
+            continue
+        run_id = str(payload.get("run_id") or "")
+        if run_id == exclude_run_id or str(payload.get("project_root") or "").casefold() != expected_project:
+            continue
+        authority = str(payload.get("session_authority") or "").strip().casefold()
+        # Legacy running records fail closed because the provider may still be
+        # active. Legacy attention-required records predate explicit session
+        # authority and must not become permanent project locks; new runs
+        # persist submitted_unknown/live explicitly before reaching attention.
+        if not authority and str(payload.get("status") or "").casefold() == "running":
+            authority = "submitted_unknown"
+        if authority not in active_authorities:
+            continue
+        owner_parent = str(payload.get("parallel_parent_id") or "").strip().casefold()
+        if expected_parent and owner_parent == expected_parent:
+            continue
+        owners.append({
+            "run_id": run_id,
+            "session_locator": str((payload.get("oracle") or {}).get("session_locator") or ""),
+            "session_authority": authority,
+            "state_path": str(candidate),
+        })
+    return owners
 
 
 def write_transcript(layout: RunLayout) -> None:

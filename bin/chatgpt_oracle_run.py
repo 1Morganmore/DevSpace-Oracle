@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -51,6 +52,7 @@ class OracleRunError(RuntimeError):
 
 
 def build_oracle_argv(config, layout, prompt: str) -> list[str]:
+    lifecycle_args = [] if "--browser-hide-window" in config.oracle_args else ["--browser-hide-window"]
     command = [
         *config.oracle_command,
         "--engine", "browser",
@@ -59,6 +61,7 @@ def build_oracle_argv(config, layout, prompt: str) -> list[str]:
         "--browser-thinking-time", config.thinking_time,
         "--browser-research", config.research,
         "--browser-archive", config.archive,
+        *lifecycle_args,
         *config.oracle_args,
         "--slug", layout.slug,
         "--prompt", prompt,
@@ -128,6 +131,22 @@ def append_error(path: Path, message: str) -> None:
         handle.write((message.rstrip() + "\n").encode("utf-8", errors="replace"))
 
 
+SESSION_STATE_RE = re.compile(r"(?im)^\s*State:\s*([a-z][a-z0-9_-]*)\s*$")
+LIVE_SESSION_STATES = {"running", "streaming", "thinking", "active"}
+TERMINAL_SESSION_STATES = {
+    "complete", "completed", "done", "finished", "failed", "error", "cancelled", "canceled",
+}
+
+
+def exact_session_state(path: Path) -> str | None:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    matches = SESSION_STATE_RE.findall(text)
+    return matches[-1].casefold() if matches else None
+
+
 def execute_run(
     manifest_path: Path,
     *,
@@ -147,6 +166,7 @@ def execute_run(
     if dry_run:
         return dry_run_payload(config, layout, argv, prompt)
 
+    STATE.cleanup_prior_boot_browser_temps(config.run_root, platform_name=platform_name)
     mission_bytes = config.mission_path.read_bytes()
     actual_mission_sha256 = hashlib.sha256(mission_bytes).hexdigest()
     if actual_mission_sha256 != config.mission_sha256:
@@ -168,6 +188,7 @@ def execute_run(
     STATE.write_json_atomic(layout.state_path, STATE.state_payload(config, layout, status="prepared", resolved_version="unresolved"))
     layout.stdout_path.touch()
     layout.stderr_path.touch()
+    oracle_env = STATE.browser_temp_environment(layout.browser_temp_path, platform_name=platform_name)
     try:
         version = resolve_oracle_version(config.oracle_command, run_factory=run_factory, platform_name=platform_name)
         compat_factory(version)
@@ -189,6 +210,18 @@ def execute_run(
                 else config.project_root
             )
             with STATE.project_submit_mutex(mutex_root, timeout_seconds=config.submit_mutex_timeout_seconds, platform_name=platform_name):
+                owners = STATE.unresolved_project_sessions(
+                    config.run_root,
+                    config.project_root,
+                    parallel_parent_id=config.parallel_parent_id,
+                    exclude_run_id=layout.run_id,
+                )
+                if owners:
+                    raise OracleRunError(
+                        "PROJECT_SESSION_STILL_LIVE",
+                        "an exact Oracle session still owns this project; recover it before submitting",
+                        {"owners": owners},
+                    )
                 original_mission_sha256 = STATE.sha256_file(config.mission_path)
                 current_mission_sha256 = STATE.sha256_file(transport_mission_path)
                 if original_mission_sha256 != config.mission_sha256 or current_mission_sha256 != config.mission_sha256:
@@ -212,32 +245,60 @@ def execute_run(
                 process = popen_factory(
                     argv,
                     cwd=str(config.project_root),
+                    env=oracle_env,
                     stdin=subprocess.DEVNULL,
                     stdout=stdout_handle,
                     stderr=stderr_handle,
                     shell=False,
                     **STATE.windows_subprocess_kwargs(platform_name=platform_name),
                 )
-                STATE.update_state(layout.state_path, status="running", resolved_version=version)
+                STATE.update_state(
+                    layout.state_path,
+                    status="running",
+                    resolved_version=version,
+                    session_authority="submitted_unknown",
+                )
                 if not config.parallel_parent_id:
                     exit_code = int(process.wait())
             if config.parallel_parent_id:
                 exit_code = int(process.wait())
     except Exception as exc:
-        append_error(layout.stderr_path, f"Oracle launch/run failed: {exc}")
+        code = f"{exc.code}: " if isinstance(exc, OracleRunError) else ""
+        append_error(layout.stderr_path, f"Oracle launch/run failed: {code}{exc}")
         STATE.write_transcript(layout)
+        latest = STATE.load_state(layout.state_path)
+        if latest.get("session_authority") == "pre_submit":
+            STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
         return {"ok": False, "run_dir": str(layout.run_dir), "result": STATE.update_state(layout.state_path, status="failed")}
-
     STATE.write_transcript(layout)
     status = "complete" if exit_code == 0 and STATE.output_is_nonempty(layout.output_path) else ("attention_required" if exit_code == 0 else "failed")
-    state = STATE.update_state(layout.state_path, status=status, exit_code=exit_code)
+    if status == "complete":
+        state = STATE.update_state(
+            layout.state_path,
+            status=status,
+            exit_code=exit_code,
+            session_authority="terminal",
+            terminal_harvested=True,
+            artifact_sha256=STATE.sha256_file(layout.output_path),
+        )
+        STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
+    else:
+        state = STATE.update_state(
+            layout.state_path,
+            status=status,
+            exit_code=exit_code,
+            session_authority="submitted_unknown",
+        )
     return {"ok": status == "complete", "run_dir": str(layout.run_dir), "result": state}
 
 
 def recovery_argv(command: Sequence[str], locator: str, action: str, output_path: Path) -> list[str]:
     if action not in {"harvest", "live"}:
         raise OracleRunError("RECOVERY_ACTION_INVALID", "recovery action must be harvest or live")
-    argv = [*command, "session", locator, f"--{action}", "--no-recover", "--write-output", str(output_path)]
+    # Oracle's bounded browser recovery reopens only the exact conversation URL
+    # persisted under this slug.  Do not pass --no-recover here: it disables
+    # that safe harvest path and leaves a dead CDP endpoint as ECONNREFUSED.
+    argv = [*command, "session", locator, f"--{action}", "--write-output", str(output_path)]
     if "restart" in argv or "--prompt" in argv or "-p" in argv:
         raise OracleRunError("RECOVERY_COMMAND_UNSAFE", "recovery must not restart or submit a new prompt")
     return argv
@@ -254,7 +315,12 @@ def _recover_run_locked(
 ) -> dict[str, Any]:
     directory = run_dir.expanduser().resolve(strict=True)
     state = STATE.load_state(directory / "state.json")
-    if state.get("status") == "complete" and STATE.output_is_nonempty(Path(str(state["artifacts"]["output"]))):
+    if (
+        state.get("status") == "complete"
+        and state.get("session_authority") == "terminal"
+        and state.get("terminal_harvested") is True
+        and STATE.output_is_nonempty(Path(str(state["artifacts"]["output"])))
+    ):
         return {
             "ok": True,
             "status": "complete",
@@ -280,18 +346,70 @@ def _recover_run_locked(
         return {"ok": True, "status": "dry-run", "run_dir": str(directory), "action": action, "argv": STATE.command_for_display(argv)}
     stdout_path = directory / f"recovery-{action}-stdout.log"
     stderr_path = directory / f"recovery-{action}-stderr.log"
-    with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
-        process = popen_factory(
-            argv,
-            cwd=str(state["project_root"]),
-            stdin=subprocess.DEVNULL,
-            stdout=stdout_handle,
-            stderr=stderr_handle,
-            shell=False,
-            **STATE.windows_subprocess_kwargs(platform_name=platform_name),
+    recovery_browser_temp = directory / f"recovery-{action}-browser-temp"
+    recovery_env = STATE.browser_temp_environment(recovery_browser_temp, platform_name=platform_name)
+    try:
+        with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
+            process = popen_factory(
+                argv,
+                cwd=str(state["project_root"]),
+                env=recovery_env,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+                shell=False,
+                **STATE.windows_subprocess_kwargs(platform_name=platform_name),
+            )
+            exit_code = int(process.wait())
+    finally:
+        STATE.cleanup_owned_browser_temp(recovery_browser_temp)
+    observed_session_state = exact_session_state(stdout_path)
+    if observed_session_state in LIVE_SESSION_STATES:
+        if argv_output.exists():
+            argv_output.unlink()
+        updated = STATE.update_state(
+            directory / "state.json",
+            status="running",
+            exit_code=exit_code,
+            session_authority="live",
         )
-        exit_code = int(process.wait())
-    if exit_code == 0 and STATE.output_is_nonempty(argv_output):
+        return {
+            "ok": False,
+            "status": "session_live",
+            "run_dir": str(directory),
+            "action": action,
+            "exit_code": exit_code,
+            "exact_session_state": observed_session_state,
+            "result": updated,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+        }
+    if action == "live":
+        if argv_output.exists():
+            argv_output.unlink()
+        authority = "terminal_observed" if observed_session_state in TERMINAL_SESSION_STATES else "submitted_unknown"
+        updated = STATE.update_state(
+            directory / "state.json",
+            status="attention_required",
+            exit_code=exit_code,
+            session_authority=authority,
+        )
+        return {
+            "ok": False,
+            "status": "terminal_observed" if authority == "terminal_observed" else "attention_required",
+            "run_dir": str(directory),
+            "action": action,
+            "exit_code": exit_code,
+            "exact_session_state": observed_session_state,
+            "result": updated,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+        }
+    if (
+        exit_code == 0
+        and observed_session_state in TERMINAL_SESSION_STATES
+        and STATE.output_is_nonempty(argv_output)
+    ):
         os.replace(argv_output, output_path)
     layout = STATE.RunLayout(
         str(state["run_id"]),
@@ -302,9 +420,15 @@ def _recover_run_locked(
         Path(str(artifacts.get("transcript") or (directory / "transcript.md"))),
         Path(str(artifacts.get("stdout") or (directory / "stdout.log"))),
         Path(str(artifacts.get("stderr") or (directory / "stderr.log"))),
+        Path(str(artifacts.get("browser_temp") or (directory / "browser-temp"))).resolve(),
     )
     STATE.write_transcript(layout)
-    status = "complete" if exit_code == 0 and STATE.output_is_nonempty(output_path) else ("attention_required" if exit_code == 0 else "failed")
+    harvested = (
+        exit_code == 0
+        and observed_session_state in TERMINAL_SESSION_STATES
+        and STATE.output_is_nonempty(output_path)
+    )
+    status = "complete" if harvested else ("attention_required" if exit_code == 0 else "failed")
     latest = STATE.load_state(layout.state_path)
     latest_output = Path(str(latest.get("artifacts", {}).get("output") or output_path))
     if latest.get("status") == "complete" and STATE.output_is_nonempty(latest_output):
@@ -318,7 +442,18 @@ def _recover_run_locked(
             "output_path": str(latest_output),
             "monotonic_race_preserved": True,
         }
-    updated = STATE.update_state(layout.state_path, status=status, exit_code=exit_code)
+    updated = STATE.update_state(
+        layout.state_path,
+        status=status,
+        exit_code=exit_code,
+        session_authority="terminal" if harvested else (
+            "terminal_observed" if observed_session_state in TERMINAL_SESSION_STATES else "submitted_unknown"
+        ),
+        terminal_harvested=harvested,
+        artifact_sha256=STATE.sha256_file(output_path) if harvested else None,
+    )
+    if harvested:
+        STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
     return {
         "ok": status == "complete",
         "status": status,

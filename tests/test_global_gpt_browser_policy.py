@@ -76,9 +76,17 @@ def test_host_control_state_is_outside_devspace_project() -> None:
 def test_oracle_recovery_is_exact_slug_no_restart_and_monotonic() -> None:
     value = text(THINKING)
     assert "stored slug" in value
-    assert "--no-recover" in value
     assert "never restarts/resubmits" in value
     assert "never downgrades durable COMPLETE" in value
+    assert "exact persisted" in value
+    assert "replacement" in value
+
+
+def test_oracle_runs_use_isolated_profile_copies_and_owned_hidden_windows() -> None:
+    value = text(THINKING)
+    assert "throwaway" in value
+    assert "per-run profile" in value
+    assert "hide its owned window" in value
 
 
 def test_install_inventory_contains_new_active_runtime_and_keeps_legacy_recovery() -> None:

@@ -162,8 +162,19 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_run.py" recover `
   --action harvest
 ```
 
-복구는 저장된 slug와 `--no-recover`만 사용하고 재시작·재제출하지
-않습니다. durable COMPLETE를 failed로 되돌리지 않습니다.
+새 실행은 로그인된 Oracle 프로필의 실행별 임시 복사본과 숨김 창을
+사용하므로, 다른 프로젝트의 완료 작업이 진행 중인 Chrome을 함께 닫지
+않습니다. 복구는 저장된 slug만 사용하며 재시작·재제출하지 않습니다.
+기존 CDP가 끊겼다면 저장된 프로필 원본으로 복구 창을 만들고 그 slug에
+기록된 정확한 대화 URL만 다시 열어 결과를 회수합니다. durable COMPLETE를
+failed로 되돌리지 않습니다.
+
+종합모드의 계획 검토는 `PASS`, `PASS_WITH_NOTES`, `REVISE`, `FAIL`을
+구분합니다. `PASS_WITH_NOTES`는 구현으로 진행하며, 치명적 결함에 대한 계획
+수정은 동일 작업 계열 전체에서 최대 두 번입니다. 첫 검토의 치명적 finding
+ID를 고정하므로 후속 검토가 새 비치명 요구나 표현 개선을 이유로 다시
+계획을 돌릴 수 없습니다. 세 번째 `REVISE`는 새 계획 없이 사용자 확인
+필요 상태로 끝납니다.
 
 ## 업데이트·롤백·제거
 
