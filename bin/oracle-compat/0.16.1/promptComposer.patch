@@ -13,7 +13,7 @@ index c643386..df28522 100644
      const encodedPrompt = JSON.stringify(prompt);
      const focusResult = await runtime.evaluate({
          expression: `(() => {
-@@ -67,7 +71,150 @@ export async function submitPrompt(deps, prompt, logger) {
+@@ -67,7 +71,215 @@ export async function submitPrompt(deps, prompt, logger) {
          await logDomFailure(runtime, logger, "focus-textarea");
          throw new Error("Failed to focus prompt textarea");
      }
@@ -113,20 +113,44 @@ index c643386..df28522 100644
 +                candidates: diagnostic.result?.value,
 +            });
 +        }
-+        await input.dispatchKeyEvent({
-+            type: "keyDown",
-+            key: "Tab",
-+            code: "Tab",
-+            windowsVirtualKeyCode: 9,
-+            nativeVirtualKeyCode: 9,
++        const clickResult = await runtime.evaluate({
++            expression: `(() => {
++              const wanted = ${JSON.stringify(appName.toLowerCase())};
++              const visible = (node) => {
++                const rect = node?.getBoundingClientRect?.();
++                return Boolean(rect && rect.width > 0 && rect.height > 0);
++              };
++              const candidates = Array.from(document.querySelectorAll(
++                '[role="option"],[role="menuitem"],[data-radix-collection-item],button'
++              )).filter(visible);
++              const text = (node) =>
++                String(node.innerText || node.textContent || '').trim().toLowerCase();
++              let target = candidates.find((node) => text(node) === wanted) ||
++                candidates.find((node) => text(node).includes(wanted));
++              if (!target) {
++                const group = Array.from(document.querySelectorAll('[role="group"]'))
++                  .filter(visible)
++                  .find((node) => text(node).includes(wanted));
++                const label = group && Array.from(group.querySelectorAll('*'))
++                  .filter(visible)
++                  .find((node) => text(node) === wanted);
++                target = label?.closest?.(
++                  'button,[role="option"],[role="menuitem"],[data-radix-collection-item]'
++                ) || label;
++              }
++              if (!target || typeof target.click !== 'function') return false;
++              target.click();
++              return true;
++            })()`,
++            returnByValue: true,
 +        });
-+        await input.dispatchKeyEvent({
-+            type: "keyUp",
-+            key: "Tab",
-+            code: "Tab",
-+            windowsVirtualKeyCode: 9,
-+            nativeVirtualKeyCode: 9,
-+        });
++        if (clickResult.result?.value !== true) {
++            throw new BrowserAutomationError("Exact ChatGPT app suggestion could not be clicked.", {
++                stage: "submit-prompt",
++                code: "app-mention-suggestion-click-failed",
++                appName,
++            });
++        }
 +        const pillDeadline = Date.now() + 5_000;
 +        let pillConfirmed = false;
 +        while (Date.now() < pillDeadline) {
@@ -136,11 +160,23 @@ index c643386..df28522 100644
 +                  const roots = Array.from(document.querySelectorAll(
 +                    ${JSON.stringify(INPUT_SELECTORS.join(","))}
 +                  ));
-+                  return roots.some((root) => Array.from(root.querySelectorAll(
++                  const pill = roots.some((root) => {
++                    const scope = root.closest('form') || root.parentElement || root;
++                    return Array.from(scope.querySelectorAll(
 +                    '[contenteditable="false"],[data-lexical-decorator="true"],[data-testid*="mention"],button'
 +                  )).some((node) =>
 +                    String(node.innerText || node.textContent || '').trim().toLowerCase().includes(wanted)
-+                  ));
++                    );
++                  });
++                  if (pill) return true;
++                  const visible = (node) => {
++                    const rect = node?.getBoundingClientRect?.();
++                    return Boolean(rect && rect.width > 0 && rect.height > 0);
++                  };
++                  return !Array.from(document.querySelectorAll(
++                    '[role="option"],[role="menuitem"],[role="group"],[data-radix-collection-item]'
++                  )).some((node) => visible(node) &&
++                    String(node.innerText || node.textContent || '').trim().toLowerCase().includes(wanted));
 +                })()`,
 +                returnByValue: true,
 +            });
@@ -151,7 +187,36 @@ index c643386..df28522 100644
 +            await delay(100);
 +        }
 +        if (!pillConfirmed) {
-+            throw new BrowserAutomationError("ChatGPT app mention was not confirmed in the composer.", {
++            const diagnostic = await runtime.evaluate({
++                expression: `(() => {
++                  const wanted = ${JSON.stringify(appName.toLowerCase())};
++                  const visible = (node) => {
++                    const rect = node?.getBoundingClientRect?.();
++                    return Boolean(rect && rect.width > 0 && rect.height > 0);
++                  };
++                  const describe = (node) => ({
++                    tag: node?.tagName || null,
++                    role: node?.getAttribute?.('role') || null,
++                    testid: node?.getAttribute?.('data-testid') || null,
++                    ariaLabel: node?.getAttribute?.('aria-label') || null,
++                    text: String(node?.innerText || node?.textContent || '').trim().slice(0, 240),
++                    html: String(node?.outerHTML || '').slice(0, 500),
++                  });
++                  const matches = Array.from(document.querySelectorAll('*'))
++                    .filter((node) => visible(node) &&
++                      String(node.innerText || node.textContent || '').trim().toLowerCase().includes(wanted))
++                    .slice(-12)
++                    .map(describe);
++                  const editors = Array.from(document.querySelectorAll(
++                    ${JSON.stringify(INPUT_SELECTORS.join(","))}
++                  )).map(describe);
++                  return { matches, editors, active: describe(document.activeElement) };
++                })()`,
++                returnByValue: true,
++            });
++            logger(`App mention confirmation diagnostic: ${JSON.stringify(diagnostic.result?.value ?? null)}`);
++            await logDomFailure(runtime, logger, "app-mention-pill-missing");
++            throw new BrowserAutomationError(`ChatGPT app mention was not confirmed in the composer: ${JSON.stringify(diagnostic.result?.value ?? null)}`, {
 +                stage: "submit-prompt",
 +                code: "app-mention-pill-missing",
 +                appName,
