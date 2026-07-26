@@ -811,3 +811,24 @@ def test_web_multi_preflight_failure_stays_prepared_and_rejects_changed_mission(
     with pytest.raises(module.WorkflowError, match="prepared next mission changed"):
         module.run_workflow(workflow_path, oracle_execute=fake_plan, multi_execute=fake_multi)
     assert calls == 0
+
+
+def test_stage_contract_preserves_upstream_input_mission_hash_semantics(tmp_path: Path) -> None:
+    module = load()
+    path = manifest(tmp_path)
+    config = module.load_manifest(path)
+    source = config["initial_mission_path"]
+    mission, _, input_sha = module._stage_mission(
+        config,
+        config["workflow_id"],
+        0,
+        "plan",
+        source,
+        "b" * 32,
+    )
+    text = mission.read_text(encoding="utf-8")
+
+    assert input_sha == module.sha(source)
+    assert f"input_mission_sha256={input_sha}" in text
+    assert "binds the upstream source mission bytes" in text
+    assert "do not replace it with a hash of this augmented mission.md" in text

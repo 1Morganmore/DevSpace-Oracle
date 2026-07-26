@@ -140,7 +140,9 @@ def _stage_mission(
         "Receipt schema: codex.chatgpt.oracle-stage-result/v1. Include workflow_id, "
         "stage, attempt_id, input_mission_sha256, status, output_path, output_sha256, next_stage, next_mission_path, "
         "next_mission_sha256, ready_for_next, blocker. Write the next mission itself; "
-        "the host will validate bytes and hashes but will not rewrite its meaning.\n"
+        "the host will validate bytes and hashes but will not rewrite its meaning. "
+        "The supplied input_mission_sha256 binds the upstream source mission bytes before this HOST_STAGE_CONTRACT "
+        "was appended; copy it exactly into the receipt and do not replace it with a hash of this augmented mission.md.\n"
     )
     target.write_text(body.rstrip() + protocol, encoding="utf-8")
     return target, receipt, input_sha
