@@ -13,7 +13,7 @@ index c643386..df28522 100644
      const encodedPrompt = JSON.stringify(prompt);
      const focusResult = await runtime.evaluate({
          expression: `(() => {
-@@ -67,7 +71,215 @@ export async function submitPrompt(deps, prompt, logger) {
+@@ -67,7 +71,269 @@ export async function submitPrompt(deps, prompt, logger) {
          await logDomFailure(runtime, logger, "focus-textarea");
          throw new Error("Failed to focus prompt textarea");
      }
@@ -222,6 +222,60 @@ index c643386..df28522 100644
 +                appName,
 +            });
 +        }
++        await runtime.evaluate({
++            expression: `(() => {
++              const wanted = ${JSON.stringify(appName.toLowerCase())};
++              const watcherKey = '__oracleAppApprovalWatcher';
++              const existing = window[watcherKey];
++              if (existing?.wanted === wanted && existing?.timer) return true;
++              if (existing?.timer) clearInterval(existing.timer);
++              const normalize = (value) =>
++                String(value || '').toLowerCase().replace(/\\s+/g, ' ').trim();
++              const visible = (node) => {
++                const rect = node?.getBoundingClientRect?.();
++                if (!rect || rect.width <= 0 || rect.height <= 0) return false;
++                const style = window.getComputedStyle(node);
++                return style.display !== 'none' && style.visibility !== 'hidden';
++              };
++              const tick = () => {
++                const allowLabels = new Set(['allow', '허용하기']);
++                const button = Array.from(document.querySelectorAll('button'))
++                  .filter(visible)
++                  .find((node) => allowLabels.has(normalize(node.innerText || node.textContent)));
++                if (!button) return;
++                let scope = button;
++                for (let i = 0; i < 10 && scope; i += 1, scope = scope.parentElement) {
++                  if (!normalize(scope.innerText || scope.textContent).includes(wanted)) continue;
++                  const rememberLabels = ['이 대화에 기억', 'remember for this chat', 'remember in this chat'];
++                  const checkbox = Array.from(scope.querySelectorAll(
++                    'input[type="checkbox"],[role="checkbox"]'
++                  )).find(visible);
++                  const rememberLabel = Array.from(scope.querySelectorAll('label'))
++                    .filter(visible)
++                    .find((node) => rememberLabels.some((label) =>
++                      normalize(node.innerText || node.textContent).includes(label)
++                    ));
++                  const control = checkbox || rememberLabel?.querySelector(
++                    'input[type="checkbox"],[role="checkbox"]'
++                  ) || rememberLabel;
++                  const checked = checkbox instanceof HTMLInputElement
++                    ? checkbox.checked
++                    : checkbox?.getAttribute?.('aria-checked') === 'true';
++                  if (control && !checked) {
++                    control.click();
++                    return;
++                  }
++                  button.click();
++                  return;
++                }
++              };
++              const timer = setInterval(tick, 250);
++              window[watcherKey] = { wanted, timer };
++              tick();
++              return true;
++            })()`,
++            returnByValue: true,
++        });
 +        await input.insertText({ text: mentionMatch[2] });
 +    }
 +    else {

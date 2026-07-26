@@ -144,3 +144,7 @@ def test_prompt_composer_app_pill_probe_uses_the_composer_form_scope() -> None:
     assert "App mention confirmation diagnostic:" in patch
     assert 'logDomFailure(runtime, logger, "app-mention-pill-missing")' in patch
     assert "diagnostic.result?.value ?? null" in patch
+    assert "__oracleAppApprovalWatcher" in patch
+    assert "이 대화에 기억" in patch
+    assert "remember for this chat" in patch
+    assert "allowLabels.has" in patch

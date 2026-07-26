@@ -311,12 +311,20 @@ def _validate_receipt(
         or value.get("input_mission_sha256") != input_sha
     ):
         raise WorkflowError("stage receipt identity mismatch")
-    if value.get("status") not in {"PASS", "COMPLETE"} or value.get("ready_for_next") is not True or value.get("blocker"):
+    next_stage = str(value.get("next_stage") or "")
+    revision_transition = (
+        value.get("status") == "REVISE"
+        and ((stage == "review" and next_stage == "plan")
+             or (stage == "final-web-gate" and next_stage == "implementation"))
+    )
+    if (
+        value.get("status") not in {"PASS", "COMPLETE"}
+        and not revision_transition
+    ) or value.get("ready_for_next") is not True or value.get("blocker"):
         raise WorkflowError("stage receipt did not pass")
     output = _inside(config["project_root"], value.get("output_path"))
     if not output.is_file() or not output.read_bytes().strip() or value.get("output_sha256") != sha(output):
         raise WorkflowError("stage output is missing or hash-mismatched")
-    next_stage = str(value.get("next_stage") or "")
     if next_stage not in TRANSITIONS[stage]:
         raise WorkflowError(f"invalid transition {stage}->{next_stage}")
     if next_stage == "complete":
@@ -547,6 +555,35 @@ def _run_workflow_locked(
                 multi_execute=multi_execute, local_gate_runner=local_gate_runner,
             )
         elif stored.get("status") in {"running", "attention_required"} and stored.get("current_stage"):
+            persisted_receipt = Path(str(stored.get("receipt_path") or "")).resolve()
+            if persisted_receipt.is_file():
+                _validate_receipt(
+                    config,
+                    persisted_receipt,
+                    workflow_id,
+                    str(stored["current_stage"]),
+                    str(stored["current_attempt_id"]),
+                    str(stored["current_input_sha256"]),
+                )
+                awaiting = {
+                    **stored,
+                    "status": "awaiting_receipt",
+                    "records": list(stored.get("records") or []) + [{
+                        "stage": stored["current_stage"],
+                        "receipt_path": str(persisted_receipt),
+                        "recovered_from_bound_receipt": True,
+                    }],
+                    "recovery": {
+                        "status": "bound_receipt_recovered",
+                        "run_id": stored.get("oracle_run_id") or stored.get("current_attempt_id"),
+                        "run_dir": stored.get("oracle_run_dir"),
+                    },
+                }
+                _write(state_path, awaiting)
+                return _run_workflow_locked(
+                    manifest_path, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
+                    multi_execute=multi_execute, local_gate_runner=local_gate_runner,
+                )
             recovered = _recover_exact_oracle_stage(stored, oracle_recover=oracle_recover)
             records = list(stored.get("records") or [])
             records.append({
