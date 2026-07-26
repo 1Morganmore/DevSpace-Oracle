@@ -260,7 +260,7 @@ def _stage_mission(
         f"exact_project_root={config['project_root']}\n"
         f"exact_input_mission_path={source}\n"
         f"Write the small UTF-8 stage receipt to: {receipt}\n"
-        "Receipt schema: codex.chatgpt.oracle-stage-result/v1. Include workflow_id, "
+        "Receipt JSON must use the key schema=codex.chatgpt.oracle-stage-result/v1. Include workflow_id, "
         "stage, attempt_id, input_mission_sha256, status, output_path, output_sha256, next_stage, next_mission_path, "
         "next_mission_sha256, ready_for_next, blocker. Write the next mission itself; "
         "the host will validate bytes and hashes but will not rewrite its meaning. "
@@ -470,8 +470,16 @@ def _validate_receipt(
     input_sha: str,
 ) -> dict[str, Any]:
     value = _json(receipt_path)
+    has_schema = "schema" in value
+    has_legacy_schema = "schema_version" in value
+    schema = value.get("schema")
+    legacy_schema = value.get("schema_version")
+    if not has_schema and legacy_schema == RECEIPT_SCHEMA:
+        schema = legacy_schema
+    elif has_schema and has_legacy_schema and schema != legacy_schema:
+        raise WorkflowError("stage receipt schema keys conflict")
     if (
-        value.get("schema") != RECEIPT_SCHEMA
+        schema != RECEIPT_SCHEMA
         or value.get("workflow_id") != workflow_id
         or value.get("stage") != stage
         or value.get("attempt_id") != attempt_id
@@ -967,6 +975,10 @@ def _run_workflow_locked(
             "manifest_sha256": config["manifest_sha256"], "current_stage": stage,
             "current_attempt_id": attempt_id, "current_input_sha256": input_sha,
             "current_mission_path": str(source), "receipt_path": str(receipt_path),
+            "current_binding_source_path": str(source),
+            "current_binding_source_sha256": input_sha,
+            "current_augmented_mission_path": str(mission),
+            "current_augmented_mission_sha256": sha(mission),
             "oracle_run_id": attempt_id, "oracle_run_dir": str(oracle_layout.run_dir), "oracle_manifest_path": str(oracle_manifest),
             "next_index": index, "records": records, "pre_submit_retries": stage_pre_submit_retries,
         })
@@ -988,6 +1000,10 @@ def _run_workflow_locked(
                 "manifest_sha256": config["manifest_sha256"], "current_stage": stage,
                 "current_attempt_id": attempt_id, "current_input_sha256": input_sha,
                 "current_mission_path": str(source), "receipt_path": str(receipt_path),
+                "current_binding_source_path": str(source),
+                "current_binding_source_sha256": input_sha,
+                "current_augmented_mission_path": str(mission),
+                "current_augmented_mission_sha256": sha(mission),
                 "oracle_run_dir": run.get("run_dir"), "next_index": index, "records": records,
             })
         if run.get("ok") and not receipt_path.is_file():

@@ -614,7 +614,7 @@ def test_live_recovery_settles_stalled_inside_one_exact_slug_process(
         run_dir / "state.json",
         status="running",
         exit_code=7,
-        session_authority="live",
+        session_authority="submitted_unknown",
     )
     calls: list[str] = []
 
@@ -648,6 +648,15 @@ def test_live_recovery_settles_stalled_inside_one_exact_slug_process(
     assert settled["result"]["session_authority"] == "terminal"
     assert settled["result"]["terminal_harvested"] is True
     assert Path(settled["output_path"]).read_text(encoding="utf-8") == "durable exact answer"
+
+
+def test_live_recovery_cli_defaults_to_one_ninety_minute_settle_process() -> None:
+    runner = load_runner()
+    args = runner.build_parser().parse_args([
+        "recover", "--run-dir", r"C:\host-state\exact-run", "--action", "live",
+    ])
+    assert args.settle_timeout_seconds == 5400
+    assert args.settle_interval_seconds == 15
 
 
 def test_unresolved_exact_session_blocks_different_parent_submission(tmp_path: Path) -> None:

@@ -699,7 +699,7 @@ def recover_run(
             exact_state = str(result.get("exact_session_state") or "").casefold()
             still_live_or_unsettled = (
                 result.get("status") in {"session_live", "terminal_settle_disagreement"}
-                or authority == "live"
+                or authority in {"live", "submitted_unknown"}
                 and exact_state in {"", "active", "running", "streaming", "thinking", "stalled"}
             )
             if not still_live_or_unsettled:

@@ -1,6 +1,6 @@
 {
   "name": "codexpro-automation",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "private": false,
   "description": "Unified Oracle ChatGPT workflows for Codex with DevSpace and frozen legacy recovery",
   "license": "MIT",

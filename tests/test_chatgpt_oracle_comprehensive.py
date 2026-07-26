@@ -1044,3 +1044,93 @@ def test_stage_contract_preserves_upstream_input_mission_hash_semantics(tmp_path
     assert f"input_mission_sha256={input_sha}" in text
     assert "binds the upstream source mission bytes" in text
     assert "do not replace it with a hash of this augmented mission.md" in text
+
+
+def test_receipt_accepts_legacy_schema_version_but_keeps_upstream_hash_binding(tmp_path: Path) -> None:
+    module = load()
+    path = manifest(tmp_path)
+    config = module.load_manifest(path)
+    source = config["initial_mission_path"]
+    mission, receipt_path, input_sha = module._stage_mission(
+        config, config["workflow_id"], 0, "plan", source, "b" * 32
+    )
+    output = config["project_root"] / "plan.md"
+    output.write_text("plan", encoding="utf-8")
+    next_mission = config["project_root"] / "review.md"
+    next_mission.write_text("review", encoding="utf-8")
+    receipt_path.write_text(json.dumps({
+        "schema_version": module.RECEIPT_SCHEMA,
+        "workflow_id": config["workflow_id"],
+        "stage": "plan",
+        "attempt_id": "b" * 32,
+        "input_mission_sha256": input_sha,
+        "status": "PLAN_READY",
+        "output_path": str(output),
+        "output_sha256": module.sha(output),
+        "next_stage": "review",
+        "next_mission_path": str(next_mission),
+        "next_mission_sha256": module.sha(next_mission),
+        "ready_for_next": True,
+        "blocker": None,
+    }), encoding="utf-8")
+
+    receipt = module._validate_receipt(
+        config, receipt_path, config["workflow_id"], "plan", "b" * 32, input_sha
+    )
+    assert receipt["_next_mission"] == next_mission
+
+    value = json.loads(receipt_path.read_text(encoding="utf-8"))
+    value["input_mission_sha256"] = module.sha(mission)
+    receipt_path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(module.WorkflowError, match="stage receipt identity mismatch"):
+        module._validate_receipt(
+            config, receipt_path, config["workflow_id"], "plan", "b" * 32, input_sha
+        )
+
+
+def test_receipt_rejects_conflicting_schema_aliases(tmp_path: Path) -> None:
+    module = load()
+    path = manifest(tmp_path)
+    config = module.load_manifest(path)
+    receipt = config["project_root"] / "stage-result.json"
+    receipt.write_text(json.dumps({
+        "schema": module.RECEIPT_SCHEMA,
+        "schema_version": "different",
+    }), encoding="utf-8")
+    with pytest.raises(module.WorkflowError, match="schema keys conflict"):
+        module._validate_receipt(
+            config, receipt, config["workflow_id"], "plan", "b" * 32, "c" * 64
+        )
+
+    receipt.write_text(json.dumps({
+        "schema": None,
+        "schema_version": module.RECEIPT_SCHEMA,
+    }), encoding="utf-8")
+    with pytest.raises(module.WorkflowError, match="schema keys conflict"):
+        module._validate_receipt(
+            config, receipt, config["workflow_id"], "plan", "b" * 32, "c" * 64
+        )
+
+
+def test_awaiting_receipt_preserves_source_and_augmented_mission_bindings(tmp_path: Path) -> None:
+    module = load()
+    path = manifest(tmp_path)
+
+    def fake_oracle(oracle_manifest: Path, *, dry_run: bool):
+        data = json.loads(oracle_manifest.read_text(encoding="utf-8"))
+        mission = Path(data["mission_path"])
+        contract = mission.read_text(encoding="utf-8")
+        receipt_path = Path(next(
+            line.split(": ", 1)[1]
+            for line in contract.splitlines()
+            if line.startswith("Write the small UTF-8 stage receipt to: ")
+        ))
+        return {"ok": True, "run_dir": str(receipt_path.parent / "oracle-run")}
+
+    result = module.run_workflow(path, oracle_execute=fake_oracle)
+    assert result["status"] == "awaiting_receipt"
+    source = Path(result["current_binding_source_path"])
+    augmented = Path(result["current_augmented_mission_path"])
+    assert result["current_binding_source_sha256"] == module.sha(source)
+    assert result["current_augmented_mission_sha256"] == module.sha(augmented)
+    assert result["current_binding_source_sha256"] != result["current_augmented_mission_sha256"]
