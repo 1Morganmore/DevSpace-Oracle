@@ -533,7 +533,7 @@ def test_running_stage_does_not_trust_existing_receipt_before_terminal_authority
     assert recovered[0][1]["action"] == "harvest"
 
 
-def test_review_revise_receipt_can_return_to_plan(tmp_path: Path) -> None:
+def test_review_revise_receipt_is_terminal_legacy_compatibility(tmp_path: Path) -> None:
     module = load()
     output = tmp_path / "review-output.md"
     output.write_text("revise", encoding="utf-8")
@@ -567,6 +567,8 @@ def test_review_revise_receipt_can_return_to_plan(tmp_path: Path) -> None:
 
     assert value["status"] == "REVISE"
     assert value["next_stage"] == "plan"
+    assert value["_next_mission"] is None
+    assert "cannot create a new plan" in value["_terminal_attention"]
 
 
 def _review_receipt(
@@ -605,7 +607,7 @@ def _review_receipt(
     return receipt
 
 
-def test_review_revision_budget_caps_third_revise_without_new_plan(tmp_path: Path) -> None:
+def test_legacy_revise_never_creates_another_plan(tmp_path: Path) -> None:
     module = load()
     config = {
         "project_root": tmp_path,
@@ -624,16 +626,48 @@ def test_review_revision_budget_caps_third_revise_without_new_plan(tmp_path: Pat
         ids=["critical-input"], next_stage="plan",
     )
 
-    first_value = module._validate_receipt(config, first, "a" * 32, "review", "1" * 32, "c" * 64)
-    second_value = module._validate_receipt(config, second, "a" * 32, "review", "2" * 32, "c" * 64)
-    third_value = module._validate_receipt(config, third, "a" * 32, "review", "3" * 32, "c" * 64)
+    values = [
+        module._validate_receipt(config, first, "a" * 32, "review", "1" * 32, "c" * 64),
+        module._validate_receipt(config, second, "a" * 32, "review", "2" * 32, "c" * 64),
+        module._validate_receipt(config, third, "a" * 32, "review", "3" * 32, "c" * 64),
+    ]
 
-    assert first_value["_next_mission"].name.endswith("-next.md")
-    assert second_value["_next_mission"].name.endswith("-next.md")
-    assert third_value["_next_mission"] is None
-    assert "budget exhausted" in third_value["_terminal_attention"]
-    assert config["_review_policy"]["plan_revisions_used"] == 2
-    assert config["_review_policy"]["plan_revisions_remaining"] == 0
+    assert all(value["_next_mission"] is None for value in values)
+    assert all("cannot create a new plan" in value["_terminal_attention"] for value in values)
+    assert config["_review_policy"]["plan_revisions_used"] == 0
+    assert config["_review_policy"]["plan_revisions_remaining"] == 2
+
+
+def test_review_mission_assigns_inline_plan_repair_and_exact_workspace_entry(tmp_path: Path) -> None:
+    module = load()
+    source = tmp_path / "검토-입력.md"
+    source.write_text("계획을 검토하세요.", encoding="utf-8")
+    config = {
+        "project_root": tmp_path,
+        "workflow_dir": tmp_path / "workflow",
+        "_review_policy": {
+            **module._default_review_policy(),
+            "plan_revisions_used": 2,
+            "plan_revisions_remaining": 0,
+        },
+    }
+
+    mission, _, _ = module._stage_mission(
+        config, "a" * 32, 2, "review", source, "b" * 32
+    )
+    text = mission.read_text(encoding="utf-8")
+
+    assert f"exact_project_root={tmp_path}" in text
+    assert f"exact_input_mission_path={source}" in text
+    assert "retry the same exact root at most once" in text
+    assert "Never substitute a parent root, child directory" in text
+    assert "plan repair and finalization owner" in text
+    assert "write the corrected final plan as your output" in text
+    assert "next_stage=implementation" in text
+    assert "REVISE is legacy compatibility only" in text
+    assert "review_repair_owner=review" in text
+    assert "new_plan_transition_allowed=false" in text
+    assert "plan_revisions_remaining=0" in text
 
 
 def test_pass_with_notes_proceeds_to_implementation(tmp_path: Path) -> None:
@@ -654,7 +688,7 @@ def test_pass_with_notes_proceeds_to_implementation(tmp_path: Path) -> None:
     assert value["next_stage"] == "implementation"
 
 
-def test_followup_review_cannot_add_or_duplicate_finding_ids(tmp_path: Path) -> None:
+def test_legacy_revise_is_terminal_and_duplicate_finding_ids_are_rejected(tmp_path: Path) -> None:
     module = load()
     config = {
         "project_root": tmp_path,
@@ -674,7 +708,7 @@ def test_followup_review_cannot_add_or_duplicate_finding_ids(tmp_path: Path) -> 
         config, added, "a" * 32, "review", "5" * 32, "c" * 64
     )
     assert added_value["_next_mission"] is None
-    assert "outside the fixed baseline" in added_value["_terminal_attention"]
+    assert "cannot create a new plan" in added_value["_terminal_attention"]
 
     duplicate = json.loads(added.read_text(encoding="utf-8"))
     duplicate["attempt_id"] = "6" * 32

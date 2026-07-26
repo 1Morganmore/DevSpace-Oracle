@@ -32,7 +32,11 @@ def test_regular_modes_use_plain_devspace_handoff_and_high_only(tmp_path: Path, 
     assert contract["attachments"] == []
     assert contract["app_picker"] is False
     assert contract["app_settings_automation"] is False
-    assert contract["composer_prompt"] == f"@DevSpace Read and execute the mission file: {mission}"
+    assert contract["composer_prompt"].startswith(
+        f"@DevSpace Read and execute the mission file: {mission}."
+    )
+    assert "retry that same exact root once" in contract["composer_prompt"]
+    assert "never substitute a parent, child, active workspace" in contract["composer_prompt"]
     assert "\n" not in contract["composer_prompt"]
 
 

@@ -35,15 +35,22 @@ rewrite them.
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_comprehensive.py" --manifest C:\project\workflow.json --dry-run
 ```
 
-Review uses `PASS`, `PASS_WITH_NOTES`, `REVISE`, or `FAIL`. `PASS` and
-`PASS_WITH_NOTES` proceed to implementation. `REVISE` is reserved for unresolved
-critical future-information, safety, execution-impossibility, or required-input
-defects. The first review fixes the critical finding IDs and hash; later reviews
-may only verify those findings and may not add noncritical requirements,
-reconsider accepted work, or request stylistic improvements. At most two
-semantic plan revisions are allowed across retries for the same project and
-workflow directory. A third `REVISE` ends in attention-required without
-creating another plan.
+The review GPT owns plan repair and finalization. It does not merely list
+findings: it directly repairs every defect resolvable from the mission,
+DevSpace workspace, project rules, or available evidence, writes the corrected
+final plan, and authors the complete implementation mission. `PASS` and
+`PASS_WITH_NOTES` proceed directly to implementation; notes are carried inside
+that mission. New work must not emit `REVISE`. A legacy `REVISE` receipt is
+accepted only for compatibility and ends in attention-required without creating
+another plan. `FAIL` is reserved for a concrete unavailable external input or
+authority, unresolved safety boundary, or genuine execution impossibility.
+
+Every regular stage binds an exact project root and exact input mission path.
+DevSpace may reuse or open only that normalized root, with at most one retry of
+the same root after inspecting registered workspaces. Parent, child, similarly
+named, active-workspace, and shell-boundary fallbacks are forbidden. The stage
+reads its mission and applicable `AGENTS.md` chain completely before project
+exploration or edits.
 
 Transport or runner recovery keeps the same workflow and stage identity. It
 must never create a `workflow-retryN` replacement. The revision budget and

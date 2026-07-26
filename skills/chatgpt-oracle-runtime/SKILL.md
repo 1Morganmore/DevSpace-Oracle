@@ -12,7 +12,11 @@ Pro uses Oracle attachment transport without any app.
 Use `chatgpt_oracle_dispatch.py` for `direct`, `plan`, `review`, `edit`,
 `orchestrator`, `deep-research`, `manual`, and `pro` routing. Regular routes
 select `gpt-5.6` and send only `@DevSpace` plus the absolute project mission
-path. Pro selects the account-visible Pro model and sends one short instruction
+path and a compact exact-workspace guard. The web GPT must use only the exact
+project root recorded in that mission, read the mission and applicable
+`AGENTS.md` completely first, and may retry that same root once after a timeout.
+It must not substitute a parent, child, active workspace, or shell boundary
+workaround. Pro selects the account-visible Pro model and sends one short instruction
 plus exact attachment files; it never mentions DevSpace.
 Regular routes select `GPT-5.6 Sol` with `heavy` and require Oracle
 evidence for visible `Extra High`. Never invent xhigh or silently downgrade.
@@ -47,6 +51,10 @@ python skills/chatgpt-oracle-runtime/scripts/run_chatgpt_oracle.py run --manifes
 ```
 
 Complete requires Oracle exit code zero and a nonempty `--write-output` artifact.
+A nonzero Oracle exit after launch, including a browser response timeout, is
+`attention_required` rather than proof that the web session failed. It retains
+same-project ownership and permits only exact-slug `live` or `harvest`
+recovery; it never authorizes a replacement submission.
 
 ## Recovery
 

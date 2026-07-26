@@ -32,7 +32,7 @@ TRANSITIONS = {
     "plan": {"plan", "review", "web-multi", "pro"},
     "web-multi": {"review"},
     "pro": {"review"},
-    "review": {"plan", "implementation"},
+    "review": {"implementation"},
     "implementation": {"final-web-gate"},
     "final-web-gate": {"complete", "implementation"},
 }
@@ -257,6 +257,8 @@ def _stage_mission(
         "\n\n[HOST_STAGE_CONTRACT]\n"
         f"workflow_id={workflow_id}\nstage={stage}\nstage_index={index}\n"
         f"attempt_id={attempt_id}\ninput_mission_sha256={input_sha}\n"
+        f"exact_project_root={config['project_root']}\n"
+        f"exact_input_mission_path={source}\n"
         f"Write the small UTF-8 stage receipt to: {receipt}\n"
         "Receipt schema: codex.chatgpt.oracle-stage-result/v1. Include workflow_id, "
         "stage, attempt_id, input_mission_sha256, status, output_path, output_sha256, next_stage, next_mission_path, "
@@ -264,21 +266,41 @@ def _stage_mission(
         "the host will validate bytes and hashes but will not rewrite its meaning. "
         "The supplied input_mission_sha256 binds the upstream source mission bytes before this HOST_STAGE_CONTRACT "
         "was appended; copy it exactly into the receipt and do not replace it with a hash of this augmented mission.md.\n"
+        "\n[DEVSPACE_WORKSPACE_ENTRY_CONTRACT]\n"
+        "Use only exact_project_root as the project workspace. Reuse an already registered DevSpace workspace whose "
+        "normalized root is exactly equal to it, or open that exact root. Windows separators and Unicode characters "
+        "must be preserved. Read the exact input mission completely and then the applicable AGENTS.md chain before "
+        "project exploration or edits. If the exact workspace open times out, inspect the registered workspace list "
+        "and retry the same exact root at most once. Never substitute a parent root, child directory, similarly named "
+        "workspace, active workspace, or shell-based boundary workaround. Never register, repair, or delete the app "
+        "during a stage. If the exact root remains unavailable, stop this stage with a concise external workspace "
+        "blocker instead of changing scope. Keep progress narration compact; tool activity and the durable receipt "
+        "are the authority.\n"
     )
     if stage == "review":
         config.setdefault("_review_policy", _review_policy_from_history(config))
         policy = config["_review_policy"]
         protocol += (
             "\n[REVIEW_ADJUDICATION_CONTRACT]\n"
-            "Allowed status values are PASS, PASS_WITH_NOTES, REVISE, FAIL. "
-            "PASS_WITH_NOTES must proceed to implementation. REVISE is reserved only for an unresolved critical "
-            "future-information, safety, executable-impossibility, or required-input defect; wording, style, optional "
-            "improvement, a new noncritical request, or reconsidering an already accepted item must not cause REVISE. "
+            "For new work, use PASS, PASS_WITH_NOTES, or FAIL. REVISE is legacy compatibility only and must not be "
+            "emitted. You are the plan repair and finalization owner, not only a critic. Inspect the proposed plan, "
+            "directly repair every defect that can be resolved from the mission, DevSpace workspace, project rules, "
+            "or available evidence, and write the corrected final plan as your output. Then write a complete "
+            "implementation mission and return PASS or PASS_WITH_NOTES with next_stage=implementation. Notes are "
+            "non-blocking and must travel inside that implementation mission. Do not request a new planning stage "
+            "for wording, structure, omitted checks, weak sequencing, locally discoverable facts, or any other defect "
+            "you can repair yourself. FAIL is allowed only when unavailable external input or authority, an unresolved "
+            "safety boundary, or genuine execution impossibility prevents a safe corrected plan; include the concrete "
+            "external blocker. "
             "Include sorted unique critical_finding_ids and critical_findings_sha256, where the hash is SHA-256 of the "
-            "compact UTF-8 JSON array. A follow-up review may report only unresolved IDs from the fixed baseline below; "
-            "it must not add a new ID. FAIL must include a nonempty blocker and stops the workflow.\n"
+            "compact UTF-8 JSON array. PASS and PASS_WITH_NOTES must have no remaining critical finding IDs. FAIL must "
+            "include a nonempty blocker and stops the workflow. A legacy REVISE receipt is terminal attention only and "
+            "can never create another plan.\n"
+            "review_repair_owner=review\n"
+            "new_plan_transition_allowed=false\n"
             f"plan_revisions_used={policy['plan_revisions_used']}\n"
             f"plan_revisions_max={policy['max_plan_revisions']}\n"
+            f"plan_revisions_remaining={policy['plan_revisions_remaining']}\n"
             f"baseline_critical_finding_ids={json.dumps(policy['baseline_critical_finding_ids'], ensure_ascii=False, separators=(',', ':'))}\n"
             f"baseline_critical_findings_sha256={policy['baseline_critical_findings_sha256'] or ''}\n"
         )
@@ -519,27 +541,14 @@ def _validate_receipt(
                 "_terminal_attention": str(value["blocker"]),
             }
         if status == "REVISE":
-            baseline = list(policy["baseline_critical_finding_ids"])
-            terminal_reason = None
-            if int(policy["plan_revisions_used"]) >= MAX_PLAN_REVISIONS:
-                terminal_reason = "plan revision budget exhausted; third REVISE cannot create another plan"
-            elif not finding_ids:
-                terminal_reason = "REVISE requires at least one critical finding ID"
-            elif baseline and not set(finding_ids).issubset(set(baseline)):
-                terminal_reason = "follow-up review introduced a new finding outside the fixed baseline"
-            if terminal_reason:
-                return {
-                    **value,
-                    "_next_mission": None,
-                    "_terminal_attention": terminal_reason,
-                }
-            if not baseline:
-                policy["baseline_critical_finding_ids"] = finding_ids
-                policy["baseline_critical_findings_sha256"] = _finding_hash(finding_ids)
-            policy["plan_revisions_used"] = int(policy["plan_revisions_used"]) + 1
-            policy["plan_revisions_remaining"] = max(
-                0, MAX_PLAN_REVISIONS - int(policy["plan_revisions_used"])
-            )
+            return {
+                **value,
+                "_next_mission": None,
+                "_terminal_attention": (
+                    "legacy REVISE cannot create a new plan; the review stage owns all locally repairable plan "
+                    "defects and must return PASS_WITH_NOTES, while a concrete external blocker must return FAIL"
+                ),
+            }
     if next_stage not in TRANSITIONS[stage]:
         raise WorkflowError(f"invalid transition {stage}->{next_stage}")
     if next_stage == "complete":

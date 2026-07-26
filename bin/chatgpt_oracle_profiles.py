@@ -99,7 +99,12 @@ def _resolve_reasoning(requested: str | None) -> str:
 def composer_handoff(mission_path: str | Path) -> str:
     """The only regular-GPT composer text: app mention plus the absolute mission."""
     mission = _absolute_mission_path(mission_path)
-    return f"@{DEVSPACE_APP_NAME} Read and execute the mission file: {mission}"
+    return (
+        f"@{DEVSPACE_APP_NAME} Read and execute the mission file: {mission}. "
+        "Use only the exact project root recorded there; read the mission and applicable AGENTS.md fully first. "
+        "If workspace opening times out, retry that same exact root once; never substitute a parent, child, active "
+        "workspace, or shell boundary workaround."
+    )
 
 
 def _attachment_paths(values: list[str | Path] | tuple[str | Path, ...] | None) -> list[Path]:

@@ -21,6 +21,13 @@ SCHEMA = "codex.chatgpt.oracle-run/v1"
 DEVSPACE_APP_NAME = "DevSpace"
 STATE_SCHEMA = "codex.chatgpt.oracle-run-state/v1"
 STATUSES = {"prepared", "running", "complete", "failed", "attention_required"}
+SESSION_AUTHORITY_RANK = {
+    "pre_submit": 0,
+    "submitted_unknown": 1,
+    "live": 2,
+    "terminal_observed": 3,
+    "terminal": 4,
+}
 WAIT_OBJECT_0 = 0
 WAIT_ABANDONED = 0x80
 WAIT_TIMEOUT = 0x102
@@ -357,7 +364,12 @@ def composer_prompt(config: OracleConfig, mission_path: Path | None = None) -> s
     effective_path = config.mission_path if mission_path is None else mission_path
     # Keep the Windows npx.cmd prompt in one argument line. A literal newline
     # truncates the prompt after the app mention before Oracle receives it.
-    return f"@{config.app_name} {effective_path} 파일을 읽고 끝까지 수행하세요."
+    return (
+        f"@{config.app_name} {effective_path} 파일을 읽고 끝까지 수행하세요. "
+        "그 파일에 기록된 정확한 프로젝트 루트만 사용하고 적용되는 AGENTS.md를 먼저 끝까지 읽으세요. "
+        "작업공간 열기가 시간 초과되면 동일한 정확한 루트만 한 번 재시도하며 상위·하위·현재 활성 "
+        "작업공간이나 셸 경계 우회로 대체하지 마세요."
+    )
 
 
 def create_layout(config: OracleConfig, *, run_id: str | None = None) -> RunLayout:
@@ -541,7 +553,18 @@ def update_state(
     if resolved_version is not None:
         payload["oracle"]["resolved_version"] = resolved_version
     if session_authority is not None:
-        payload["session_authority"] = session_authority
+        current_authority = str(payload.get("session_authority") or "")
+        current_rank = SESSION_AUTHORITY_RANK.get(current_authority, -1)
+        requested_rank = SESSION_AUTHORITY_RANK.get(session_authority, -1)
+        payload["session_authority"] = (
+            current_authority if current_rank > requested_rank else session_authority
+        )
+        if current_rank > requested_rank and status == "running":
+            payload["status"] = (
+                "complete"
+                if current_authority == "terminal" and payload.get("terminal_harvested") is True
+                else "attention_required"
+            )
     if terminal_harvested is not None:
         payload["terminal_harvested"] = terminal_harvested
     if artifact_sha256 is not None:

@@ -163,7 +163,11 @@ def test_pro_dry_run_uses_oracle_attachments_and_no_app_mention(tmp_path: Path) 
 
 def test_complete_requires_zero_exit_and_nonempty_output(tmp_path: Path) -> None:
     runner = load_runner()
-    cases = [(0, b"answer", "complete", True), (0, b" \n", "attention_required", False), (3, b"answer", "failed", False)]
+    cases = [
+        (0, b"answer", "complete", True),
+        (0, b" \n", "attention_required", False),
+        (3, b"answer", "attention_required", False),
+    ]
     for index, (code, output, status, ok) in enumerate(cases):
         root = tmp_path / str(index)
         root.mkdir()
@@ -177,14 +181,15 @@ def test_complete_requires_zero_exit_and_nonempty_output(tmp_path: Path) -> None
         assert Path(result["result"]["artifacts"]["transcript"]).is_file()
 
 
-def test_failure_does_not_resubmit_and_recovery_never_restarts(tmp_path: Path) -> None:
+def test_post_submit_nonzero_requires_exact_recovery_and_never_restarts(tmp_path: Path) -> None:
     runner = load_runner()
     calls = []
     def popen(command, **kwargs):
         calls.append(list(command))
         return Process(9, [])
     result = execute_run(runner, manifest(tmp_path), run_factory=version_runner, popen_factory=popen)
-    assert result["result"]["status"] == "failed"
+    assert result["result"]["status"] == "attention_required"
+    assert result["result"]["session_authority"] == "submitted_unknown"
     assert len(calls) == 1
     assert "restart" not in calls[0]
     for action in ("harvest", "live"):
@@ -297,6 +302,7 @@ def test_pro_attachment_change_blocks_before_submit(tmp_path: Path) -> None:
     )
     assert result["ok"] is False
     assert result["result"]["status"] == "failed"
+    assert result["result"]["session_authority"] == "pre_submit"
     assert launched == []
 
 
@@ -366,6 +372,78 @@ def test_running_exact_session_cannot_publish_partial_harvest(tmp_path: Path) ->
     assert state["terminal_harvested"] is False
     assert not Path(state["artifacts"]["output"]).exists()
     assert not (run_dir / "recovery-harvest-candidate.md").exists()
+
+
+def test_terminal_observation_cannot_regress_to_live_and_later_harvest_settles(tmp_path: Path) -> None:
+    runner = load_runner()
+    result = execute_run(
+        runner,
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(0, None, {}, []),
+    )
+    run_dir = Path(result["run_dir"])
+
+    def observation(state: str, answer: str | None = None):
+        def popen(command, **kwargs):
+            if answer is not None:
+                Path(command[command.index("--write-output") + 1]).write_text(answer, encoding="utf-8")
+            kwargs["stdout"].write(f"State: {state}\n".encode())
+            kwargs["stdout"].flush()
+            return Process(0, [])
+        return popen
+
+    terminal = runner.recover_run(
+        run_dir,
+        action="live",
+        oracle_command=["oracle"],
+        popen_factory=observation("completed"),
+    )
+    # Reproduce state already regressed by the previously installed runner;
+    # the durable exact live-observer log must restore terminal authority.
+    regressed = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    regressed["status"] = "running"
+    regressed["session_authority"] = "live"
+    (run_dir / "state.json").write_text(json.dumps(regressed), encoding="utf-8")
+    disagreement = runner.recover_run(
+        run_dir,
+        action="harvest",
+        oracle_command=["oracle"],
+        popen_factory=observation("running", "partial"),
+    )
+    output_absent_during_disagreement = not Path(
+        disagreement["result"]["artifacts"]["output"]
+    ).exists()
+    duplicate_launches: list[list[str]] = []
+    blocked_duplicate = execute_run(
+        runner,
+        manifest(tmp_path, run_id="b" * 32),
+        run_factory=version_runner,
+        popen_factory=popen_for(0, b"duplicate", {}, duplicate_launches),
+    )
+    settled = runner.recover_run(
+        run_dir,
+        action="harvest",
+        oracle_command=["oracle"],
+        popen_factory=observation("completed", "durable answer"),
+    )
+
+    assert terminal["status"] == "terminal_observed"
+    assert terminal["result"]["session_authority"] == "terminal_observed"
+    assert disagreement["status"] == "terminal_settle_disagreement"
+    assert disagreement["result"]["status"] == "attention_required"
+    assert disagreement["result"]["session_authority"] == "terminal_observed"
+    assert disagreement["result"]["terminal_harvested"] is False
+    assert output_absent_during_disagreement
+    assert blocked_duplicate["ok"] is False
+    assert duplicate_launches == []
+    assert "still owns this project" in Path(
+        blocked_duplicate["result"]["artifacts"]["stderr"]
+    ).read_text(encoding="utf-8")
+    assert settled["ok"] is True
+    assert settled["status"] == "complete"
+    assert settled["result"]["session_authority"] == "terminal"
+    assert Path(settled["output_path"]).read_text(encoding="utf-8") == "durable answer"
 
 
 def test_unresolved_exact_session_blocks_different_parent_submission(tmp_path: Path) -> None:
@@ -468,6 +546,6 @@ def test_parallel_recovery_reuses_the_parent_scoped_submit_mutex(tmp_path: Path)
     )
     recovered = runner.recover_run(Path(result["run_dir"]), action="harvest", dry_run=True, oracle_command=["oracle"])
     expected = tmp_path.resolve() / ".oracle-parallel-submit" / parent_id
-    assert result["result"]["status"] == "failed"
+    assert result["result"]["status"] == "attention_required"
     assert recovered["status"] == "dry-run"
     assert roots == [expected, expected]

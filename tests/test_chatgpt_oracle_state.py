@@ -57,7 +57,9 @@ def test_prompt_is_plain_app_plus_absolute_mission_instruction(tmp_path: Path) -
     mission.write_text("work", encoding="utf-8")
     config = state.load_manifest(manifest(tmp_path, mission.resolve()))
     prompt = state.composer_prompt(config)
-    assert prompt == f"@DevSpace {mission.resolve()} 파일을 읽고 끝까지 수행하세요."
+    assert prompt.startswith(f"@DevSpace {mission.resolve()} 파일을 읽고 끝까지 수행하세요.")
+    assert "동일한 정확한 루트만 한 번 재시도" in prompt
+    assert "상위·하위·현재 활성 작업공간이나 셸 경계 우회" in prompt
     assert "\n" not in prompt
 
 

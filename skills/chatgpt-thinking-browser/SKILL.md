@@ -44,7 +44,10 @@ Recovery never restarts/resubmits and never downgrades durable COMPLETE. If the
 persisted CDP endpoint died, Oracle may launch a bounded recovery browser from
 the run's recorded profile seed and open only that slug's exact persisted
 conversation URL for harvest. It must not use a prompt or create a replacement
-conversation.
+conversation. Session authority is monotonic: a later `running` observation
+cannot downgrade `terminal_observed`. That disagreement remains
+attention-required with the same project lock; a later exact terminal harvest
+with fresh nonempty output settles it to COMPLETE.
 
 For an already persisted agbrowse run only, use its exact legacy
 `chatgpt_agbrowse_run.py --observe-run|--recover-run <run-dir>` command. Do not

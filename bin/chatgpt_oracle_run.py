@@ -147,6 +147,24 @@ def exact_session_state(path: Path) -> str | None:
     return matches[-1].casefold() if matches else None
 
 
+def historical_session_authority(run_dir: Path, state: dict[str, Any]) -> str:
+    """Recover the strongest exact-session authority from durable observer logs."""
+    current = str(state.get("session_authority") or "submitted_unknown")
+    if (
+        current == "terminal"
+        and state.get("terminal_harvested") is True
+        and STATE.output_is_nonempty(Path(str(state["artifacts"]["output"])))
+    ):
+        return "terminal"
+    strongest = current
+    for path in sorted(run_dir.glob("recovery-*-stdout.log"), key=lambda item: item.name):
+        observed = exact_session_state(path)
+        if observed in TERMINAL_SESSION_STATES:
+            strongest = "terminal_observed"
+            break
+    return strongest
+
+
 def execute_run(
     manifest_path: Path,
     *,
@@ -271,7 +289,15 @@ def execute_run(
             STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
         return {"ok": False, "run_dir": str(layout.run_dir), "result": STATE.update_state(layout.state_path, status="failed")}
     STATE.write_transcript(layout)
-    status = "complete" if exit_code == 0 and STATE.output_is_nonempty(layout.output_path) else ("attention_required" if exit_code == 0 else "failed")
+    # Once Oracle has been launched, a nonzero local exit (including the
+    # browser response timeout) does not prove that the exact web session
+    # failed or stopped. Preserve same-project ownership and require exact-slug
+    # recovery instead of presenting a terminal local failure.
+    status = (
+        "complete"
+        if exit_code == 0 and STATE.output_is_nonempty(layout.output_path)
+        else "attention_required"
+    )
     if status == "complete":
         state = STATE.update_state(
             layout.state_path,
@@ -315,6 +341,17 @@ def _recover_run_locked(
 ) -> dict[str, Any]:
     directory = run_dir.expanduser().resolve(strict=True)
     state = STATE.load_state(directory / "state.json")
+    historical_authority = historical_session_authority(directory, state)
+    if (
+        STATE.SESSION_AUTHORITY_RANK.get(historical_authority, -1)
+        > STATE.SESSION_AUTHORITY_RANK.get(str(state.get("session_authority") or ""), -1)
+    ):
+        state = STATE.update_state(
+            directory / "state.json",
+            status="attention_required",
+            exit_code=state.get("exit_code"),
+            session_authority=historical_authority,
+        )
     if (
         state.get("status") == "complete"
         and state.get("session_authority") == "terminal"
@@ -367,19 +404,25 @@ def _recover_run_locked(
     if observed_session_state in LIVE_SESSION_STATES:
         if argv_output.exists():
             argv_output.unlink()
+        prior_authority = str(state.get("session_authority") or "")
         updated = STATE.update_state(
             directory / "state.json",
             status="running",
             exit_code=exit_code,
             session_authority="live",
         )
+        settle_disagreement = str(updated.get("session_authority") or "") in {
+            "terminal_observed", "terminal",
+        }
         return {
             "ok": False,
-            "status": "session_live",
+            "status": "terminal_settle_disagreement" if settle_disagreement else "session_live",
             "run_dir": str(directory),
             "action": action,
             "exit_code": exit_code,
             "exact_session_state": observed_session_state,
+            "prior_session_authority": prior_authority,
+            "session_authority": updated.get("session_authority"),
             "result": updated,
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
@@ -428,7 +471,9 @@ def _recover_run_locked(
         and observed_session_state in TERMINAL_SESSION_STATES
         and STATE.output_is_nonempty(output_path)
     )
-    status = "complete" if harvested else ("attention_required" if exit_code == 0 else "failed")
+    # A failed recovery process is also not web-terminal evidence. Only an
+    # exact terminal observation plus a nonempty durable output may complete.
+    status = "complete" if harvested else "attention_required"
     latest = STATE.load_state(layout.state_path)
     latest_output = Path(str(latest.get("artifacts", {}).get("output") or output_path))
     if latest.get("status") == "complete" and STATE.output_is_nonempty(latest_output):
