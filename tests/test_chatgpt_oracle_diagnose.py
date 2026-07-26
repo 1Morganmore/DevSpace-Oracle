@@ -211,6 +211,56 @@ def test_unreadable_state_stays_visible_as_unclassified(tmp_path: Path) -> None:
     assert report["unresolved_runs"][0]["signature"] == "state-unreadable"
 
 
+def test_uncertain_submission_timeout_is_a_post_submit_bucket(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    write_run(
+        state_root,
+        "2" * 8,
+        status="failed",
+        stdout="ERROR: Prompt did not appear in conversation before timeout (send may have failed)\n",
+    )
+
+    report = module.diagnose(state_root)
+    run = report["unresolved_runs"][0]
+
+    assert run["bucket"] == "post-submit-provider-incomplete"
+    assert run["signature"] == "submission-uncertain-prompt-not-observed"
+    # An uncertain send must never be advertised as safe to repeat.
+    assert "post-submit-provider-incomplete" not in report["safe_for_fresh_run_buckets"]
+
+
+def test_answer_without_a_durable_artifact_is_recoverable_not_unknown(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    run_dir = write_run(
+        state_root,
+        "3" * 8,
+        status="attention_required",
+        stdout="[browser] Released ChatGPT browser slot.\n",
+    )
+    (run_dir / "transcript.md").write_text("Answer:\nDevSpace 연결 가능합니다.\n", encoding="utf-8")
+
+    report = module.diagnose(state_root)
+    run = report["unresolved_runs"][0]
+
+    assert run["bucket"] == "post-submit-provider-incomplete"
+    assert run["signature"] == "answer-observed-without-durable-output"
+
+
+def test_unreadable_state_is_the_only_unclassified_path(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    run_dir = state_root / "projects" / "projectkey" / "runs" / "broken00"
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text("{not json", encoding="utf-8")
+
+    report = module.diagnose(state_root)
+
+    assert report["bucket_counts"] == {"unclassified": 1}
+    assert {run["signature"] for run in report["unresolved_runs"]} == {"state-unreadable"}
+
+
 def test_report_is_read_only_for_persisted_runs(tmp_path: Path) -> None:
     module = load()
     state_root = tmp_path / "oracle-state"

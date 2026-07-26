@@ -85,6 +85,7 @@ def build_packet(run_dir: Path, *, reporter_role: str = REPORTER_ROLE) -> dict[s
         state,
         stdout_text=DIAGNOSE._read_text(directory / "stdout.log"),
         has_output=DIAGNOSE._output_is_nonempty(output_path),
+        transcript_text=DIAGNOSE._read_text(directory / "transcript.md"),
     )
     lifecycle = STATE.resolve_lifecycle(
         state, output_is_present=DIAGNOSE._output_is_nonempty(output_path)

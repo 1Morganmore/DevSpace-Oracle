@@ -70,6 +70,11 @@ SIGNATURE_RULES: tuple[tuple[str, str, str], ...] = (
     ("disconnected before completion", BROWSER_LIFETIME, "browser-disconnected-early"),
     ("ECONNREFUSED", RECOVERY_BINDING, "recovery-cdp-connection-refused"),
     ("timed out before completion", PROVIDER_INCOMPLETE, "assistant-response-timeout"),
+    (
+        "Prompt did not appear in conversation before timeout",
+        PROVIDER_INCOMPLETE,
+        "submission-uncertain-prompt-not-observed",
+    ),
 )
 
 REMEDIATION = {
@@ -101,7 +106,13 @@ def _output_is_nonempty(path: Path) -> bool:
         return False
 
 
-def classify_run(state: dict[str, Any], *, stdout_text: str, has_output: bool) -> dict[str, str]:
+def classify_run(
+    state: dict[str, Any],
+    *,
+    stdout_text: str,
+    has_output: bool,
+    transcript_text: str = "",
+) -> dict[str, str]:
     """Return the bucket and signature for one persisted run.
 
     Ordering matters more than breadth here.  Local exit codes and local
@@ -132,6 +143,13 @@ def classify_run(state: dict[str, Any], *, stdout_text: str, has_output: bool) -
         return {"bucket": ACTIVE, "signature": f"lifecycle-running-via-{source}"}
     if has_output:
         return {"bucket": PROVIDER_INCOMPLETE, "signature": "output-present-without-terminal-settlement"}
+    if not has_output and ("Answer:" in stdout_text or "Answer:" in transcript_text):
+        # The provider answered, but the durable artifact was never written, so
+        # the run is recoverable rather than unknown.
+        return {
+            "bucket": PROVIDER_INCOMPLETE,
+            "signature": "answer-observed-without-durable-output",
+        }
     return {"bucket": UNCLASSIFIED, "signature": "no-recognized-signature"}
 
 
@@ -162,6 +180,7 @@ def diagnose(state_root: Path | None = None) -> dict[str, Any]:
             state,
             stdout_text=_read_text(run_dir / "stdout.log"),
             has_output=_output_is_nonempty(output_path),
+            transcript_text=_read_text(run_dir / "transcript.md"),
         )
         runs.append({
             "run_dir": str(run_dir),
