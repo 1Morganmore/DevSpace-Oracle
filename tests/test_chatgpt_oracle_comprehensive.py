@@ -486,6 +486,57 @@ def test_unambiguous_app_mention_pre_submit_failure_retries_once(tmp_path: Path)
     assert result["next_index"] == 0
 
 
+@pytest.mark.parametrize(
+    "marker",
+    [
+        'Unable to find model option matching "GPT-5.6 Sol" in the model switcher.',
+        "--copy-profile requires rsync on PATH (spawn failed): spawn rsync ENOENT",
+        "--copy-profile cannot be combined with --browser-manual-login",
+    ],
+)
+def test_launch_time_pre_submit_failures_also_retry_once(tmp_path: Path, marker: str) -> None:
+    module = load()
+    submitted = 0
+
+    def fake_execute(oracle_manifest: Path, *, dry_run: bool):
+        nonlocal submitted
+        submitted += 1
+        run_dir = _oracle_running_state(module, oracle_manifest)
+        stdout = run_dir / "stdout.log"
+        if submitted == 1:
+            stdout.write_text(f"ERROR: {marker}\n", encoding="utf-8")
+        else:
+            stdout.write_text("ERROR: unrelated terminal failure\n", encoding="utf-8")
+        return {"ok": False, "run_dir": str(run_dir)}
+
+    result = module.run_workflow(manifest(tmp_path), oracle_execute=fake_execute)
+
+    assert submitted == 2
+    assert result["status"] == "attention_required"
+    assert result["next_index"] == 0
+
+
+def test_durable_output_prevents_pre_submit_retry_even_with_a_launch_marker(tmp_path: Path) -> None:
+    module = load()
+    submitted = 0
+
+    def fake_execute(oracle_manifest: Path, *, dry_run: bool):
+        nonlocal submitted
+        submitted += 1
+        run_dir = _oracle_running_state(module, oracle_manifest)
+        (run_dir / "stdout.log").write_text(
+            'ERROR: Unable to find model option matching "GPT-5.6 Sol" in the model switcher.\n',
+            encoding="utf-8",
+        )
+        (run_dir / "output.md").write_text("partial provider answer", encoding="utf-8")
+        return {"ok": False, "run_dir": str(run_dir)}
+
+    result = module.run_workflow(manifest(tmp_path), oracle_execute=fake_execute)
+
+    assert submitted == 1
+    assert result["status"] == "attention_required"
+
+
 def test_running_stage_does_not_trust_existing_receipt_before_terminal_authority(tmp_path: Path) -> None:
     module = load()
     submitted = []

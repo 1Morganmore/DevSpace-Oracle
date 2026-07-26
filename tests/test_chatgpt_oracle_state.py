@@ -236,3 +236,154 @@ def test_control_state_must_be_outside_devspace_project(tmp_path: Path) -> None:
     with pytest.raises(state.OracleStateError) as overlap:
         state.load_manifest(overlap_manifest)
     assert overlap.value.code == "HOST_STATE_OVERLAPS_PROJECT"
+
+
+def test_default_profile_copy_is_skipped_when_the_copy_dependency_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    seed = tmp_path.parent / f"{tmp_path.name}-oracle-profile"
+    seed.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("ORACLE_BROWSER_PROFILE_DIR", str(seed.resolve()))
+    monkeypatch.setattr(state.shutil, "which", lambda name: None)
+
+    config = state.load_manifest(manifest(tmp_path, mission.resolve()))
+
+    assert config.copy_profile is None
+
+
+def test_default_profile_copy_is_used_when_the_copy_dependency_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    seed = tmp_path.parent / f"{tmp_path.name}-oracle-profile"
+    seed.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("ORACLE_BROWSER_PROFILE_DIR", str(seed.resolve()))
+    monkeypatch.setattr(
+        state.shutil,
+        "which",
+        lambda name: "/usr/bin/rsync" if name == state.PROFILE_COPY_DEPENDENCY else None,
+    )
+
+    config = state.load_manifest(manifest(tmp_path, mission.resolve()))
+
+    assert config.copy_profile == seed.resolve()
+
+
+def test_explicit_profile_copy_fails_closed_without_the_copy_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    seed = tmp_path.parent / f"{tmp_path.name}-explicit-profile"
+    seed.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(state.shutil, "which", lambda name: None)
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(
+            manifest(tmp_path, mission.resolve(), copy_profile=str(seed.resolve()))
+        )
+
+    assert exc.value.code == "COPY_PROFILE_DEPENDENCY_MISSING"
+    assert exc.value.evidence["dependency"] == state.PROFILE_COPY_DEPENDENCY
+
+
+def test_lifecycle_vocabulary_is_bounded_to_four_states() -> None:
+    state = load_state()
+
+    assert state.LIFECYCLE_STATES == ("running", "complete", "needs_attention", "abandoned")
+    assert set(state._STATUS_TO_LIFECYCLE) == state.STATUSES
+    assert set(state._STATUS_TO_LIFECYCLE.values()) <= set(state.LIFECYCLE_STATES)
+
+
+def test_exact_terminal_web_evidence_outranks_stored_artifact_and_ledger(tmp_path: Path) -> None:
+    state = load_state()
+    output = tmp_path / "output.md"
+    output.write_text("answer", encoding="utf-8")
+
+    verdict = state.resolve_lifecycle({
+        "status": "failed",
+        "session_authority": "terminal",
+        "terminal_harvested": True,
+        "artifacts": {"output": str(output)},
+    })
+
+    assert verdict == {"lifecycle": "complete", "authority_source": "exact-terminal-evidence"}
+
+
+def test_durable_artifact_outranks_ledger_for_legacy_records(tmp_path: Path) -> None:
+    state = load_state()
+    output = tmp_path / "output.md"
+    output.write_text("legacy answer", encoding="utf-8")
+
+    verdict = state.resolve_lifecycle({
+        "status": "complete",
+        "session_authority": "",
+        "terminal_harvested": False,
+        "artifacts": {"output": str(output)},
+    })
+
+    assert verdict == {"lifecycle": "complete", "authority_source": "durable-artifact"}
+
+
+def test_owned_live_session_stays_running_despite_local_failure(tmp_path: Path) -> None:
+    state = load_state()
+
+    verdict = state.resolve_lifecycle(
+        {
+            "status": "failed",
+            "session_authority": "submitted_unknown",
+            "terminal_harvested": False,
+            "artifacts": {"output": str(tmp_path / "missing.md")},
+        },
+        output_is_present=False,
+    )
+
+    assert verdict == {"lifecycle": "running", "authority_source": "exact-session-ownership"}
+
+
+def test_not_executed_outcome_needs_attention_even_when_terminal(tmp_path: Path) -> None:
+    state = load_state()
+    output = tmp_path / "output.md"
+    output.write_text("TASK_OUTCOME: not_executed", encoding="utf-8")
+
+    verdict = state.resolve_lifecycle({
+        "status": "complete",
+        "session_authority": "terminal",
+        "terminal_harvested": True,
+        "task_outcome": "not_executed",
+        "artifacts": {"output": str(output)},
+    })
+
+    assert verdict["lifecycle"] == "needs_attention"
+
+
+def test_local_ledger_is_the_lowest_authority(tmp_path: Path) -> None:
+    state = load_state()
+
+    running = state.resolve_lifecycle({"status": "prepared"}, output_is_present=False)
+    failed = state.resolve_lifecycle({"status": "failed"}, output_is_present=False)
+    abandoned = state.resolve_lifecycle({"status": "abandoned"}, output_is_present=False)
+
+    assert running == {"lifecycle": "running", "authority_source": "local-ledger"}
+    assert failed == {"lifecycle": "needs_attention", "authority_source": "local-ledger"}
+    assert abandoned == {"lifecycle": "abandoned", "authority_source": "explicit-abandonment"}
+
+
+def test_abandoned_is_a_valid_persisted_status(tmp_path: Path) -> None:
+    state = load_state()
+
+    assert "abandoned" in state.STATUSES
+
+
+def test_ledger_completion_without_a_durable_artifact_is_not_complete() -> None:
+    state = load_state()
+
+    verdict = state.resolve_lifecycle({"status": "complete"}, output_is_present=False)
+
+    assert verdict == {"lifecycle": "needs_attention", "authority_source": "local-ledger"}

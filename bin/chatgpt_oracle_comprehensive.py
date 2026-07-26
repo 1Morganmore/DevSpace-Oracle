@@ -26,6 +26,11 @@ UNAMBIGUOUS_PRE_SUBMIT_MARKERS = (
     "ChatGPT app mention suggestion did not appear.",
     "ChatGPT app mention was not confirmed in the composer.",
     "Exact ChatGPT app suggestion could not be clicked.",
+    # These launch-time failures also happen strictly before the composer can
+    # send anything, so they are safe to retry once with the same mission.
+    "Unable to find model option matching",
+    "--copy-profile requires rsync on PATH",
+    "--copy-profile cannot be combined with",
 )
 STAGES = {"plan", "pro", "web-multi", "review", "implementation", "final-web-gate"}
 TRANSITIONS = {

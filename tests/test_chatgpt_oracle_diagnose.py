@@ -1,0 +1,237 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+MODULE_PATH = Path(__file__).resolve().parents[1] / "bin" / "chatgpt_oracle_diagnose.py"
+
+
+def load():
+    name = "chatgpt_oracle_diagnose_test"
+    spec = importlib.util.spec_from_file_location(name, MODULE_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def write_run(
+    state_root: Path,
+    run_id: str,
+    *,
+    status: str,
+    stdout: str = "",
+    output: str | None = None,
+    session_authority: str = "",
+    terminal_harvested: bool = False,
+    task_outcome: str = "",
+) -> Path:
+    run_dir = state_root / "projects" / "projectkey" / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    output_path = run_dir / "output.md"
+    if output is not None:
+        output_path.write_text(output, encoding="utf-8")
+    (run_dir / "stdout.log").write_text(stdout, encoding="utf-8")
+    (run_dir / "state.json").write_text(json.dumps({
+        "schema": "codex.chatgpt.oracle-run-state/v1",
+        "status": status,
+        "run_id": run_id,
+        "project_root": str(state_root / "project"),
+        "session_authority": session_authority,
+        "terminal_harvested": terminal_harvested,
+        "task_outcome": task_outcome,
+        "artifacts": {"output": str(output_path)},
+    }), encoding="utf-8")
+    return run_dir
+
+
+def test_report_buckets_pre_submit_ui_and_host_causes_separately(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    write_run(
+        state_root,
+        "a" * 8,
+        status="failed",
+        stdout="ERROR: ChatGPT app mention was not confirmed in the composer.\n",
+    )
+    write_run(
+        state_root,
+        "b" * 8,
+        status="failed",
+        stdout="ERROR: --copy-profile requires rsync on PATH (spawn failed): spawn rsync ENOENT\n",
+    )
+    write_run(
+        state_root,
+        "c" * 8,
+        status="failed",
+        stdout="ERROR: Chrome window closed before oracle finished.\n",
+    )
+
+    report = module.diagnose(state_root)
+
+    assert report["schema"] == "codex.chatgpt.oracle-diagnosis/v1"
+    assert report["total_runs"] == 3
+    assert report["bucket_counts"] == {
+        "pre-submit-host-environment": 1,
+        "pre-submit-ui-contract": 1,
+        "browser-lifetime-lost": 1,
+    }
+    assert len(report["bucket_counts"]) <= 10
+    assert report["safe_for_fresh_run_buckets"] == [
+        "pre-submit-host-environment",
+        "pre-submit-ui-contract",
+    ]
+
+
+def test_pre_submit_signature_outranks_post_submit_interpretation(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    write_run(
+        state_root,
+        "d" * 8,
+        status="attention_required",
+        stdout=(
+            "ERROR: ChatGPT app mention suggestion did not appear.\n"
+            "note: ECONNREFUSED 127.0.0.1:1234\n"
+        ),
+        session_authority="submitted_unknown",
+    )
+
+    report = module.diagnose(state_root)
+    run = report["unresolved_runs"][0]
+
+    assert run["bucket"] == "pre-submit-ui-contract"
+    assert run["signature"] == "app-mention-suggestion-absent"
+
+
+def test_durable_terminal_run_is_complete_and_not_executed_is_separated(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    write_run(
+        state_root,
+        "e" * 8,
+        status="complete",
+        output="answer",
+        session_authority="terminal",
+        terminal_harvested=True,
+        task_outcome="executed",
+    )
+    write_run(
+        state_root,
+        "f" * 8,
+        status="complete",
+        output="TASK_OUTCOME: not_executed",
+        session_authority="terminal",
+        terminal_harvested=True,
+        task_outcome="not_executed",
+    )
+
+    report = module.diagnose(state_root)
+
+    assert report["bucket_counts"] == {"complete": 1, "terminal-task-not-executed": 1}
+    assert [run["bucket"] for run in report["unresolved_runs"]] == ["terminal-task-not-executed"]
+
+
+def test_live_run_keeps_ownership_and_is_not_reported_as_failure(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    write_run(
+        state_root,
+        "1" * 8,
+        status="running",
+        session_authority="live",
+        stdout="status=response streaming\n",
+    )
+
+    report = module.diagnose(state_root)
+
+    assert report["bucket_counts"] == {"active-or-uncertain": 1}
+    assert report["unresolved_runs"] == []
+
+
+def test_legacy_complete_ledger_is_not_reported_as_post_submit_defect(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    write_run(
+        state_root,
+        "7" * 8,
+        status="complete",
+        output="legacy answer",
+        session_authority="",
+        terminal_harvested=False,
+    )
+    write_run(
+        state_root,
+        "8" * 8,
+        status="complete",
+        output="TASK_OUTCOME: not_executed",
+        session_authority="",
+        terminal_harvested=False,
+        task_outcome="not_executed",
+    )
+
+    report = module.diagnose(state_root)
+
+    assert report["bucket_counts"] == {
+        "complete-legacy-ledger": 1,
+        "terminal-task-not-executed": 1,
+    }
+    assert "post-submit-provider-incomplete" not in report["bucket_counts"]
+
+
+def test_complete_status_without_output_is_not_treated_as_completion(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    write_run(
+        state_root,
+        "6" * 8,
+        status="complete",
+        output=None,
+    )
+
+    report = module.diagnose(state_root)
+
+    assert report["bucket_counts"] == {"unclassified": 1}
+    assert report["unresolved_runs"][0]["signature"] == "no-recognized-signature"
+
+
+def test_unreadable_state_stays_visible_as_unclassified(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    run_dir = state_root / "projects" / "projectkey" / "runs" / "broken00"
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text("{not json", encoding="utf-8")
+
+    report = module.diagnose(state_root)
+
+    assert report["bucket_counts"] == {"unclassified": 1}
+    assert report["unresolved_runs"][0]["signature"] == "state-unreadable"
+
+
+def test_report_is_read_only_for_persisted_runs(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    run_dir = write_run(
+        state_root,
+        "9" * 8,
+        status="failed",
+        stdout="ERROR: ChatGPT app mention was not confirmed in the composer.\n",
+    )
+    before = {
+        path.relative_to(state_root).as_posix(): path.read_bytes()
+        for path in sorted(state_root.rglob("*"))
+        if path.is_file()
+    }
+
+    module.diagnose(state_root)
+
+    after = {
+        path.relative_to(state_root).as_posix(): path.read_bytes()
+        for path in sorted(state_root.rglob("*"))
+        if path.is_file()
+    }
+    assert after == before
+    assert (run_dir / "state.json").is_file()

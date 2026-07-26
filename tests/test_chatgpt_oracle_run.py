@@ -114,10 +114,19 @@ def test_dry_run_never_executes_and_has_no_file_flag(tmp_path: Path) -> None:
     assert not (tmp_path / "runs").exists()
 
 
-def test_copy_profile_is_first_class_and_outside_project(tmp_path: Path) -> None:
+def test_copy_profile_is_first_class_and_outside_project(
+    tmp_path: Path, monkeypatch
+) -> None:
     runner = load_runner()
     profile = tmp_path.parent / f"{tmp_path.name}-oracle-profile"
     profile.mkdir()
+    # Profile copying depends on rsync, which is absent on many Windows hosts.
+    # Pin the dependency so this argv contract stays deterministic.
+    monkeypatch.setattr(
+        runner.STATE.shutil,
+        "which",
+        lambda name: "/usr/bin/rsync" if name == runner.STATE.PROFILE_COPY_DEPENDENCY else None,
+    )
     result = execute_run(runner, manifest(tmp_path, copy_profile=str(profile.resolve())), dry_run=True)
     assert result["argv"][result["argv"].index("--copy-profile") + 1] == str(profile.resolve())
 
@@ -129,10 +138,30 @@ def test_default_signed_in_profile_is_copied_per_run_and_window_is_hidden(
     profile = tmp_path.parent / f"{tmp_path.name}-signed-in-oracle-profile"
     profile.mkdir()
     monkeypatch.setenv("ORACLE_BROWSER_PROFILE_DIR", str(profile.resolve()))
+    monkeypatch.setattr(
+        runner.STATE.shutil,
+        "which",
+        lambda name: "/usr/bin/rsync" if name == runner.STATE.PROFILE_COPY_DEPENDENCY else None,
+    )
 
     result = execute_run(runner, manifest(tmp_path), dry_run=True)
 
     assert result["argv"][result["argv"].index("--copy-profile") + 1] == str(profile.resolve())
+    assert result["argv"].count("--browser-hide-window") == 1
+
+
+def test_missing_copy_dependency_still_launches_without_profile_copy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = load_runner()
+    profile = tmp_path.parent / f"{tmp_path.name}-signed-in-oracle-profile"
+    profile.mkdir()
+    monkeypatch.setenv("ORACLE_BROWSER_PROFILE_DIR", str(profile.resolve()))
+    monkeypatch.setattr(runner.STATE.shutil, "which", lambda name: None)
+
+    result = execute_run(runner, manifest(tmp_path), dry_run=True)
+
+    assert "--copy-profile" not in result["argv"]
     assert result["argv"].count("--browser-hide-window") == 1
 
 

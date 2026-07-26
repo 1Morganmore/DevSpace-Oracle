@@ -20,7 +20,21 @@ from typing import Any, Sequence
 SCHEMA = "codex.chatgpt.oracle-run/v1"
 DEVSPACE_APP_NAME = "DevSpace"
 STATE_SCHEMA = "codex.chatgpt.oracle-run-state/v1"
-STATUSES = {"prepared", "running", "complete", "failed", "attention_required"}
+STATUSES = {"prepared", "running", "complete", "failed", "attention_required", "abandoned"}
+# One bounded lifecycle vocabulary.  The stored `status` values above remain the
+# on-disk wire format for compatibility, but every consumer and report should
+# reason about these four states instead of the historical five statuses times
+# five authorities times terminal_harvested combinations.  That combinatorial
+# space is what produced "nothing is running yet everything is locked".
+LIFECYCLE_STATES = ("running", "complete", "needs_attention", "abandoned")
+_STATUS_TO_LIFECYCLE = {
+    "prepared": "running",
+    "running": "running",
+    "complete": "complete",
+    "failed": "needs_attention",
+    "attention_required": "needs_attention",
+    "abandoned": "abandoned",
+}
 SESSION_AUTHORITY_RANK = {
     "pre_submit": 0,
     "submitted_unknown": 1,
@@ -48,6 +62,18 @@ SAFE_ORACLE_SWITCHES = {
     "--browser-hide-window",
 }
 SAFE_ORACLE_VALUE_OPTIONS = {"--heartbeat", "--timeout", "--zombie-timeout"}
+# Oracle copies a signed-in browser profile with rsync.  On hosts without
+# rsync the copy fails after launch, which historically produced a pre-submit
+# failure for every run.  Decide feasibility while loading the manifest so the
+# run either starts with a working isolation strategy or is rejected with an
+# actionable local error instead of a mid-launch crash.
+PROFILE_COPY_DEPENDENCY = "rsync"
+
+
+def profile_copy_is_supported(*, which_runner: Any = None) -> bool:
+    """Report whether Oracle can actually copy a signed-in browser profile."""
+    resolver = shutil.which if which_runner is None else which_runner
+    return bool(resolver(PROFILE_COPY_DEPENDENCY))
 APP_RE = re.compile(r"^[^\r\n]+$")
 MODEL_RE = re.compile(r"^[a-zA-Z0-9._ -]+$")
 PARENT_ID_RE = re.compile(r"^[a-f0-9]{32,64}$")
@@ -320,6 +346,18 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
             raise OracleStateError("COPY_PROFILE_NOT_DIRECTORY", "copy_profile must identify a directory")
         if is_within(project_root, copy_profile) or is_within(copy_profile, project_root):
             raise OracleStateError("COPY_PROFILE_OVERLAPS_PROJECT", "copy_profile must be outside the DevSpace project")
+        if not profile_copy_is_supported():
+            # Without the copy dependency Oracle aborts after launch, so every
+            # run failed before reaching the composer.  Fall back to the
+            # signed-in profile directly instead of forcing that failure.
+            if copy_profile_raw:
+                raise OracleStateError(
+                    "COPY_PROFILE_DEPENDENCY_MISSING",
+                    f"copy_profile requires {PROFILE_COPY_DEPENDENCY} on PATH; "
+                    "install it or omit copy_profile to reuse the signed-in profile",
+                    {"dependency": PROFILE_COPY_DEPENDENCY, "copy_profile": str(copy_profile)},
+                )
+            copy_profile = None
     research = str(payload.get("research") or "off").strip().casefold()
     if research not in {"off", "deep"}:
         raise OracleStateError("RESEARCH_INVALID", "research must be off or deep")
@@ -610,6 +648,52 @@ def output_is_nonempty(path: Path) -> bool:
         return bool(path.read_bytes().strip())
     except OSError:
         return False
+
+
+def resolve_lifecycle(state: dict[str, Any], *, output_is_present: bool | None = None) -> dict[str, Any]:
+    """Collapse the stored run record into one bounded lifecycle verdict.
+
+    Authority order is fixed and single-sourced: exact terminal web evidence
+    outranks a durable stored artifact, which outranks the local ledger.  PIDs,
+    heartbeats, locks and poll results are diagnostics and never appear here.
+    """
+    status = str(state.get("status") or "")
+    authority = str(state.get("session_authority") or "")
+    harvested = state.get("terminal_harvested") is True
+    outcome = str(state.get("task_outcome") or "")
+    if output_is_present is None:
+        artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+        output_path = Path(str(artifacts.get("output") or ""))
+        has_output = bool(str(output_path)) and output_is_nonempty(output_path)
+    else:
+        has_output = bool(output_is_present)
+
+    if status == "abandoned":
+        return {"lifecycle": "abandoned", "authority_source": "explicit-abandonment"}
+    # 1. Exact terminal web evidence.
+    if authority == "terminal" and harvested and has_output:
+        if outcome == "not_executed":
+            return {"lifecycle": "needs_attention", "authority_source": "exact-terminal-evidence"}
+        return {"lifecycle": "complete", "authority_source": "exact-terminal-evidence"}
+    # 2. Durable stored artifact, including ledgers written before authority
+    #    tracking existed.  A finished answer on disk is not a defect.
+    if has_output and status == "complete":
+        if outcome == "not_executed":
+            return {"lifecycle": "needs_attention", "authority_source": "durable-artifact"}
+        return {"lifecycle": "complete", "authority_source": "durable-artifact"}
+    # 3. An owned session that is still live keeps running regardless of a
+    #    local nonzero exit; only web state may end it.
+    if authority in {"live", "submitted_unknown", "terminal_observed"}:
+        return {"lifecycle": "running", "authority_source": "exact-session-ownership"}
+    # 4. Local ledger, lowest authority.
+    if status == "complete":
+        # A ledger that claims completion without a durable artifact has not
+        # proven anything.  Never let the weakest authority assert completion.
+        return {"lifecycle": "needs_attention", "authority_source": "local-ledger"}
+    return {
+        "lifecycle": _STATUS_TO_LIFECYCLE.get(status, "needs_attention"),
+        "authority_source": "local-ledger",
+    }
 
 
 TASK_OUTCOME_RE = re.compile(
