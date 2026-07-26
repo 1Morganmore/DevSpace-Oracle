@@ -8,11 +8,13 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 STATE_PATH = Path(__file__).resolve().with_name("chatgpt_oracle_state.py")
 COMPAT_PATH = Path(__file__).resolve().with_name("chatgpt_oracle_compat.py")
+DEVSPACE_COMPAT_PATH = Path(__file__).resolve().with_name("chatgpt_devspace_compat.py")
 
 
 def load_state_module():
@@ -39,6 +41,22 @@ def load_compat_module():
 
 
 COMPAT = load_compat_module()
+
+
+def load_devspace_compat_module():
+    spec = importlib.util.spec_from_file_location(
+        "chatgpt_devspace_compat_runtime",
+        DEVSPACE_COMPAT_PATH,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"DevSpace compatibility module unavailable: {DEVSPACE_COMPAT_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+DEVSPACE_COMPAT = load_devspace_compat_module()
 
 
 class OracleRunError(RuntimeError):
@@ -173,6 +191,9 @@ def execute_run(
     popen_factory: Callable[..., Any] = subprocess.Popen,
     platform_name: str | None = None,
     compat_factory: Callable[[str], dict[str, Any]] = COMPAT.ensure_oracle_compatibility,
+    devspace_compat_factory: Callable[[], dict[str, Any]] = (
+        DEVSPACE_COMPAT.ensure_devspace_compatibility
+    ),
 ) -> dict[str, Any]:
     config = STATE.load_manifest(manifest_path, platform_name=platform_name)
     layout = STATE.create_layout(config, run_id=config.requested_run_id)
@@ -210,9 +231,18 @@ def execute_run(
     try:
         version = resolve_oracle_version(config.oracle_command, run_factory=run_factory, platform_name=platform_name)
         compat_factory(version)
+        if config.transport == "devspace":
+            devspace_compat = devspace_compat_factory()
+            if devspace_compat.get("service_restart_required"):
+                raise OracleRunError(
+                    "DEVSPACE_SERVICE_RESTART_REQUIRED",
+                    "DevSpace was safely patched before submission and must be restarted once",
+                    {"package_roots": devspace_compat.get("package_roots", [])},
+                )
         STATE.update_state(layout.state_path, status="prepared", resolved_version=version)
     except Exception as exc:
-        append_error(layout.stderr_path, f"version resolution failed: {exc}")
+        code = f"{exc.code}: " if isinstance(exc, OracleRunError) else ""
+        append_error(layout.stderr_path, f"version resolution failed: {code}{exc}")
         STATE.write_transcript(layout)
         return {
             "ok": False,
@@ -293,12 +323,23 @@ def execute_run(
     # browser response timeout) does not prove that the exact web session
     # failed or stopped. Preserve same-project ownership and require exact-slug
     # recovery instead of presenting a terminal local failure.
-    status = (
-        "complete"
-        if exit_code == 0 and STATE.output_is_nonempty(layout.output_path)
-        else "attention_required"
+    transport_complete = exit_code == 0 and STATE.output_is_nonempty(layout.output_path)
+    task_outcome = (
+        STATE.classify_task_outcome(
+            layout.output_path,
+            contract=config.task_outcome_contract,
+            transport=config.transport,
+        )
+        if transport_complete
+        else "pending"
     )
-    if status == "complete":
+    semantic_complete = task_outcome in {
+        "executed",
+        "not_applicable",
+        "legacy_unclassified",
+    }
+    status = "complete" if transport_complete and semantic_complete else "attention_required"
+    if transport_complete:
         state = STATE.update_state(
             layout.state_path,
             status=status,
@@ -306,6 +347,13 @@ def execute_run(
             session_authority="terminal",
             terminal_harvested=True,
             artifact_sha256=STATE.sha256_file(layout.output_path),
+            transport_status="complete",
+            task_outcome=task_outcome,
+            task_outcome_reason=(
+                "explicit-output-marker"
+                if task_outcome in {"executed", "not_executed", "blocked"}
+                else task_outcome
+            ),
         )
         STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
     else:
@@ -314,6 +362,8 @@ def execute_run(
             status=status,
             exit_code=exit_code,
             session_authority="submitted_unknown",
+            transport_status="failed" if exit_code else "incomplete",
+            task_outcome=task_outcome,
         )
     return {"ok": status == "complete", "run_dir": str(layout.run_dir), "result": state}
 
@@ -358,8 +408,9 @@ def _recover_run_locked(
         and state.get("terminal_harvested") is True
         and STATE.output_is_nonempty(Path(str(state["artifacts"]["output"])))
     ):
+        outcome = str(state.get("task_outcome") or "legacy_unclassified")
         return {
-            "ok": True,
+            "ok": outcome in {"executed", "not_applicable", "legacy_unclassified"},
             "status": "complete",
             "run_dir": str(directory),
             "action": "none",
@@ -473,7 +524,19 @@ def _recover_run_locked(
     )
     # A failed recovery process is also not web-terminal evidence. Only an
     # exact terminal observation plus a nonempty durable output may complete.
-    status = "complete" if harvested else "attention_required"
+    contract = str(state.get("task_outcome_contract") or "legacy")
+    transport = str(state.get("transport") or "devspace")
+    task_outcome = (
+        STATE.classify_task_outcome(output_path, contract=contract, transport=transport)
+        if harvested
+        else "pending"
+    )
+    semantic_complete = task_outcome in {
+        "executed",
+        "not_applicable",
+        "legacy_unclassified",
+    }
+    status = "complete" if harvested and semantic_complete else "attention_required"
     latest = STATE.load_state(layout.state_path)
     latest_output = Path(str(latest.get("artifacts", {}).get("output") or output_path))
     if latest.get("status") == "complete" and STATE.output_is_nonempty(latest_output):
@@ -496,6 +559,13 @@ def _recover_run_locked(
         ),
         terminal_harvested=harvested,
         artifact_sha256=STATE.sha256_file(output_path) if harvested else None,
+        transport_status="complete" if harvested else "incomplete",
+        task_outcome=task_outcome,
+        task_outcome_reason=(
+            "explicit-output-marker"
+            if task_outcome in {"executed", "not_executed", "blocked"}
+            else task_outcome
+        ),
     )
     if harvested:
         STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
@@ -512,6 +582,63 @@ def _recover_run_locked(
     }
 
 
+def adjudicate_task_outcome(
+    run_dir: Path,
+    *,
+    expected_output_sha256: str,
+    task_outcome: str,
+    reason: str,
+) -> dict[str, Any]:
+    directory = run_dir.expanduser().resolve(strict=True)
+    state_path = directory / "state.json"
+    state = STATE.load_state(state_path)
+    output_path = Path(str((state.get("artifacts") or {}).get("output") or ""))
+    if not output_path.is_file() or not STATE.is_within(STATE.oracle_state_root(), output_path.resolve()):
+        raise OracleRunError(
+            "ADJUDICATION_OUTPUT_INVALID",
+            "exact run output is unavailable or outside host state",
+        )
+    actual = STATE.sha256_file(output_path)
+    if actual != expected_output_sha256.strip().casefold():
+        raise OracleRunError(
+            "ADJUDICATION_OUTPUT_HASH_MISMATCH",
+            "exact output changed before task outcome adjudication",
+            {"expected": expected_output_sha256, "actual": actual},
+        )
+    normalized = task_outcome.strip().casefold()
+    if normalized not in {"executed", "not_executed", "blocked", "unknown"}:
+        raise OracleRunError(
+            "ADJUDICATION_TASK_OUTCOME_INVALID",
+            "task outcome must be executed, not_executed, blocked, or unknown",
+        )
+    if (
+        str(state.get("session_authority") or "") != "terminal"
+        or state.get("terminal_harvested") is not True
+    ):
+        raise OracleRunError(
+            "ADJUDICATION_TERMINAL_REQUIRED",
+            "only a durably harvested terminal run may be adjudicated",
+        )
+    updated = STATE.update_state(
+        state_path,
+        status=str(state.get("status") or "complete"),
+        exit_code=state.get("exit_code"),
+        transport_status="complete",
+        task_outcome=normalized,
+        task_outcome_reason=reason.strip() or "explicit-exact-output-adjudication",
+    )
+    return {
+        "ok": normalized == "executed",
+        "status": "task_outcome_adjudicated",
+        "run_dir": str(directory),
+        "output_path": str(output_path),
+        "output_sha256": actual,
+        "task_outcome": normalized,
+        "safe_for_fresh_retry": normalized == "not_executed",
+        "result": updated,
+    }
+
+
 def recover_run(
     run_dir: Path,
     *,
@@ -520,6 +647,9 @@ def recover_run(
     oracle_command: Sequence[str] | None = None,
     popen_factory: Callable[..., Any] = subprocess.Popen,
     platform_name: str | None = None,
+    settle_timeout_seconds: float = 0,
+    settle_interval_seconds: float = 15,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     directory = run_dir.expanduser().resolve(strict=True)
     stored = STATE.load_state(directory / "state.json")
@@ -541,7 +671,7 @@ def recover_run(
         timeout_seconds=30,
         platform_name=platform_name,
     ):
-        return _recover_run_locked(
+        result = _recover_run_locked(
             directory,
             action=action,
             dry_run=dry_run,
@@ -549,6 +679,49 @@ def recover_run(
             popen_factory=popen_factory,
             platform_name=platform_name,
         )
+        if dry_run or action != "live" or settle_timeout_seconds <= 0:
+            return result
+        deadline = time.monotonic() + settle_timeout_seconds
+        while True:
+            if result.get("ok"):
+                return result
+            if result.get("status") == "terminal_observed":
+                return _recover_run_locked(
+                    directory,
+                    action="harvest",
+                    dry_run=False,
+                    oracle_command=oracle_command,
+                    popen_factory=popen_factory,
+                    platform_name=platform_name,
+                )
+            current = result.get("result") if isinstance(result.get("result"), dict) else {}
+            authority = str(current.get("session_authority") or "")
+            exact_state = str(result.get("exact_session_state") or "").casefold()
+            still_live_or_unsettled = (
+                result.get("status") in {"session_live", "terminal_settle_disagreement"}
+                or authority == "live"
+                and exact_state in {"", "active", "running", "streaming", "thinking", "stalled"}
+            )
+            if not still_live_or_unsettled:
+                return result
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {
+                    **result,
+                    "ok": False,
+                    "status": "live_settle_timeout",
+                    "settle_timeout_seconds": settle_timeout_seconds,
+                    "next_action": "resume the same exact-slug live recovery; never replace or resubmit",
+                }
+            sleep(min(settle_interval_seconds, remaining))
+            result = _recover_run_locked(
+                directory,
+                action="live",
+                dry_run=False,
+                oracle_command=oracle_command,
+                popen_factory=popen_factory,
+                platform_name=platform_name,
+            )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -562,18 +735,50 @@ def build_parser() -> argparse.ArgumentParser:
     recover_parser.add_argument("--action", choices=("harvest", "live"), required=True)
     recover_parser.add_argument("--oracle-command", nargs="+")
     recover_parser.add_argument("--dry-run", action="store_true")
+    recover_parser.add_argument(
+        "--settle-timeout-seconds",
+        type=float,
+        default=5400,
+        help="For live recovery, keep the exact slug in one process until terminal or this bounded deadline.",
+    )
+    recover_parser.add_argument(
+        "--settle-interval-seconds",
+        type=float,
+        default=15,
+    )
+    adjudicate_parser = commands.add_parser("adjudicate")
+    adjudicate_parser.add_argument("--run-dir", type=Path, required=True)
+    adjudicate_parser.add_argument("--expected-output-sha256", required=True)
+    adjudicate_parser.add_argument(
+        "--task-outcome",
+        choices=("executed", "not_executed", "blocked", "unknown"),
+        required=True,
+    )
+    adjudicate_parser.add_argument("--reason", required=True)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        payload = execute_run(args.manifest, dry_run=args.dry_run) if args.command == "run" else recover_run(
-            args.run_dir,
-            action=args.action,
-            dry_run=args.dry_run,
-            oracle_command=args.oracle_command,
-        )
+        if args.command == "run":
+            payload = execute_run(args.manifest, dry_run=args.dry_run)
+        elif args.command == "recover":
+            payload = recover_run(
+                args.run_dir,
+                action=args.action,
+                dry_run=args.dry_run,
+                oracle_command=args.oracle_command,
+                settle_timeout_seconds=args.settle_timeout_seconds,
+                settle_interval_seconds=args.settle_interval_seconds,
+            )
+        else:
+            payload = adjudicate_task_outcome(
+                args.run_dir,
+                expected_output_sha256=args.expected_output_sha256,
+                task_outcome=args.task_outcome,
+                reason=args.reason,
+            )
     except STATE.OracleStateError as exc:
         payload = exc.envelope()
     except OracleRunError as exc:

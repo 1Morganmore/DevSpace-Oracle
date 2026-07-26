@@ -32,6 +32,7 @@ Require schema `codex.chatgpt.oracle-run/v1` with:
 - `mode`: `browser`.
 - Optional `run_root`, `oracle_command`, `oracle_args`, `thinking_time`,
   hash-validated `copy_profile`, and mutex timeout.
+- Regular direct/orchestrator manifests use `task_outcome_contract: "v1"`.
 
 ## Run
 
@@ -50,7 +51,11 @@ Execute only after an explicit live-run request:
 python skills/chatgpt-oracle-runtime/scripts/run_chatgpt_oracle.py run --manifest C:\absolute\oracle-job.json
 ```
 
-Complete requires Oracle exit code zero and a nonempty `--write-output` artifact.
+Complete requires Oracle exit code zero, a nonempty `--write-output` artifact,
+and—when `task_outcome_contract` is `v1`—a final
+`TASK_OUTCOME: EXECUTED` marker. `TASK_OUTCOME: NOT_EXECUTED` and
+`TASK_OUTCOME: BLOCKED` preserve terminal transport evidence but return
+attention-required; transport success alone never claims project execution.
 A nonzero Oracle exit after launch, including a browser response timeout, is
 `attention_required` rather than proof that the web session failed. It retains
 same-project ownership and permits only exact-slug `live` or `harvest`
@@ -65,6 +70,11 @@ python skills/chatgpt-oracle-runtime/scripts/run_chatgpt_oracle.py recover --run
 ```
 
 Use `--action live` only to keep following the same stored session. A successful recovery must write a nonempty stored `output.md`, update `state.json` to `complete`, and refresh `transcript.md`; exit code zero without output is `attention_required`.
+The CLI keeps `--action live` inside one exact-slug recovery process for up to
+90 minutes by default. Transient `stalled`, `running`, or observer disagreement
+states keep the same live authority and project lock; they do not return every
+few minutes for Codex-side polling. When the exact session becomes terminal,
+the same process performs one harvest and returns once.
 
 Direct same-project runs hold one cross-process mutex for the entire Oracle
 process lifetime. A Multi parent owns that project mutex while authorized

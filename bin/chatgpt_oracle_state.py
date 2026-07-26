@@ -86,6 +86,7 @@ class OracleConfig:
     copy_profile: Path | None
     research: str
     archive: str
+    task_outcome_contract: str
     parallel_parent_id: str | None
     requested_run_id: str | None
 
@@ -327,6 +328,17 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
     archive = str(payload.get("archive") or "auto").strip().casefold()
     if archive not in {"auto", "always", "never"}:
         raise OracleStateError("ARCHIVE_INVALID", "archive must be auto, always, or never")
+    task_outcome_contract = str(payload.get("task_outcome_contract") or "legacy").strip().casefold()
+    if task_outcome_contract not in {"legacy", "v1"}:
+        raise OracleStateError(
+            "TASK_OUTCOME_CONTRACT_INVALID",
+            "task_outcome_contract must be legacy or v1",
+        )
+    if transport == "pro-attachment-only" and task_outcome_contract != "legacy":
+        raise OracleStateError(
+            "PRO_TASK_OUTCOME_CONTRACT_FORBIDDEN",
+            "Pro attachment-only output is not wrapped in the DevSpace task outcome contract",
+        )
     parallel_parent_raw = str(payload.get("parallel_parent_id") or "").strip().casefold()
     parallel_parent_id = parallel_parent_raw or None
     if parallel_parent_id is not None and PARENT_ID_RE.fullmatch(parallel_parent_id) is None:
@@ -353,6 +365,7 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
         copy_profile,
         research,
         archive,
+        task_outcome_contract,
         parallel_parent_id,
         requested_run_id,
     )
@@ -369,6 +382,12 @@ def composer_prompt(config: OracleConfig, mission_path: Path | None = None) -> s
         "그 파일에 기록된 정확한 프로젝트 루트만 사용하고 적용되는 AGENTS.md를 먼저 끝까지 읽으세요. "
         "작업공간 열기가 시간 초과되면 동일한 정확한 루트만 한 번 재시도하며 상위·하위·현재 활성 "
         "작업공간이나 셸 경계 우회로 대체하지 마세요."
+        + (
+            " 마지막 줄에 실제 작업 수행 결과를 TASK_OUTCOME: EXECUTED, "
+            "TASK_OUTCOME: NOT_EXECUTED, TASK_OUTCOME: BLOCKED 중 하나로 정확히 기록하세요."
+            if config.task_outcome_contract == "v1"
+            else ""
+        )
     )
 
 
@@ -408,6 +427,10 @@ def state_payload(config: OracleConfig, layout: RunLayout, *, status: str, resol
             "archive": config.archive,
         },
         "parallel_parent_id": config.parallel_parent_id,
+        "transport_status": "prepared",
+        "task_outcome_contract": config.task_outcome_contract,
+        "task_outcome": "not_applicable" if config.transport == "pro-attachment-only" else "pending",
+        "task_outcome_reason": None,
         "mission": {
             "path": str(config.mission_path),
             "transport_path": str(layout.run_dir / "mission.md"),
@@ -544,6 +567,9 @@ def update_state(
     session_authority: str | None = None,
     terminal_harvested: bool | None = None,
     artifact_sha256: str | None = None,
+    transport_status: str | None = None,
+    task_outcome: str | None = None,
+    task_outcome_reason: str | None = None,
 ) -> dict[str, Any]:
     if status not in STATUSES:
         raise OracleStateError("STATUS_INVALID", "invalid Oracle run status")
@@ -569,6 +595,12 @@ def update_state(
         payload["terminal_harvested"] = terminal_harvested
     if artifact_sha256 is not None:
         payload["artifact_sha256"] = artifact_sha256
+    if transport_status is not None:
+        payload["transport_status"] = transport_status
+    if task_outcome is not None:
+        payload["task_outcome"] = task_outcome
+    if task_outcome_reason is not None:
+        payload["task_outcome_reason"] = task_outcome_reason
     write_json_atomic(state_path, payload)
     return payload
 
@@ -578,6 +610,26 @@ def output_is_nonempty(path: Path) -> bool:
         return bool(path.read_bytes().strip())
     except OSError:
         return False
+
+
+TASK_OUTCOME_RE = re.compile(
+    r"TASK_OUTCOME:\s*(EXECUTED|NOT_EXECUTED|BLOCKED)",
+    re.IGNORECASE,
+)
+
+
+def classify_task_outcome(path: Path, *, contract: str, transport: str) -> str:
+    if transport == "pro-attachment-only":
+        return "not_applicable"
+    try:
+        text = path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
+        return "unknown"
+    final_line = next((line.strip() for line in reversed(text.splitlines()) if line.strip()), "")
+    marker = TASK_OUTCOME_RE.fullmatch(final_line)
+    if marker:
+        return marker.group(1).casefold()
+    return "unknown" if contract == "v1" else "legacy_unclassified"
 
 
 def unresolved_project_sessions(

@@ -1,6 +1,6 @@
 {
   "schema": "codexpro.install-manifest/v1",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "include": [
     "bin/chatgpt_agbrowse_bridge.py",
     "bin/chatgpt_agbrowse_composer.py",
@@ -10,6 +10,8 @@
     "bin/chatgpt_agbrowse_tabs.py",
     "bin/chatgpt_git_isolation.py",
     "bin/chatgpt_oracle_run.py",
+    "bin/chatgpt_devspace_compat.py",
+    "bin/devspace-compat/1.0.4/workspaces.patch",
     "bin/chatgpt_oracle_compat.py",
     "bin/oracle-compat/0.16.1/browserConfig.patch",
     "bin/oracle-compat/0.16.1/browserIndex.patch",
@@ -103,7 +105,7 @@
       "package": "@waishnav/devspace",
       "tested_version": "1.0.4",
       "license": "MIT",
-      "installation": "resolved by the explicit setup skill; upstream is not vendored or patched"
+      "installation": "resolved by the explicit setup skill; exact workspaces.js hash is compatibility-patched to bound transient-tree discovery"
     },
     "codexpro": {
       "package": "codexpro",

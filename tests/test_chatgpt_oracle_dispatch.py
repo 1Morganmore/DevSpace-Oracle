@@ -30,6 +30,7 @@ def test_regular_and_deep_research_compile_to_oracle_without_attachments(tmp_pat
         value = json.loads(target.read_text(encoding="utf-8"))
         assert result["contract"]["attachments"] == []
         assert value["app_name"] == "DevSpace"
+        assert value["task_outcome_contract"] == "v1"
         assert value["model"] == "gpt-5.6"
         assert value["model_strategy"] == "select"
         assert value["thinking_time"] == "heavy"

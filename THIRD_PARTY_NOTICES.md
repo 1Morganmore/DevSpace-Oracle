@@ -2,7 +2,8 @@
 
 This repository ships no copy of agbrowse, the Oracle package, DevSpace,
 Codex, CodexPro, browser binaries, or account data. It does ship narrow
-textual compatibility patches for a hash-verified Oracle 0.16.1 installation.
+textual compatibility patches for hash-verified Oracle 0.16.1 and DevSpace
+1.0.4 installations.
 
 - `hehee9/multi-gpt@4f5e130` is MIT-licensed. Its attribution and the recorded `server.mjs` hash must be preserved when its upstream-compatible integration is changed.
 - `agbrowse@0.1.18` is an external npm package retained only for recovery of
@@ -18,14 +19,40 @@ textual compatibility patches for a hash-verified Oracle 0.16.1 installation.
   under `bin/oracle-compat/0.16.1` are derivative patch instructions and retain
   the following upstream MIT notice.
 - `@waishnav/devspace` is an external MIT-licensed MCP workspace server. The
-  tested version is 1.0.4. Setup resolves it externally and this repository
-  neither vendors nor patches its source.
+  tested version is 1.0.4. Setup resolves it externally; this repository does
+  not vendor its source. The derivative patch instruction under
+  `bin/devspace-compat/1.0.4` retains the upstream MIT license and is applied
+  only when both the package version and exact source hash match.
 
 ## @steipete/oracle MIT notice
 
 MIT License
 
 Copyright (c) 2026 Peter Steinberger
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## @waishnav/devspace MIT notice
+
+MIT License
+
+Copyright (c) 2026 Waishnav
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

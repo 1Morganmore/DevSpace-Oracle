@@ -63,6 +63,10 @@ def version_runner(command, **kwargs):
 
 def execute_run(runner, *args, **kwargs):
     kwargs.setdefault("compat_factory", lambda version: {"ok": True, "version": version})
+    kwargs.setdefault(
+        "devspace_compat_factory",
+        lambda: {"ok": True, "changed": [], "service_restart_required": False},
+    )
     return runner.execute_run(*args, **kwargs)
 
 
@@ -179,6 +183,155 @@ def test_complete_requires_zero_exit_and_nonempty_output(tmp_path: Path) -> None
         assert "--file" not in captured["command"]
         assert events == ["popen", "wait"]
         assert Path(result["result"]["artifacts"]["transcript"]).is_file()
+
+
+def test_v1_task_outcome_separates_transport_success_from_execution(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+    (tmp_path / "executed").mkdir()
+    (tmp_path / "not-executed").mkdir()
+    executed = execute_run(
+        runner,
+        manifest(
+            tmp_path / "executed",
+            task_outcome_contract="v1",
+            run_id="e" * 32,
+        ),
+        run_factory=version_runner,
+        popen_factory=popen_for(0, b"done\nTASK_OUTCOME: EXECUTED\n", {}, []),
+    )
+    not_executed = execute_run(
+        runner,
+        manifest(
+            tmp_path / "not-executed",
+            task_outcome_contract="v1",
+            run_id="n" * 32,
+        ),
+        run_factory=version_runner,
+        popen_factory=popen_for(
+            0,
+            b"workspace open timed out\nTASK_OUTCOME: NOT_EXECUTED\n",
+            {},
+            [],
+        ),
+    )
+
+    assert executed["ok"] is True
+    assert executed["result"]["status"] == "complete"
+    assert executed["result"]["transport_status"] == "complete"
+    assert executed["result"]["task_outcome"] == "executed"
+    assert not_executed["ok"] is False
+    assert not_executed["result"]["status"] == "attention_required"
+    assert not_executed["result"]["transport_status"] == "complete"
+    assert not_executed["result"]["task_outcome"] == "not_executed"
+    assert not_executed["result"]["session_authority"] == "terminal"
+    assert not_executed["result"]["terminal_harvested"] is True
+
+
+def test_v1_missing_task_outcome_marker_never_claims_execution(tmp_path: Path) -> None:
+    runner = load_runner()
+    result = execute_run(
+        runner,
+        manifest(tmp_path, task_outcome_contract="v1"),
+        run_factory=version_runner,
+        popen_factory=popen_for(0, b"nonempty but semantically ambiguous", {}, []),
+    )
+
+    assert result["ok"] is False
+    assert result["result"]["status"] == "attention_required"
+    assert result["result"]["transport_status"] == "complete"
+    assert result["result"]["task_outcome"] == "unknown"
+
+
+def test_v1_task_outcome_marker_must_be_the_final_nonempty_line(tmp_path: Path) -> None:
+    runner = load_runner()
+    result = execute_run(
+        runner,
+        manifest(tmp_path, task_outcome_contract="v1"),
+        run_factory=version_runner,
+        popen_factory=popen_for(
+            0,
+            b"TASK_OUTCOME: EXECUTED\nActually no files were changed.\n",
+            {},
+            [],
+        ),
+    )
+
+    assert result["ok"] is False
+    assert result["result"]["task_outcome"] == "unknown"
+
+
+def test_devspace_patch_change_blocks_before_submission_until_restart(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+    launched = []
+    result = runner.execute_run(
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=lambda *args, **kwargs: launched.append(True),
+        compat_factory=lambda version: {"ok": True, "version": version},
+        devspace_compat_factory=lambda: {
+            "ok": True,
+            "changed": ["dist/workspaces.js"],
+            "package_roots": ["package"],
+            "service_restart_required": True,
+        },
+    )
+
+    assert result["ok"] is False
+    assert result["result"]["status"] == "failed"
+    assert launched == []
+    stderr = Path(result["result"]["artifacts"]["stderr"]).read_text(encoding="utf-8")
+    assert "DEVSPACE_SERVICE_RESTART_REQUIRED" in stderr
+
+
+def test_exact_output_hash_adjudication_marks_legacy_task_not_executed(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+    completed = execute_run(
+        runner,
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(0, b"workspace timeout; no files changed", {}, []),
+    )
+    run_dir = Path(completed["run_dir"])
+    output = run_dir / "output.md"
+    adjudicated = runner.adjudicate_task_outcome(
+        run_dir,
+        expected_output_sha256=runner.STATE.sha256_file(output),
+        task_outcome="not_executed",
+        reason="exact output proves workspace open timeout before file reads",
+    )
+
+    assert adjudicated["ok"] is False
+    assert adjudicated["safe_for_fresh_retry"] is True
+    assert adjudicated["task_outcome"] == "not_executed"
+    assert adjudicated["result"]["status"] == "complete"
+    assert adjudicated["result"]["transport_status"] == "complete"
+    assert adjudicated["result"]["session_authority"] == "terminal"
+
+
+def test_blocked_adjudication_never_authorizes_fresh_retry(tmp_path: Path) -> None:
+    runner = load_runner()
+    completed = execute_run(
+        runner,
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(0, b"partial work then blocked", {}, []),
+    )
+    run_dir = Path(completed["run_dir"])
+    output = run_dir / "output.md"
+    adjudicated = runner.adjudicate_task_outcome(
+        run_dir,
+        expected_output_sha256=runner.STATE.sha256_file(output),
+        task_outcome="blocked",
+        reason="partial execution cannot authorize duplicate side effects",
+    )
+
+    assert adjudicated["safe_for_fresh_retry"] is False
 
 
 def test_post_submit_nonzero_requires_exact_recovery_and_never_restarts(tmp_path: Path) -> None:
@@ -444,6 +597,57 @@ def test_terminal_observation_cannot_regress_to_live_and_later_harvest_settles(t
     assert settled["status"] == "complete"
     assert settled["result"]["session_authority"] == "terminal"
     assert Path(settled["output_path"]).read_text(encoding="utf-8") == "durable answer"
+
+
+def test_live_recovery_settles_stalled_inside_one_exact_slug_process(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+    initial = execute_run(
+        runner,
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(7, None, {}, []),
+    )
+    run_dir = Path(initial["run_dir"])
+    runner.STATE.update_state(
+        run_dir / "state.json",
+        status="running",
+        exit_code=7,
+        session_authority="live",
+    )
+    calls: list[str] = []
+
+    def recovery(command, **kwargs):
+        action = "harvest" if "--harvest" in command else "live"
+        calls.append(action)
+        if calls == ["live"]:
+            kwargs["stdout"].write(b"State: stalled\n")
+        elif action == "live":
+            kwargs["stdout"].write(b"State: completed\n")
+        else:
+            candidate = Path(command[command.index("--write-output") + 1])
+            candidate.write_text("durable exact answer", encoding="utf-8")
+            kwargs["stdout"].write(b"State: completed\n")
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    settled = runner.recover_run(
+        run_dir,
+        action="live",
+        oracle_command=["oracle"],
+        popen_factory=recovery,
+        settle_timeout_seconds=5,
+        settle_interval_seconds=0,
+        sleep=lambda _: None,
+    )
+
+    assert calls == ["live", "live", "harvest"]
+    assert settled["ok"] is True
+    assert settled["status"] == "complete"
+    assert settled["result"]["session_authority"] == "terminal"
+    assert settled["result"]["terminal_harvested"] is True
+    assert Path(settled["output_path"]).read_text(encoding="utf-8") == "durable exact answer"
 
 
 def test_unresolved_exact_session_blocks_different_parent_submission(tmp_path: Path) -> None:

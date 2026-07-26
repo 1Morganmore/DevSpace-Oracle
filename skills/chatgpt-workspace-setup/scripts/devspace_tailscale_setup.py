@@ -23,6 +23,7 @@ from typing import Any, Callable, Sequence
 
 DEFAULT_PORT = 7676
 APP_NAME = "DevSpace"
+DEVSPACE_PACKAGE = "@waishnav/devspace@1.0.4"
 SECRET_PATTERN = re.compile(r"(?i)(password|token|secret|authorization)\s*([:=])\s*[^\s,;]+")
 HOSTNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.-]*\.ts\.net$", re.IGNORECASE)
 
@@ -112,12 +113,31 @@ def bash_argv(command: Sequence[str]) -> list[str]:
     return [str(git_bash_path()), "-lc", "exec " + " ".join(shlex.quote(part) for part in command)]
 
 
+def devspace_compat_argv(
+    *,
+    confirm_restarted: bool = False,
+    stop_exact_service: bool = False,
+    local_port: int = DEFAULT_PORT,
+) -> list[str]:
+    script = Path(__file__).resolve().parents[3] / "bin" / "chatgpt_devspace_compat.py"
+    if not script.is_file():
+        raise SetupError("DEVSPACE_COMPAT_MODULE_MISSING")
+    argv = [sys.executable, str(script)]
+    if confirm_restarted:
+        argv.append("--confirm-service-restarted")
+    if stop_exact_service:
+        argv.append("--stop-exact-service")
+    if local_port != DEFAULT_PORT:
+        argv.extend(["--local-port", str(local_port)])
+    return argv
+
+
 def setup_plan(config: SetupConfig) -> dict[str, Any]:
     return {
         "action": "explicit_setup_only",
         "allowed_roots": [str(root) for root in config.roots],
-        "devspace_init": bash_argv(["npx", "--yes", "@waishnav/devspace", "init"]),
-        "devspace_serve": bash_argv(["npx", "--yes", "@waishnav/devspace", "serve"]),
+        "devspace_init": bash_argv(["npx", "--yes", DEVSPACE_PACKAGE, "init"]),
+        "devspace_serve": bash_argv(["npx", "--yes", DEVSPACE_PACKAGE, "serve"]),
         "tailscale_funnel": [
             "tailscale",
             "funnel",
@@ -159,8 +179,20 @@ def apply_setup(
     slot = funnel_status(config, runner=runner, allow_absent=True)
     if slot.get("mapping") == "conflict":
         raise SetupError("TAILSCALE_FUNNEL_PORT_IN_USE")
-    run_checked(bash_argv(["npx", "--yes", "@waishnav/devspace", "init"]), runner=runner)
-    launch_hidden(bash_argv(["npx", "--yes", "@waishnav/devspace", "serve"]), popen_factory=popen_factory)
+    run_checked(bash_argv(["npx", "--yes", DEVSPACE_PACKAGE, "init"]), runner=runner)
+    run_checked(devspace_compat_argv(), runner=runner)
+    run_checked(
+        devspace_compat_argv(stop_exact_service=True, local_port=config.local_port),
+        runner=runner,
+    )
+    launch_hidden(
+        bash_argv(["npx", "--yes", DEVSPACE_PACKAGE, "serve"]),
+        popen_factory=popen_factory,
+    )
+    run_checked(
+        devspace_compat_argv(confirm_restarted=True, local_port=config.local_port),
+        runner=runner,
+    )
     run_checked(
         ["tailscale", "funnel", "--bg", f"--https={config.public_port}", f"http://127.0.0.1:{config.local_port}"],
         runner=runner,

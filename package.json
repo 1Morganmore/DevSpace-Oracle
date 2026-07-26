@@ -1,6 +1,6 @@
 {
   "name": "codexpro-automation",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "private": false,
   "description": "Unified Oracle ChatGPT workflows for Codex with DevSpace and frozen legacy recovery",
   "license": "MIT",
@@ -28,6 +28,8 @@
     "bin/chatgpt_agbrowse_tabs.py",
     "bin/chatgpt_git_isolation.py",
     "bin/chatgpt_oracle_run.py",
+    "bin/chatgpt_devspace_compat.py",
+    "bin/devspace-compat/",
     "bin/chatgpt_oracle_compat.py",
     "bin/oracle-compat/",
     "bin/chatgpt_oracle_state.py",

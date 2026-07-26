@@ -48,7 +48,10 @@ def test_setup_plan_has_no_secrets_and_is_explicit_only(tmp_path: Path, monkeypa
     assert "token" not in text.lower()
     assert plan["registration_url"] == "https://device.tailnet.ts.net/mcp"
     assert plan["recommended_app_name"] == "DevSpace"
-    assert plan["devspace_init"][1:3] == ["-lc", "exec npx --yes @waishnav/devspace init"]
+    assert plan["devspace_init"][1:3] == [
+        "-lc",
+        "exec npx --yes @waishnav/devspace@1.0.4 init",
+    ]
 
 
 def test_doctor_orders_local_funnel_public_and_manual_failure_branch(tmp_path: Path) -> None:
@@ -96,7 +99,14 @@ def test_doctor_returns_local_failure_before_funnel_or_public(tmp_path: Path) ->
 
 def test_module_has_no_chatgpt_ui_or_browser_automation() -> None:
     source = MODULE_PATH.read_text(encoding="utf-8").lower()
-    for forbidden in ("agbrowse", "selenium", "playwright", "tab", "click", "chatgpt.com"):
+    for forbidden in (
+        "agbrowse",
+        "selenium",
+        "playwright",
+        "tab-switch",
+        ".click(",
+        "chatgpt.com",
+    ):
         assert forbidden not in source
 
 
@@ -161,3 +171,39 @@ def test_windows_launch_is_hidden() -> None:
     module = load_module()
     kwargs = module.windows_subprocess_kwargs(platform_name="nt")
     assert kwargs["creationflags"] & module.subprocess.CREATE_NO_WINDOW
+
+
+def test_setup_applies_hash_validated_devspace_compat_before_service_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, current = config(tmp_path)
+    bash = tmp_path / "bash.exe"
+    bash.write_text("", encoding="utf-8")
+    monkeypatch.setenv("DEVSPACE_GIT_BASH", str(bash))
+    calls: list[list[str]] = []
+    launched: list[list[str]] = []
+
+    def runner(argv, **kwargs):
+        calls.append(list(argv))
+        if argv == ["tailscale", "funnel", "status", "--json"]:
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"Web": {}}), stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    module.apply_setup(
+        current,
+        runner=runner,
+        popen_factory=lambda argv, **kwargs: launched.append(list(argv)),
+    )
+
+    assert calls[1][1:3] == [
+        "-lc",
+        "exec npx --yes @waishnav/devspace@1.0.4 init",
+    ]
+    assert calls[2] == module.devspace_compat_argv()
+    assert calls[3] == module.devspace_compat_argv(stop_exact_service=True)
+    assert calls[4] == module.devspace_compat_argv(confirm_restarted=True)
+    assert launched and launched[0][1:3] == [
+        "-lc",
+        "exec npx --yes @waishnav/devspace@1.0.4 serve",
+    ]

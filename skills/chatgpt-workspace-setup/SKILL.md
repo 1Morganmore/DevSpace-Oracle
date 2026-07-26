@@ -25,6 +25,13 @@ python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py setup 
 
 `--apply` runs DevSpace through Git Bash without a visible Windows console, starts `devspace serve`, and creates an HTTPS Funnel to `127.0.0.1:7676`. During `devspace init`, enter only the listed roots and the public origin `https://<hostname>` (without `/mcp`).
 
+Before starting or restarting DevSpace 1.0.4, run the installed
+`bin/chatgpt_devspace_compat.py`. It hash-validates the exact upstream
+`dist/workspaces.js`, backs it up, and applies bounded concurrent discovery
+that skips transient `.pytest-*` and cache trees. If it reports
+`service_restart_required=true`, restart DevSpace before any Oracle
+submission. Unknown versions or hashes fail closed.
+
 The only app information to enter manually in ChatGPT Developer Mode is:
 
 - Recommended app name: `DevSpace`
