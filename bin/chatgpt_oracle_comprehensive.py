@@ -323,10 +323,17 @@ def _validate_receipt(
         and next_stage == "plan"
         and bool(value.get("blocker"))
     )
+    ready_plan_transition = (
+        str(value.get("status") or "").endswith("PLAN_READY")
+        and stage == "plan"
+        and next_stage in {"review", "web-multi", "pro"}
+        and not value.get("blocker")
+    )
     if (
         value.get("status") not in {"PASS", "COMPLETE"}
         and not revision_transition
         and not blocked_plan_continuation
+        and not ready_plan_transition
     ) or value.get("ready_for_next") is not True or (value.get("blocker") and not blocked_plan_continuation):
         raise WorkflowError("stage receipt did not pass")
     output = _inside(config["project_root"], value.get("output_path"))

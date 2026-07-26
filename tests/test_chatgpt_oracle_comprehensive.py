@@ -579,6 +579,42 @@ def test_blocked_plan_receipt_can_continue_to_bound_source_repair_plan(tmp_path:
     assert value["next_stage"] == "plan"
 
 
+def test_source_repair_plan_ready_receipt_can_continue_to_review(tmp_path: Path) -> None:
+    module = load()
+    output = tmp_path / "source-repair-plan.md"
+    output.write_text("ready", encoding="utf-8")
+    next_mission = tmp_path / "next-review.md"
+    next_mission.write_text("review the source repair", encoding="utf-8")
+    receipt = tmp_path / "stage-result.json"
+    receipt.write_text(json.dumps({
+        "schema": module.RECEIPT_SCHEMA,
+        "workflow_id": "a" * 32,
+        "stage": "plan",
+        "attempt_id": "b" * 32,
+        "input_mission_sha256": "c" * 64,
+        "status": "SOURCE_REPAIR_PLAN_READY",
+        "output_path": str(output),
+        "output_sha256": module.sha(output),
+        "next_stage": "review",
+        "next_mission_path": str(next_mission),
+        "next_mission_sha256": module.sha(next_mission),
+        "ready_for_next": True,
+        "blocker": "",
+    }), encoding="utf-8")
+
+    value = module._validate_receipt(
+        {"project_root": tmp_path},
+        receipt,
+        "a" * 32,
+        "plan",
+        "b" * 32,
+        "c" * 64,
+    )
+
+    assert value["status"] == "SOURCE_REPAIR_PLAN_READY"
+    assert value["next_stage"] == "review"
+
+
 def test_awaiting_receipt_rebind_advances_to_next_stage_without_replaying_plan(tmp_path: Path) -> None:
     module = load()
     calls = []
