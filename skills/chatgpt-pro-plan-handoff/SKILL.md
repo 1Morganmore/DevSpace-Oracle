@@ -5,8 +5,7 @@ description: Run staged work with unchanged attachment-only Pro and Oracle-based
 
 # Pro and comprehensive handoff
 
-Pro is unchanged and attachment-only through `chatgpt-pro-browser`. It never
-uses DevSpace or Oracle.
+Pro is unchanged and attachment-only through Oracle. It never uses DevSpace.
 
 New GPT comprehensive work uses
 `bin/chatgpt_oracle_comprehensive.py` with schema
@@ -23,6 +22,20 @@ The manifest supplies absolute `project_root`, `workflow_dir`,
 bound `codex.chatgpt.oracle-stage-result/v1` receipt. The host validates
 workflow/stage/attempt/input hashes, UTF-8 paths, output hashes, PASS status,
 and the transition; it never rewrites the semantic prompt.
+
+When a plan routes to Pro and Pro needs an evidence packet, the plan-authored
+next mission declares it in exactly one closed `[PRO_ATTACHMENT_CONTRACT]`
+block. The JSON body uses schema `codex.chatgpt.oracle-pro-attachments/v1` and
+an `attachments` array of absolute project-root-contained regular non-symlink
+paths with optional SHA-256 values. The host attaches only the mission and these
+declared files; it never discovers ZIPs from prose. A legacy Pro mission without
+the block remains mission-only. Regular DevSpace stages reject this block and
+never receive packet attachments.
+
+Plan receipts should use `PLAN_READY`. For compatibility, `completed` is
+accepted only when the plan receipt is otherwise a fully ready, blocker-free,
+hash-valid transition to `review`, `web-multi`, or `pro`; ambiguous or incomplete
+receipts remain fail-closed and are never rewritten on disk.
 
 ```powershell
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_comprehensive.py" --manifest C:\project\workflow.json --dry-run

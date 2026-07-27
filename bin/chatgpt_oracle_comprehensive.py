@@ -285,6 +285,21 @@ def _stage_mission(
         "blocker instead of changing scope. Keep progress narration compact; tool activity and the durable receipt "
         "are the authority.\n"
     )
+    if stage == "plan":
+        protocol += (
+            "\n[PRO_ATTACHMENT_AUTHORING_CONTRACT]\n"
+            "If and only if next_stage=pro requires evidence files, the authored next mission must contain exactly "
+            "one closed [PRO_ATTACHMENT_CONTRACT] block. Its body must be one JSON object with "
+            f"schema={PRO_ATTACHMENT_SCHEMA} and an attachments array. Each attachment entry contains an absolute "
+            "path and may contain its lowercase SHA-256. Paths must name regular non-symlink files inside "
+            "exact_project_root. Do not describe a required packet only in prose, and do not add this block for "
+            "review, web-multi, implementation, or final-web-gate transitions. Example: "
+            f"{PRO_ATTACHMENT_BEGIN}{{\"schema\":\"{PRO_ATTACHMENT_SCHEMA}\",\"attachments\":[{{\"path\":"
+            "\"C:\\\\exact-root\\\\packet.zip\",\"sha256\":\"<64 lowercase hex>\"}]}}"
+            f"{PRO_ATTACHMENT_END}\n"
+            "Canonical plan receipt status is PLAN_READY. The legacy status completed is accepted only when the "
+            "receipt is otherwise a complete, hash-valid, blocker-free ready transition to review, web-multi, or pro.\n"
+        )
     if stage == "review":
         config.setdefault("_review_policy", _review_policy_from_history(config))
         policy = config["_review_policy"]
@@ -418,6 +433,11 @@ def _declared_pro_attachments(config: dict[str, Any], source: Path) -> tuple[Pat
     return tuple(paths)
 
 
+def _mission_contains_pro_attachment_contract(source: Path) -> bool:
+    text = source.read_text(encoding="utf-8")
+    return PRO_ATTACHMENT_BEGIN in text or PRO_ATTACHMENT_END in text
+
+
 def _oracle_output_path(result: dict[str, Any], run_dir: Any = None) -> Path | None:
     direct = str(result.get("output_path") or "").strip()
     if direct:
@@ -536,8 +556,16 @@ def _validate_receipt(
         or value.get("input_mission_sha256") != input_sha
     ):
         raise WorkflowError("stage receipt identity mismatch")
-    status = str(value.get("status") or "")
+    raw_status = str(value.get("status") or "")
     next_stage = str(value.get("next_stage") or "")
+    completed_plan_compat = (
+        stage == "plan"
+        and raw_status.casefold() == "completed"
+        and next_stage in {"review", "web-multi", "pro"}
+        and value.get("ready_for_next") is True
+        and not value.get("blocker")
+    )
+    status = "PLAN_READY" if completed_plan_compat else raw_status
     if stage == "review":
         if status not in REVIEW_STATUSES:
             raise WorkflowError("review status must be PASS, PASS_WITH_NOTES, REVISE, or FAIL")
@@ -609,12 +637,16 @@ def _validate_receipt(
             }
     if next_stage not in TRANSITIONS[stage]:
         raise WorkflowError(f"invalid transition {stage}->{next_stage}")
+    compatibility = (
+        {"_receipt_status_original": raw_status, "_receipt_status_normalized": "PLAN_READY"}
+        if completed_plan_compat else {}
+    )
     if next_stage == "complete":
-        return {**value, "_next_mission": None}
+        return {**value, **compatibility, "_next_mission": None}
     next_mission = _inside(config["project_root"], value.get("next_mission_path"))
     if value.get("next_mission_sha256") != sha(next_mission):
         raise WorkflowError("next mission hash mismatch")
-    return {**value, "_next_mission": next_mission}
+    return {**value, **compatibility, "_next_mission": next_mission}
 
 
 def _state_path(config: dict[str, Any], workflow_id: str) -> Path:
@@ -1013,6 +1045,8 @@ def _run_workflow_locked(
                 config, workflow_id, index, source, attempt_id
             )
         else:
+            if _mission_contains_pro_attachment_contract(source):
+                raise WorkflowError("Pro attachment contract is forbidden for regular DevSpace stages")
             pro_attachments = ()
             mission, receipt_path, input_sha = _stage_mission(
                 config, workflow_id, index, stage, source, attempt_id

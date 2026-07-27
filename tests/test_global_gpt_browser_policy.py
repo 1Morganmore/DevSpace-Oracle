@@ -32,7 +32,8 @@ def test_pro_remains_attachment_only_and_never_uses_devspace() -> None:
     assert "app_policy: forbidden" in value
     handoff = text(HANDOFF)
     assert "Pro is unchanged and attachment-only" in handoff
-    assert "It never\nuses DevSpace or Oracle" in handoff
+    assert "through Oracle" in handoff
+    assert "It never uses DevSpace" in handoff
 
 
 def test_deep_research_uses_oracle_deep_without_silent_fallback() -> None:
