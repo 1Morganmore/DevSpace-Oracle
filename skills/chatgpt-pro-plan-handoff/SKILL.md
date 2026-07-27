@@ -31,6 +31,20 @@ its output and next-mission text. The host mechanically preserves those strings
 as UTF-8 files and computes the standard receipt; it does not summarize or
 rewrite them.
 
+When a plan routes to Pro and Pro needs an evidence packet, the plan-authored
+next mission declares it in exactly one closed `[PRO_ATTACHMENT_CONTRACT]`
+block. The JSON body uses schema `codex.chatgpt.oracle-pro-attachments/v1` and
+an `attachments` array of absolute project-root-contained regular non-symlink
+paths with optional SHA-256 values. The host attaches only the mission and these
+declared files; it never discovers ZIPs from prose. A legacy Pro mission without
+the block remains mission-only. Regular DevSpace stages reject this block and
+never receive packet attachments.
+
+Plan receipts should use `PLAN_READY`. For compatibility, `completed` is
+accepted only when the plan receipt is otherwise a fully ready, blocker-free,
+hash-valid transition to `review`, `web-multi`, or `pro`; ambiguous or incomplete
+receipts remain fail-closed and are never rewritten on disk.
+
 ```powershell
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_comprehensive.py" --manifest C:\project\workflow.json --dry-run
 ```
