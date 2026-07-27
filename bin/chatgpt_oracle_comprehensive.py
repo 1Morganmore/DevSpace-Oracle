@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -21,6 +22,10 @@ PRO_OUTPUT_KEYS = {
     "schema", "workflow_id", "stage", "attempt_id", "input_mission_sha256",
     "status", "output_text", "next_stage", "next_mission_text", "ready_for_next", "blocker",
 }
+PRO_OUTPUT_PREFIX_KEYS = (
+    "schema", "workflow_id", "stage", "attempt_id", "input_mission_sha256", "status",
+)
+PRO_OUTPUT_RECOVERY_SCHEMA = "codex.chatgpt.oracle-pro-output-recovery/v1"
 STATE_SCHEMA = "codex.chatgpt.oracle-comprehensive-state/v1"
 SCOPE_SCHEMA = "codex.chatgpt.oracle-comprehensive-scope/v1"
 MAX_PLAN_REVISIONS = 2
@@ -353,7 +358,10 @@ def _pro_stage_mission(
         "input_mission_sha256, status, output_text, next_stage, next_mission_text, ready_for_next, blocker. "
         "A passing result requires status=PASS, next_stage=review, ready_for_next=true, an empty blocker, "
         "and nonempty output_text and next_mission_text. The host will preserve those two strings exactly, "
-        "materialize them as UTF-8 files, and validate their hashes without rewriting their meaning.\n"
+        "materialize them as UTF-8 files, and validate their hashes without rewriting their meaning. "
+        "The response must be strict JSON: escape every double quote and backslash inside output_text and "
+        "next_mission_text. Never paste a nested JSON document into either string with raw, unescaped quotes; "
+        "encode it as string content with JSON escaping.\n"
     )
     target.write_text(body.rstrip() + protocol, encoding="utf-8")
     return target, receipt, input_sha
@@ -457,6 +465,176 @@ def _oracle_output_path(result: dict[str, Any], run_dir: Any = None) -> Path | N
     return None
 
 
+def _skip_json_whitespace(text: str, index: int) -> int:
+    while index < len(text) and text[index] in " \t\r\n":
+        index += 1
+    return index
+
+
+def _expect_json_token(text: str, index: int, token: str) -> int:
+    index = _skip_json_whitespace(text, index)
+    if not text.startswith(token, index):
+        raise WorkflowError("Pro Oracle output recovery structure is ambiguous")
+    return index + len(token)
+
+
+def _decode_recoverable_json_string(raw: str) -> str:
+    """Decode one JSON string whose only defect may be unescaped double quotes."""
+    repaired: list[str] = []
+    index = 0
+    while index < len(raw):
+        character = raw[index]
+        if character == '"':
+            repaired.append('\\"')
+            index += 1
+            continue
+        if character != "\\":
+            repaired.append(character)
+            index += 1
+            continue
+        if index + 1 >= len(raw):
+            raise WorkflowError("Pro Oracle output recovery found a truncated escape")
+        escaped = raw[index + 1]
+        if escaped in '"\\/bfnrt':
+            repaired.extend(("\\", escaped))
+            index += 2
+            continue
+        if escaped == "u" and index + 5 < len(raw) and all(
+            item in "0123456789abcdefABCDEF" for item in raw[index + 2:index + 6]
+        ):
+            repaired.append(raw[index:index + 6])
+            index += 6
+            continue
+        raise WorkflowError("Pro Oracle output recovery found an ambiguous backslash escape")
+    try:
+        value = json.loads('"' + "".join(repaired) + '"')
+    except json.JSONDecodeError as exc:
+        raise WorkflowError("Pro Oracle output recovery could not decode string content") from exc
+    if not isinstance(value, str):
+        raise WorkflowError("Pro Oracle output recovery did not produce string content")
+    return value
+
+
+def _parse_recovered_pro_tail(text: str, index: int) -> tuple[dict[str, Any], int]:
+    decoder = json.JSONDecoder()
+    values: dict[str, Any] = {}
+    for position, key in enumerate(("next_stage", "next_mission_text", "ready_for_next", "blocker")):
+        parsed_key, index = decoder.raw_decode(text, _skip_json_whitespace(text, index))
+        if parsed_key != key:
+            raise WorkflowError("Pro Oracle output recovery key order is ambiguous")
+        index = _expect_json_token(text, index, ":")
+        if key == "next_mission_text":
+            index = _skip_json_whitespace(text, index)
+            if index >= len(text) or text[index] != '"':
+                raise WorkflowError("Pro Oracle output recovery next mission is not a string")
+            start = index + 1
+            matches = list(re.finditer(r'"\s*,\s*"ready_for_next"\s*:', text[start:]))
+            candidates: list[tuple[str, int]] = []
+            for match in matches:
+                boundary = start + match.start()
+                try:
+                    recovered = _decode_recoverable_json_string(text[start:boundary])
+                    probe = start + match.end()
+                    ready, probe = decoder.raw_decode(text, _skip_json_whitespace(text, probe))
+                    probe = _expect_json_token(text, probe, ",")
+                    blocker_key, probe = decoder.raw_decode(text, _skip_json_whitespace(text, probe))
+                    if blocker_key != "blocker":
+                        continue
+                    probe = _expect_json_token(text, probe, ":")
+                    blocker, probe = decoder.raw_decode(text, _skip_json_whitespace(text, probe))
+                    probe = _expect_json_token(text, probe, "}")
+                    if _skip_json_whitespace(text, probe) != len(text):
+                        continue
+                    if not isinstance(ready, bool) or not isinstance(blocker, str):
+                        continue
+                    candidates.append((recovered, boundary))
+                except (json.JSONDecodeError, WorkflowError):
+                    continue
+            if len(candidates) != 1:
+                raise WorkflowError("Pro Oracle output recovery next mission boundary is ambiguous")
+            recovered, boundary = candidates[0]
+            values["next_mission_text"] = recovered
+            index = start + next(
+                match.end() for match in matches if start + match.start() == boundary
+            )
+            values["ready_for_next"], index = decoder.raw_decode(text, _skip_json_whitespace(text, index))
+            index = _expect_json_token(text, index, ",")
+            blocker_key, index = decoder.raw_decode(text, _skip_json_whitespace(text, index))
+            if blocker_key != "blocker":
+                raise WorkflowError("Pro Oracle output recovery blocker key is missing")
+            index = _expect_json_token(text, index, ":")
+            values["blocker"], index = decoder.raw_decode(text, _skip_json_whitespace(text, index))
+            index = _expect_json_token(text, index, "}")
+            return values, index
+        values[key], index = decoder.raw_decode(text, _skip_json_whitespace(text, index))
+        if position < 3:
+            index = _expect_json_token(text, index, ",")
+    raise WorkflowError("Pro Oracle output recovery tail is incomplete")
+
+
+def _recover_pro_envelope(text: str) -> dict[str, Any]:
+    """Recover only the canonical envelope with unescaped quotes in its two text fields."""
+    decoder = json.JSONDecoder()
+    index = _expect_json_token(text, 0, "{")
+    envelope: dict[str, Any] = {}
+    for key in PRO_OUTPUT_PREFIX_KEYS:
+        parsed_key, index = decoder.raw_decode(text, _skip_json_whitespace(text, index))
+        if parsed_key != key:
+            raise WorkflowError("Pro Oracle output recovery prefix identity is ambiguous")
+        index = _expect_json_token(text, index, ":")
+        envelope[key], index = decoder.raw_decode(text, _skip_json_whitespace(text, index))
+        index = _expect_json_token(text, index, ",")
+    parsed_key, index = decoder.raw_decode(text, _skip_json_whitespace(text, index))
+    if parsed_key != "output_text":
+        raise WorkflowError("Pro Oracle output recovery output_text key is missing")
+    index = _expect_json_token(text, index, ":")
+    index = _skip_json_whitespace(text, index)
+    if index >= len(text) or text[index] != '"':
+        raise WorkflowError("Pro Oracle output recovery output_text is not a string")
+    start = index + 1
+    matches = list(re.finditer(r'"\s*,\s*"next_stage"\s*:', text[start:]))
+    candidates: list[dict[str, Any]] = []
+    for match in matches:
+        boundary = start + match.start()
+        try:
+            output_text = _decode_recoverable_json_string(text[start:boundary])
+            tail, end = _parse_recovered_pro_tail(text, start + match.end() - len('"next_stage":'))
+            if _skip_json_whitespace(text, end) != len(text):
+                continue
+            candidates.append({**envelope, "output_text": output_text, **tail})
+        except (json.JSONDecodeError, WorkflowError):
+            continue
+    if len(candidates) != 1 or set(candidates[0]) != PRO_OUTPUT_KEYS:
+        raise WorkflowError("Pro Oracle output recovery is ambiguous or incomplete")
+    return candidates[0]
+
+
+def _load_pro_envelope(output_path: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise WorkflowError(f"Pro Oracle output contains duplicate key: {key}")
+            value[key] = item
+        return value
+
+    try:
+        text = output_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise WorkflowError("Pro Oracle output must be UTF-8") from exc
+    try:
+        envelope = json.loads(text, object_pairs_hook=reject_duplicate_keys)
+        return envelope, None
+    except json.JSONDecodeError as exc:
+        envelope = _recover_pro_envelope(text)
+        return envelope, {
+            "schema": PRO_OUTPUT_RECOVERY_SCHEMA,
+            "method": "canonical-envelope-unescaped-quotes/v1",
+            "source_output_sha256": sha(output_path),
+            "strict_error_position": int(exc.pos),
+        }
+
+
 def _materialize_pro_receipt(
     config: dict[str, Any],
     receipt_path: Path,
@@ -471,21 +649,7 @@ def _materialize_pro_receipt(
     if output_path is None or not output_path.resolve(strict=True).is_file():
         raise WorkflowError("Pro Oracle output is unavailable")
 
-    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        value: dict[str, Any] = {}
-        for key, item in pairs:
-            if key in value:
-                raise WorkflowError(f"Pro Oracle output contains duplicate key: {key}")
-            value[key] = item
-        return value
-
-    try:
-        envelope = json.loads(
-            output_path.read_text(encoding="utf-8"),
-            object_pairs_hook=reject_duplicate_keys,
-        )
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise WorkflowError("Pro Oracle output must be one strict UTF-8 JSON object") from exc
+    envelope, recovery = _load_pro_envelope(output_path)
     if not isinstance(envelope, dict) or set(envelope) != PRO_OUTPUT_KEYS:
         raise WorkflowError("Pro Oracle output must contain the exact closed key set")
     if (
@@ -514,7 +678,7 @@ def _materialize_pro_receipt(
     next_mission = stage_dir / "next-mission.md"
     materialized_output.write_bytes(output_text.encode("utf-8"))
     next_mission.write_bytes(next_mission_text.encode("utf-8"))
-    _write(receipt_path, {
+    receipt = {
         "schema": RECEIPT_SCHEMA,
         "workflow_id": workflow_id,
         "stage": "pro",
@@ -528,7 +692,10 @@ def _materialize_pro_receipt(
         "next_mission_sha256": sha(next_mission),
         "ready_for_next": True,
         "blocker": "",
-    })
+    }
+    if recovery is not None:
+        receipt["pro_output_recovery"] = recovery
+    _write(receipt_path, receipt)
 
 
 def _validate_receipt(

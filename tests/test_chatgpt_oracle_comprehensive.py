@@ -569,6 +569,99 @@ def test_regular_stage_rejects_pro_attachment_contract_before_submission(tmp_pat
     assert calls == 0
 
 
+def _pro_envelope(module, *, workflow_id: str = "a" * 32, output_text: str = "decision") -> dict[str, object]:
+    return {
+        "schema": module.PRO_OUTPUT_SCHEMA,
+        "workflow_id": workflow_id,
+        "stage": "pro",
+        "attempt_id": "b" * 32,
+        "input_mission_sha256": "c" * 64,
+        "status": "PASS",
+        "output_text": output_text,
+        "next_stage": "review",
+        "next_mission_text": "Review the exact Pro decision.",
+        "ready_for_next": True,
+        "blocker": "",
+    }
+
+
+def _malformed_pro_output(module, *, workflow_id: str = "a" * 32, truncated: bool = False) -> str:
+    value = _pro_envelope(module, workflow_id=workflow_id)
+    prefix = {
+        key: value[key]
+        for key in module.PRO_OUTPUT_PREFIX_KEYS
+    }
+    serialized = json.dumps(prefix, ensure_ascii=False, separators=(",", ":"))
+    nested = 'Decision body\\n\\n{\\n  "schema": "nested/v1",\\n  "verdict": "PASS"\\n}'
+    tail = (
+        ',"next_stage":"review","next_mission_text":"Review the exact Pro decision.",'
+        '"ready_for_next":true,"blocker":""}'
+    )
+    text = serialized[:-1] + ',"output_text":"' + nested + '"' + tail
+    return text[:-24] if truncated else text
+
+
+def test_malformed_nested_json_in_pro_output_is_recovered_with_audit_receipt(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    stage_dir = tmp_path / "pro-stage"
+    stage_dir.mkdir()
+    output = stage_dir / "oracle-output.md"
+    output.write_text(_malformed_pro_output(module), encoding="utf-8")
+    receipt = stage_dir / "stage-result.json"
+    module._materialize_pro_receipt(
+        config,
+        receipt,
+        "a" * 32,
+        "b" * 32,
+        "c" * 64,
+        {"output_path": str(output)},
+    )
+    value = json.loads(receipt.read_text(encoding="utf-8"))
+    recovered = value["pro_output_recovery"]
+    assert recovered["schema"] == module.PRO_OUTPUT_RECOVERY_SCHEMA
+    assert recovered["source_output_sha256"] == module.sha(output)
+    assert recovered["strict_error_position"] > 0
+    assert '"schema": "nested/v1"' in Path(value["output_path"]).read_text(encoding="utf-8")
+
+
+def test_malformed_pro_output_recovery_rejects_identity_mismatch(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    output = tmp_path / "oracle-output.md"
+    output.write_text(_malformed_pro_output(module, workflow_id="d" * 32), encoding="utf-8")
+    receipt = tmp_path / "stage-result.json"
+    with pytest.raises(module.WorkflowError, match="identity mismatch"):
+        module._materialize_pro_receipt(
+            config, receipt, "a" * 32, "b" * 32, "c" * 64, {"output_path": str(output)}
+        )
+    assert not receipt.exists()
+
+
+def test_truncated_malformed_pro_output_remains_fail_closed(tmp_path: Path) -> None:
+    module = load()
+    output = tmp_path / "oracle-output.md"
+    output.write_text(_malformed_pro_output(module, truncated=True), encoding="utf-8")
+    with pytest.raises(module.WorkflowError, match="ambiguous|incomplete"):
+        module._load_pro_envelope(output)
+
+
+def test_strict_pro_output_uses_original_parser_without_recovery_metadata(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    stage_dir = tmp_path / "strict-pro"
+    stage_dir.mkdir()
+    output = stage_dir / "oracle-output.md"
+    output.write_text(json.dumps(_pro_envelope(module), ensure_ascii=False), encoding="utf-8")
+    receipt = stage_dir / "stage-result.json"
+    module._materialize_pro_receipt(
+        config, receipt, "a" * 32, "b" * 32, "c" * 64, {"output_path": str(output)}
+    )
+    value = json.loads(receipt.read_text(encoding="utf-8"))
+    assert "pro_output_recovery" not in value
+    assert value["status"] == "PASS"
+
+
 def test_web_multi_preflight_failure_stays_prepared_and_rejects_changed_mission(tmp_path: Path) -> None:
     module = load()
     workflow_path = manifest(tmp_path)
