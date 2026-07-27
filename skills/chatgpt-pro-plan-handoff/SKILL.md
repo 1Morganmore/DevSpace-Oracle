@@ -45,6 +45,15 @@ accepted only when the plan receipt is otherwise a fully ready, blocker-free,
 hash-valid transition to `review`, `web-multi`, or `pro`; ambiguous or incomplete
 receipts remain fail-closed and are never rewritten on disk.
 
+Pro must JSON-escape every quote and backslash inside `output_text` and
+`next_mission_text`. The host always parses strict JSON first. If strict parsing
+fails, it may make one narrow recovery attempt only for the canonical ordered
+envelope whose text fields contain unescaped quotes. Recovery still requires the
+exact workflow, stage, attempt, and input-mission identities plus a complete
+unambiguous tail. Invalid escapes, truncation, duplicate/ambiguous boundaries,
+or identity drift remain fail-closed. A recovered receipt records the immutable
+source output SHA-256, recovery method, and strict parser error position.
+
 ```powershell
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_comprehensive.py" --manifest C:\project\workflow.json --dry-run
 ```
