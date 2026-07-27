@@ -419,6 +419,84 @@ def test_default_recovery_rejects_a_nonparallel_child(tmp_path: Path) -> None:
     assert value["error"] == "ORACLE_RECOVERY_PARALLEL_PARENT_MISSING"
 
 
+def _pro_attachment_mission(module, tmp_path: Path, attachments: list[dict[str, str]]) -> Path:
+    mission = tmp_path / "pro-next.md"
+    mission.write_text(
+        "Pro decision mission\n\n"
+        "[PRO_ATTACHMENT_CONTRACT]\n"
+        + json.dumps({"schema": module.PRO_ATTACHMENT_SCHEMA, "attachments": attachments})
+        + "\n[/PRO_ATTACHMENT_CONTRACT]\n",
+        encoding="utf-8",
+    )
+    return mission
+
+
+def test_pro_attachment_contract_includes_only_declared_exact_packet(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    config["_parallel_parent_id"] = "b" * 64
+    packet = tmp_path / "packet.zip"
+    packet.write_bytes(b"exact packet")
+    source = _pro_attachment_mission(module, tmp_path, [{"path": str(packet), "sha256": module.sha(packet)}])
+    extras = module._declared_pro_attachments(config, source)
+    augmented = tmp_path / "augmented-mission.md"
+    augmented.write_text("bound pro mission", encoding="utf-8")
+    payload = json.loads(module._oracle_manifest(
+        config, augmented, tmp_path, "c" * 32, stage="pro", pro_attachments=extras
+    ).read_text(encoding="utf-8"))
+    assert payload["attachments"] == [str(augmented), str(packet.resolve())]
+
+
+def test_pro_attachment_contract_rejects_hash_mismatch_before_submission(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    packet = tmp_path / "packet.zip"
+    packet.write_bytes(b"exact packet")
+    source = _pro_attachment_mission(module, tmp_path, [{"path": str(packet), "sha256": "0" * 64}])
+    with pytest.raises(module.WorkflowError, match="hash mismatch"):
+        module._declared_pro_attachments(config, source)
+
+
+def test_pro_attachment_contract_rejects_outside_project_and_symlink(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    outside = tmp_path.parent / "outside-packet.zip"
+    outside.write_bytes(b"outside")
+    source = _pro_attachment_mission(module, tmp_path, [{"path": str(outside)}])
+    with pytest.raises(module.WorkflowError, match="outside project"):
+        module._declared_pro_attachments(config, source)
+
+    target = tmp_path / "packet.zip"
+    target.write_bytes(b"packet")
+    link = tmp_path / "packet-link.zip"
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+    source = _pro_attachment_mission(module, tmp_path, [{"path": str(link)}])
+    with pytest.raises(module.WorkflowError, match="non-symlink"):
+        module._declared_pro_attachments(config, source)
+
+
+def test_regular_manifest_never_attaches_pro_packets_and_legacy_pro_is_mission_only(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    config["_parallel_parent_id"] = "b" * 64
+    mission = tmp_path / "mission.md"
+    mission.write_text("mission", encoding="utf-8")
+    packet = tmp_path / "packet.zip"
+    packet.write_bytes(b"packet")
+    regular = json.loads(module._oracle_manifest(
+        config, mission, tmp_path / "regular", "c" * 32, stage="plan", pro_attachments=(packet,)
+    ).read_text(encoding="utf-8"))
+    assert "attachments" not in regular
+    assert regular["transport"] == "devspace"
+    legacy_pro = json.loads(module._oracle_manifest(
+        config, mission, tmp_path / "legacy-pro", "d" * 32, stage="pro"
+    ).read_text(encoding="utf-8"))
+    assert legacy_pro["attachments"] == [str(mission)]
+
+
 def test_web_multi_preflight_failure_stays_prepared_and_rejects_changed_mission(tmp_path: Path) -> None:
     module = load()
     workflow_path = manifest(tmp_path)
