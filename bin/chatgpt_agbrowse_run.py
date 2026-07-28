@@ -376,6 +376,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--doctor-project-lock")
     parser.add_argument("--reconcile-project-lock")
     parser.add_argument("--abandon-uncertain-run")
+    parser.add_argument("--withdraw-unconfirmed-user-stop")
     parser.add_argument("--explicit-user-request", action="store_true")
     parser.add_argument("--reason")
     parser.add_argument(
@@ -495,6 +496,20 @@ def main(argv: Iterable[str] | None = None) -> int:
                 reason=str(args.reason),
             )
             result = {"ok": record.get("phase") == "ABANDONED_UNCERTAIN", "result": record}
+        elif args.withdraw_unconfirmed_user_stop:
+            if not args.explicit_user_request or not str(args.reason or "").strip():
+                raise RuntimeError("--withdraw-unconfirmed-user-stop requires --explicit-user-request and --reason")
+            store = BRIDGE.STATE.RunStore(args.state_root)
+            _, existing = store.load(args.withdraw_unconfirmed_user_stop)
+            record = store.withdraw_unconfirmed_user_stop(
+                args.withdraw_unconfirmed_user_stop,
+                authorization={"schema": "codex.chatgpt.user-stop-authorization/v1", "explicit_user_request": True,
+                               "mutation_may_have_occurred": True, "duplicate_risk_acknowledged": True,
+                               "run_id": existing.get("run_id"), "project_root": existing.get("project_root"),
+                               "session_id": existing.get("session_id"), "target_id": existing.get("current_target_id"),
+                               "conversation_url": existing.get("conversation_url"), "reason": str(args.reason)},
+            )
+            result = {"ok": record.get("phase") == "RECOVERING", "result": record}
         elif args.observe_run:
             result = {"ok": True, "result": observe_exact_run(args.observe_run, args.state_root)}
         elif args.recover_run or args.poll_run or args.show_run or args.retry_completed_cleanup:

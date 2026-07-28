@@ -464,8 +464,8 @@ def _recovery_marker_contract(record: dict[str, Any], manifest: dict[str, Any]) 
     identity = record.get("recovery_identity") or {}
     attachment_name = str(identity.get("attachment_name") or "").strip()
     if attachment_name:
-        expected = f"prompt-{record['run_id']}.txt"
-        if attachment_name != expected:
+        expected_names = STATE.accepted_recovery_prompt_alias_names(str(record["run_id"]), manifest)
+        if attachment_name not in expected_names:
             raise BridgeError("RECOVERY_IDENTITY_INVALID", "run-owned recovery attachment name is inconsistent")
         return {
             "kind": "run-owned-attachment",

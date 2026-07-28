@@ -165,7 +165,29 @@ class GoalSupervisor:
         try:
             fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError as exc:
-            raise GoalSupervisorError("GOAL_SUPERVISOR_ALREADY_ACTIVE", str(self.lock_path)) from exc
+            try:
+                owner_pid = int(json.loads(self.lock_path.read_text(encoding="utf-8")).get("pid") or 0)
+                if owner_pid <= 0:
+                    raise ProcessLookupError(owner_pid)
+                if os.name == "nt":
+                    import ctypes
+                    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, owner_pid)
+                    if not handle:
+                        raise ProcessLookupError(owner_pid)
+                    ctypes.windll.kernel32.CloseHandle(handle)
+                else:
+                    os.kill(owner_pid, 0)
+            except ProcessLookupError:
+                try:
+                    self.lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+                try:
+                    fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                except FileExistsError as retry_exc:
+                    raise GoalSupervisorError("GOAL_SUPERVISOR_ALREADY_ACTIVE", str(self.lock_path)) from retry_exc
+            except (OSError, ValueError, json.JSONDecodeError):
+                raise GoalSupervisorError("GOAL_SUPERVISOR_ALREADY_ACTIVE", str(self.lock_path)) from exc
         os.write(fd, json.dumps({"pid": os.getpid(), "created_at": utc_now()}).encode("utf-8"))
         return fd
 
