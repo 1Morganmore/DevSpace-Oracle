@@ -6355,7 +6355,7 @@ class RunStore:
             )
         recovery_identity = record.get("recovery_identity")
         if recovery_identity:
-            expected_name = f"prompt-{record['run_id']}.txt"
+            expected_names = accepted_recovery_prompt_alias_names(str(record["run_id"]), manifest)
             alias_path = Path(str(recovery_identity.get("attachment_path") or ""))
             try:
                 alias_path = alias_path.expanduser().resolve(strict=True)
@@ -6367,8 +6367,8 @@ class RunStore:
             if (
                 recovery_identity.get("schema") != "codex.chatgpt.recovery-identity/v1"
                 or str(recovery_identity.get("token") or "") != str(record["run_id"])
-                or str(recovery_identity.get("attachment_name") or "") != expected_name
-                or alias_path.name != expected_name
+                or str(recovery_identity.get("attachment_name") or "") not in expected_names
+                or alias_path.name not in expected_names
                 or not alias_path.is_file()
                 or alias_path.is_symlink()
                 or sha256_file(alias_path) != record["prompt_sha256"]
@@ -6443,6 +6443,15 @@ class RunStore:
                     "UNCERTAIN_RECLASSIFICATION_UNPROVEN",
                     "uncertain or exhausted recovery can be reclassified only with verified mutationAllowed=false evidence and no identity",
                 )
+            if user_attested:
+                try:
+                    evidence_path = Path(str((recovery_event or {}).get("evidence_path") or "")).expanduser().resolve(strict=True)
+                    evidence_path.relative_to(state_file.parent)
+                    evidence = read_json(evidence_path)
+                except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+                    raise StateError("USER_ATTESTED_NO_SUBMISSION_EVIDENCE_INVALID", "settlement needs immutable in-run evidence") from exc
+                if not ((recovery_event or {}).get("explicit_user_request") is True and str((recovery_event or {}).get("evidence_sha256") or "") == sha256_file(evidence_path) and evidence.get("schema") == "codex.chatgpt.user-attested-no-submission/v1" and evidence.get("explicit_user_request") is True and evidence.get("run_id") == record.get("run_id") and evidence.get("project_root") == record.get("project_root")):
+                    raise StateError("USER_ATTESTED_NO_SUBMISSION_EVIDENCE_INVALID", "settlement evidence does not bind this exact run")
         if (
             current == "SEND_REJECTED"
             and phase == "PREFLIGHTED"
