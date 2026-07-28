@@ -343,6 +343,22 @@ def test_live_exact_owner_is_not_reconciled(tmp_path: Path) -> None:
     assert store.paths(project.resolve(), first["run_id"]).lock_file.is_file()
 
 
+def test_explicit_user_attestation_settles_identityless_exhausted_run(tmp_path: Path) -> None:
+    state = load_state("chatgpt_agbrowse_state_user_attested_no_submission_test")
+    project = tmp_path / "project"; project.mkdir()
+    store = state.RunStore(tmp_path / "state")
+    run = store.create_run(project_root=project, manifest_path=make_manifest(tmp_path / "manifest.json"), agbrowse_contract={"schema": "contract", "version": "0.1.18"})
+    store.transition(run["run_dir"], "PREFLIGHTED")
+    store.transition(run["run_dir"], "LEASED", target_id="ROOT-TARGET")
+    store.transition(run["run_dir"], "SEND_STARTED")
+    store.transition(run["run_dir"], "SUBMISSION_UNCERTAIN_IDENTITY_MISSING")
+    evidence_path = Path(run["run_dir"]) / "user-attested-no-submission.json"
+    evidence_path.write_text(json.dumps({"schema": "codex.chatgpt.user-attested-no-submission/v1", "explicit_user_request": True, "run_id": run["run_id"], "project_root": str(project.resolve())}), encoding="utf-8")
+    store.transition(run["run_dir"], "SEND_REJECTED", recovery_event={"kind": "explicit-user-attested-no-submission", "explicit_user_request": True, "evidence_path": str(evidence_path), "evidence_sha256": state.sha256_file(evidence_path)})
+    cancelled = store.transition(run["run_dir"], "CANCELLED_PRE_SUBMISSION")
+    assert cancelled["phase"] == "CANCELLED_PRE_SUBMISSION"
+
+
 def test_dead_owner_after_send_boundary_stays_blocked_with_precise_state(tmp_path: Path) -> None:
     state = load_state("chatgpt_agbrowse_state_doctor_post_send_test")
     project = tmp_path / "project"
