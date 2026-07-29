@@ -319,6 +319,16 @@ def execute_run(
             STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
         return {"ok": False, "run_dir": str(layout.run_dir), "result": STATE.update_state(layout.state_path, status="failed")}
     STATE.write_transcript(layout)
+    pre_submit_rejection = STATE.settle_proven_pre_submit_rejection(layout.state_path)
+    if pre_submit_rejection is not None:
+        STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
+        return {
+            "ok": False,
+            "status": "pre_submit_rejected",
+            "safe_for_fresh_run": True,
+            "run_dir": str(layout.run_dir),
+            "result": pre_submit_rejection,
+        }
     # Once Oracle has been launched, a nonzero local exit (including the
     # browser response timeout) does not prove that the exact web session
     # failed or stopped. Preserve same-project ownership and require exact-slug
@@ -391,6 +401,17 @@ def _recover_run_locked(
 ) -> dict[str, Any]:
     directory = run_dir.expanduser().resolve(strict=True)
     state = STATE.load_state(directory / "state.json")
+    pre_submit_rejection = STATE.settle_proven_pre_submit_rejection(directory / "state.json")
+    if pre_submit_rejection is not None:
+        STATE.cleanup_owned_browser_temp(Path(str(pre_submit_rejection["artifacts"]["browser_temp"])))
+        return {
+            "ok": False,
+            "status": "pre_submit_rejected",
+            "safe_for_fresh_run": True,
+            "run_dir": str(directory),
+            "action": "none",
+            "result": pre_submit_rejection,
+        }
     historical_authority = historical_session_authority(directory, state)
     if (
         STATE.SESSION_AUTHORITY_RANK.get(historical_authority, -1)

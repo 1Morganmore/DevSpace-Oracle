@@ -93,6 +93,17 @@ def popen_for(code: int, output: bytes | None, captured: dict, events: list[str]
     return popen
 
 
+def duplicate_prompt_popen(command, **kwargs):
+    kwargs["stdout"].write(
+        b'oracle 0.16.1\nA session with the same prompt is already running '
+        b'(oracle-global-agent-instructio-f39cc47ba5). Reattach with '
+        b'"oracle session oracle-global-agent-instructio-f39cc47ba5" or rerun with '
+        b'--force to start another run.\n'
+    )
+    kwargs["stdout"].flush()
+    return Process(1, [])
+
+
 def test_dry_run_never_executes_and_has_no_file_flag(tmp_path: Path) -> None:
     runner = load_runner()
     calls = []
@@ -189,7 +200,11 @@ def test_pro_dry_run_uses_oracle_attachments_and_no_app_mention(tmp_path: Path) 
         str((tmp_path / "prompt.txt").resolve()),
         str((tmp_path / "packet.zip").resolve()),
     ]
-    assert prompt == "Read the attached prompt/instructions and all attached files, then complete the task."
+    assert prompt.startswith(
+        "Read the attached prompt/instructions and all attached files, then complete the task. "
+        "Task identity: oracle-pro-"
+    )
+    assert prompt.endswith(".")
     assert "@DevSpace" not in prompt
     assert all(item["sha256"] for item in result["attachments"])
 
@@ -486,6 +501,67 @@ def test_pro_attachment_change_blocks_before_submit(tmp_path: Path) -> None:
     assert result["result"]["status"] == "failed"
     assert result["result"]["session_authority"] == "pre_submit"
     assert launched == []
+
+
+def test_oracle_global_prompt_duplicate_is_proven_pre_submit_and_releases_project(tmp_path: Path) -> None:
+    runner = load_runner()
+    first = execute_run(
+        runner,
+        pro_manifest(tmp_path, run_id="a" * 32),
+        run_factory=version_runner,
+        popen_factory=duplicate_prompt_popen,
+    )
+    first_state = runner.STATE.load_state(Path(first["run_dir"]) / "state.json")
+    assert first["status"] == "pre_submit_rejected"
+    assert first["safe_for_fresh_run"] is True
+    assert first_state["session_authority"] == "pre_submit"
+    assert first_state["transport_status"] == "rejected_pre_submit"
+    assert first_state["pre_submit_rejection"]["code"] == "ORACLE_GLOBAL_PROMPT_DUPLICATE"
+    assert first_state["pre_submit_rejection"]["output_absent"] is True
+    assert runner.STATE.unresolved_project_sessions(
+        runner.STATE.load_manifest(pro_manifest(tmp_path)).run_root,
+        tmp_path,
+    ) == []
+
+    launches: list[list[str]] = []
+    second = execute_run(
+        runner,
+        pro_manifest(tmp_path, run_id="b" * 32),
+        run_factory=version_runner,
+        popen_factory=popen_for(0, b"answer", {}, launches),
+    )
+    assert second["ok"] is True
+    assert launches
+
+
+def test_recovery_settles_legacy_duplicate_prompt_lock_without_oracle_call(tmp_path: Path) -> None:
+    runner = load_runner()
+    initial = execute_run(
+        runner,
+        pro_manifest(tmp_path, run_id="a" * 32),
+        run_factory=version_runner,
+        popen_factory=duplicate_prompt_popen,
+    )
+    run_dir = Path(initial["run_dir"])
+    state_path = run_dir / "state.json"
+    legacy = json.loads(state_path.read_text(encoding="utf-8"))
+    legacy["session_authority"] = "submitted_unknown"
+    legacy["transport_status"] = "incomplete"
+    legacy.pop("pre_submit_rejection", None)
+    state_path.write_text(json.dumps(legacy), encoding="utf-8")
+    calls = []
+
+    recovered = runner.recover_run(
+        run_dir,
+        action="harvest",
+        oracle_command=["oracle"],
+        popen_factory=lambda *args, **kwargs: calls.append(True),
+    )
+    settled = runner.STATE.load_state(state_path)
+    assert recovered["status"] == "pre_submit_rejected"
+    assert recovered["safe_for_fresh_run"] is True
+    assert settled["session_authority"] == "pre_submit"
+    assert calls == []
 
 
 def test_recovery_captures_output_and_updates_state(tmp_path: Path) -> None:

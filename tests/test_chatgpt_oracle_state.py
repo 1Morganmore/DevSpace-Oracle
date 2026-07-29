@@ -87,14 +87,49 @@ def test_pro_manifest_is_attachment_only_and_hashes_exact_files(tmp_path: Path) 
         state.sha256_file(prompt.resolve()),
         state.sha256_file(packet.resolve()),
     )
-    assert state.composer_prompt(config) == (
-        "Read the attached prompt/instructions and all attached files, then complete the task."
+    composer = state.composer_prompt(config)
+    assert composer.startswith(
+        "Read the attached prompt/instructions and all attached files, then complete the task. "
+        "Task identity: oracle-pro-"
     )
-    assert "@DevSpace" not in state.composer_prompt(config)
+    assert composer.endswith(".")
+    assert len(composer.rsplit("oracle-pro-", 1)[1][:-1]) == 24
+    assert composer == state.composer_prompt(config)
+    assert str(tmp_path.resolve()) not in composer
+    assert "@DevSpace" not in composer
     layout = state.create_layout(config, run_id="20260725T151414Z-a3aeba967d99")
     payload = state.state_payload(config, layout, status="prepared", resolved_version="oracle 0.16.1")
     assert payload["transport"] == "pro-attachment-only"
     assert payload["attachments"][1]["sha256"] == state.sha256_file(packet.resolve())
+
+
+def test_pro_composer_identity_changes_with_project_or_attachment_bytes(tmp_path: Path) -> None:
+    state = load_state()
+    prompt = tmp_path / "prompt.txt"
+    packet = tmp_path / "packet.zip"
+    prompt.write_text("instructions", encoding="utf-8")
+    packet.write_bytes(b"first")
+
+    def load_for(root: Path):
+        root.mkdir(parents=True, exist_ok=True)
+        return state.load_manifest(manifest(
+            root,
+            prompt.resolve(),
+            transport="pro-attachment-only",
+            app_name=None,
+            model="gpt-5.5-pro",
+            thinking_time="heavy",
+            attachments=[str(prompt.resolve()), str(packet.resolve())],
+        ))
+
+    first = load_for(tmp_path / "project-one")
+    other_project = load_for(tmp_path / "project-two")
+    first_prompt = state.composer_prompt(first)
+    assert first_prompt != state.composer_prompt(other_project)
+
+    packet.write_bytes(b"second")
+    changed_packet = load_for(tmp_path / "project-one")
+    assert first_prompt != state.composer_prompt(changed_packet)
 
 
 @pytest.mark.parametrize(

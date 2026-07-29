@@ -62,6 +62,12 @@ SAFE_ORACLE_SWITCHES = {
     "--browser-hide-window",
 }
 SAFE_ORACLE_VALUE_OPTIONS = {"--heartbeat", "--timeout", "--zombie-timeout"}
+ORACLE_DUPLICATE_PROMPT_RE = re.compile(
+    r'A session with the same prompt is already running '
+    r'\((?P<locator>oracle-[a-z0-9-]+)\)\.\s*'
+    r'Reattach with "oracle session (?P=locator)" or rerun with --force to start another run\.',
+    re.IGNORECASE,
+)
 # Oracle copies a signed-in browser profile with rsync.  On hosts without
 # rsync the copy fails after launch, which historically produced a pre-submit
 # failure for every run.  Decide feasibility while loading the manifest so the
@@ -411,7 +417,16 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
 
 def composer_prompt(config: OracleConfig, mission_path: Path | None = None) -> str:
     if config.transport == "pro-attachment-only":
-        return "Read the attached prompt/instructions and all attached files, then complete the task."
+        identity_material = "\0".join((
+            str(config.project_root).casefold(),
+            config.mission_sha256,
+            *config.attachment_sha256s,
+        ))
+        identity = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()[:24]
+        return (
+            "Read the attached prompt/instructions and all attached files, then complete the task. "
+            f"Task identity: oracle-pro-{identity}."
+        )
     effective_path = config.mission_path if mission_path is None else mission_path
     # Keep the Windows npx.cmd prompt in one argument line. A literal newline
     # truncates the prompt after the app mention before Oracle receives it.
@@ -648,6 +663,52 @@ def output_is_nonempty(path: Path) -> bool:
         return bool(path.read_bytes().strip())
     except OSError:
         return False
+
+
+def proven_pre_submit_rejection(state_path: Path) -> dict[str, Any] | None:
+    """Return immutable evidence only for Oracle's own pre-submit prompt dedup rejection."""
+    state = load_state(state_path)
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    output = Path(str(artifacts.get("output") or ""))
+    if str(output) and output_is_nonempty(output):
+        return None
+    stdout = Path(str(artifacts.get("stdout") or ""))
+    try:
+        stdout_bytes = stdout.read_bytes()
+        stdout_text = stdout_bytes.decode("utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
+        return None
+    match = ORACLE_DUPLICATE_PROMPT_RE.search(stdout_text)
+    if match is None:
+        return None
+    return {
+        "schema": "codex.chatgpt.oracle-pre-submit-rejection/v1",
+        "code": "ORACLE_GLOBAL_PROMPT_DUPLICATE",
+        "oracle_locator": match.group("locator"),
+        "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
+        "output_absent": True,
+    }
+
+
+def settle_proven_pre_submit_rejection(state_path: Path) -> dict[str, Any] | None:
+    """Correct submitted_unknown only when exact Oracle stdout proves no send occurred."""
+    evidence = proven_pre_submit_rejection(state_path)
+    if evidence is None:
+        return None
+    payload = load_state(state_path)
+    payload.update({
+        "status": "attention_required",
+        "exit_code": int(payload.get("exit_code") or 1),
+        "session_authority": "pre_submit",
+        "terminal_harvested": False,
+        "artifact_sha256": None,
+        "transport_status": "rejected_pre_submit",
+        "task_outcome": "pending",
+        "task_outcome_reason": "oracle-global-prompt-duplicate",
+        "pre_submit_rejection": evidence,
+    })
+    write_json_atomic(state_path, payload)
+    return payload
 
 
 def resolve_lifecycle(state: dict[str, Any], *, output_is_present: bool | None = None) -> dict[str, Any]:
