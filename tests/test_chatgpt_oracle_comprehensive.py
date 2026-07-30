@@ -1020,6 +1020,249 @@ def test_default_recovery_rejects_a_nonparallel_child(tmp_path: Path) -> None:
     assert value["error"] == "ORACLE_RECOVERY_PARALLEL_PARENT_MISSING"
 
 
+def _pro_attachment_mission(module, tmp_path: Path, attachments: list[dict[str, str]]) -> Path:
+    mission = tmp_path / "pro-next.md"
+    mission.write_text(
+        "Pro decision mission\n\n"
+        "[PRO_ATTACHMENT_CONTRACT]\n"
+        + json.dumps({"schema": module.PRO_ATTACHMENT_SCHEMA, "attachments": attachments})
+        + "\n[/PRO_ATTACHMENT_CONTRACT]\n",
+        encoding="utf-8",
+    )
+    return mission
+
+
+def test_pro_attachment_contract_includes_only_declared_exact_packet(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    config["_parallel_parent_id"] = "b" * 64
+    packet = tmp_path / "packet.zip"
+    packet.write_bytes(b"exact packet")
+    source = _pro_attachment_mission(module, tmp_path, [{"path": str(packet), "sha256": module.sha(packet)}])
+    extras = module._declared_pro_attachments(config, source)
+    augmented = tmp_path / "augmented-mission.md"
+    augmented.write_text("bound pro mission", encoding="utf-8")
+    payload = json.loads(module._oracle_manifest(
+        config, augmented, tmp_path, "c" * 32, stage="pro", pro_attachments=extras
+    ).read_text(encoding="utf-8"))
+    assert payload["attachments"] == [str(augmented), str(packet.resolve())]
+
+
+def test_pro_attachment_contract_rejects_hash_mismatch_before_submission(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    packet = tmp_path / "packet.zip"
+    packet.write_bytes(b"exact packet")
+    source = _pro_attachment_mission(module, tmp_path, [{"path": str(packet), "sha256": "0" * 64}])
+    with pytest.raises(module.WorkflowError, match="hash mismatch"):
+        module._declared_pro_attachments(config, source)
+
+
+def test_pro_attachment_contract_rejects_outside_project_and_symlink(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    outside = tmp_path.parent / "outside-packet.zip"
+    outside.write_bytes(b"outside")
+    source = _pro_attachment_mission(module, tmp_path, [{"path": str(outside)}])
+    with pytest.raises(module.WorkflowError, match="outside project"):
+        module._declared_pro_attachments(config, source)
+
+    target = tmp_path / "packet.zip"
+    target.write_bytes(b"packet")
+    link = tmp_path / "packet-link.zip"
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+    source = _pro_attachment_mission(module, tmp_path, [{"path": str(link)}])
+    with pytest.raises(module.WorkflowError, match="non-symlink"):
+        module._declared_pro_attachments(config, source)
+
+
+def test_regular_manifest_never_attaches_pro_packets_and_legacy_pro_is_mission_only(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    config["_parallel_parent_id"] = "b" * 64
+    mission = tmp_path / "mission.md"
+    mission.write_text("mission", encoding="utf-8")
+    packet = tmp_path / "packet.zip"
+    packet.write_bytes(b"packet")
+    regular = json.loads(module._oracle_manifest(
+        config, mission, tmp_path / "regular", "c" * 32, stage="plan", pro_attachments=(packet,)
+    ).read_text(encoding="utf-8"))
+    assert "attachments" not in regular
+    assert regular["transport"] == "devspace"
+    legacy_pro = json.loads(module._oracle_manifest(
+        config, mission, tmp_path / "legacy-pro", "d" * 32, stage="pro"
+    ).read_text(encoding="utf-8"))
+    assert legacy_pro["attachments"] == [str(mission)]
+
+
+def test_plan_mission_teaches_declared_packet_contract(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    mission, _, _ = module._stage_mission(
+        config, "a" * 32, 0, "plan", config["initial_mission_path"], "b" * 32
+    )
+    text = mission.read_text(encoding="utf-8")
+    assert "[PRO_ATTACHMENT_AUTHORING_CONTRACT]" in text
+    assert module.PRO_ATTACHMENT_SCHEMA in text
+    assert "Canonical plan receipt status is PLAN_READY" in text
+
+
+def test_completed_plan_receipt_is_compatibly_normalized_only_when_fully_valid(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    output = tmp_path / "plan-output.md"
+    next_mission = tmp_path / "pro-next.md"
+    output.write_text("plan", encoding="utf-8")
+    next_mission.write_text("pro", encoding="utf-8")
+    receipt_path = tmp_path / "stage-result.json"
+    receipt = {
+        "schema": module.RECEIPT_SCHEMA,
+        "workflow_id": "a" * 32,
+        "stage": "plan",
+        "attempt_id": "b" * 32,
+        "input_mission_sha256": "c" * 64,
+        "status": "completed",
+        "output_path": str(output),
+        "output_sha256": module.sha(output),
+        "next_stage": "pro",
+        "next_mission_path": str(next_mission),
+        "next_mission_sha256": module.sha(next_mission),
+        "ready_for_next": True,
+        "blocker": "",
+    }
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    value = module._validate_receipt(
+        config, receipt_path, "a" * 32, "plan", "b" * 32, "c" * 64
+    )
+    assert value["_receipt_status_original"] == "completed"
+    assert value["_receipt_status_normalized"] == "PLAN_READY"
+    assert value["_next_mission"] == next_mission.resolve()
+
+    receipt["next_mission_sha256"] = "0" * 64
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    with pytest.raises(module.WorkflowError, match="next mission hash mismatch"):
+        module._validate_receipt(config, receipt_path, "a" * 32, "plan", "b" * 32, "c" * 64)
+
+
+def test_regular_stage_rejects_pro_attachment_contract_before_submission(tmp_path: Path) -> None:
+    module = load()
+    workflow = manifest(tmp_path)
+    config = module.load_manifest(workflow)
+    config["initial_mission_path"].write_text(
+        "regular plan\n[PRO_ATTACHMENT_CONTRACT]\n{}\n[/PRO_ATTACHMENT_CONTRACT]\n",
+        encoding="utf-8",
+    )
+    payload = json.loads(workflow.read_text(encoding="utf-8"))
+    payload["initial_mission_path"] = str(config["initial_mission_path"])
+    workflow.write_text(json.dumps(payload), encoding="utf-8")
+    calls = 0
+
+    def never_submit(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("regular stage contract must fail before submission")
+
+    with pytest.raises(module.WorkflowError, match="forbidden for regular DevSpace stages"):
+        module.run_workflow(workflow, oracle_execute=never_submit)
+    assert calls == 0
+
+
+def _pro_envelope(module, *, workflow_id: str = "a" * 32, output_text: str = "decision") -> dict[str, object]:
+    return {
+        "schema": module.PRO_OUTPUT_SCHEMA,
+        "workflow_id": workflow_id,
+        "stage": "pro",
+        "attempt_id": "b" * 32,
+        "input_mission_sha256": "c" * 64,
+        "status": "PASS",
+        "output_text": output_text,
+        "next_stage": "review",
+        "next_mission_text": "Review the exact Pro decision.",
+        "ready_for_next": True,
+        "blocker": "",
+    }
+
+
+def _malformed_pro_output(module, *, workflow_id: str = "a" * 32, truncated: bool = False) -> str:
+    value = _pro_envelope(module, workflow_id=workflow_id)
+    prefix = {
+        key: value[key]
+        for key in module.PRO_OUTPUT_PREFIX_KEYS
+    }
+    serialized = json.dumps(prefix, ensure_ascii=False, separators=(",", ":"))
+    nested = 'Decision body\\n\\n{\\n  "schema": "nested/v1",\\n  "verdict": "PASS"\\n}'
+    tail = (
+        ',"next_stage":"review","next_mission_text":"Review the exact Pro decision.",'
+        '"ready_for_next":true,"blocker":""}'
+    )
+    text = serialized[:-1] + ',"output_text":"' + nested + '"' + tail
+    return text[:-24] if truncated else text
+
+
+def test_malformed_nested_json_in_pro_output_is_recovered_with_audit_receipt(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    stage_dir = tmp_path / "pro-stage"
+    stage_dir.mkdir()
+    output = stage_dir / "oracle-output.md"
+    output.write_text(_malformed_pro_output(module), encoding="utf-8")
+    receipt = stage_dir / "stage-result.json"
+    module._materialize_pro_receipt(
+        config,
+        receipt,
+        "a" * 32,
+        "b" * 32,
+        "c" * 64,
+        {"output_path": str(output)},
+    )
+    value = json.loads(receipt.read_text(encoding="utf-8"))
+    recovered = value["pro_output_recovery"]
+    assert recovered["schema"] == module.PRO_OUTPUT_RECOVERY_SCHEMA
+    assert recovered["source_output_sha256"] == module.sha(output)
+    assert recovered["strict_error_position"] > 0
+    assert '"schema": "nested/v1"' in Path(value["output_path"]).read_text(encoding="utf-8")
+
+
+def test_malformed_pro_output_recovery_rejects_identity_mismatch(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    output = tmp_path / "oracle-output.md"
+    output.write_text(_malformed_pro_output(module, workflow_id="d" * 32), encoding="utf-8")
+    receipt = tmp_path / "stage-result.json"
+    with pytest.raises(module.WorkflowError, match="identity mismatch"):
+        module._materialize_pro_receipt(
+            config, receipt, "a" * 32, "b" * 32, "c" * 64, {"output_path": str(output)}
+        )
+    assert not receipt.exists()
+
+
+def test_truncated_malformed_pro_output_remains_fail_closed(tmp_path: Path) -> None:
+    module = load()
+    output = tmp_path / "oracle-output.md"
+    output.write_text(_malformed_pro_output(module, truncated=True), encoding="utf-8")
+    with pytest.raises(module.WorkflowError, match="ambiguous|incomplete"):
+        module._load_pro_envelope(output)
+
+
+def test_strict_pro_output_uses_original_parser_without_recovery_metadata(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    stage_dir = tmp_path / "strict-pro"
+    stage_dir.mkdir()
+    output = stage_dir / "oracle-output.md"
+    output.write_text(json.dumps(_pro_envelope(module), ensure_ascii=False), encoding="utf-8")
+    receipt = stage_dir / "stage-result.json"
+    module._materialize_pro_receipt(
+        config, receipt, "a" * 32, "b" * 32, "c" * 64, {"output_path": str(output)}
+    )
+    value = json.loads(receipt.read_text(encoding="utf-8"))
+    assert "pro_output_recovery" not in value
+    assert value["status"] == "PASS"
+
+
 def test_web_multi_preflight_failure_stays_prepared_and_rejects_changed_mission(tmp_path: Path) -> None:
     module = load()
     workflow_path = manifest(tmp_path)
