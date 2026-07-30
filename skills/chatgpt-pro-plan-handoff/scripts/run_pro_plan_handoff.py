@@ -605,6 +605,17 @@ class AgbrowseRuntime:
                 matches.append(str(record.get("run_id")))
         return sorted({item for item in matches if item})
 
+    def user_attested_no_submission_cancelled(self, manifest_path: Path) -> bool:
+        recovered = self.recover_run_ids(manifest_path)
+        if not recovered:
+            return False
+        for run_id in recovered:
+            _, record = self._find(run_id)
+            events = record.get("recovery_events") if isinstance(record.get("recovery_events"), list) else []
+            if not (record.get("phase") == "CANCELLED_PRE_SUBMISSION" and any(isinstance(item, Mapping) and item.get("kind") == "explicit-user-attested-no-submission-settled" for item in events)):
+                return False
+        return True
+
 
 class ProPlanHandoffDriver:
     def __init__(
@@ -1365,6 +1376,9 @@ class ProPlanHandoffDriver:
                 return load_mapping(result_capture), transcript_capture.read_text(encoding="utf-8"), manifest_path
             raise WorkflowError("STAGE_RUNTIME_CAPTURE_INVALID", str(capture_path))
         recovered = self.runtime.recover_run_ids(manifest_path)
+        cancelled = getattr(self.runtime, "user_attested_no_submission_cancelled", None)
+        if callable(cancelled) and cancelled(manifest_path):
+            recovered = []
         if len(recovered) > 1:
             raise WorkflowError("MULTIPLE_RUNTIME_RUNS_FOR_STAGE")
         if recovered:

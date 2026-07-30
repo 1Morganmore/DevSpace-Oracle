@@ -464,8 +464,8 @@ def _recovery_marker_contract(record: dict[str, Any], manifest: dict[str, Any]) 
     identity = record.get("recovery_identity") or {}
     attachment_name = str(identity.get("attachment_name") or "").strip()
     if attachment_name:
-        expected = f"prompt-{record['run_id']}.txt"
-        if attachment_name != expected:
+        expected_names = STATE.accepted_recovery_prompt_alias_names(str(record["run_id"]), manifest)
+        if attachment_name not in expected_names:
             raise BridgeError("RECOVERY_IDENTITY_INVALID", "run-owned recovery attachment name is inconsistent")
         return {
             "kind": "run-owned-attachment",
@@ -721,6 +721,19 @@ def _stop_confirmation_ref(snapshot: Mapping[str, Any]) -> str | None:
             {"match_count": len(matches)},
         )
     return matches[0]
+
+
+def _app_use_approval_refs(snapshot: Mapping[str, Any], app_name: str) -> tuple[str, str] | None:
+    """Return controls only when the exact named-app approval modal is present."""
+    text = json.dumps(snapshot, ensure_ascii=False)
+    if not any(item in text for item in (f"ChatGPT가 {app_name}을(를) 사용하도록 허용할까요?", f"Allow ChatGPT to use {app_name}?")):
+        return None
+    nodes = _snapshot_role_name_refs(snapshot)
+    remember = [n["ref"] for n in nodes if n["role"] == "checkbox" and n["name"] in {"이 대화에 기억", "Remember in this conversation"}]
+    allow = [n["ref"] for n in nodes if n["role"] == "button" and n["name"] in {"허용하기", "Allow"}]
+    if len(remember) != 1 or len(allow) != 1:
+        raise BridgeError("APP_USE_APPROVAL_CONTROL_AMBIGUOUS", "exact app approval controls are ambiguous", {"app_name": app_name, "remember_count": len(remember), "allow_count": len(allow)})
+    return remember[0], allow[0]
 
 
 def _matching_json_answer(page_text: str, contract: dict[str, Any]) -> str | None:
@@ -2790,6 +2803,30 @@ class Bridge:
                 {"parent_run_dir": str(parent_dir), "child_run_id": finalized.get("run_id"), "child_scan": drained.get("child_scan")},
             )
         return finalized
+
+    def settle_user_attested_no_submission(self, run_dir: str, *, reason: str) -> dict[str, Any]:
+        """Settle an identity-less uncertain send only after explicit user attestation."""
+        state_file, record = self.store.load(run_dir)
+        if record.get("phase") not in {"SUBMISSION_UNCERTAIN_IDENTITY_MISSING", "BLOCKED_RECOVERY_EXHAUSTED", "RECOVERING"}:
+            raise BridgeError("USER_ATTESTED_NO_SUBMISSION_PHASE_INVALID", "run is not an identity-less uncertain send")
+        if any(record.get(key) for key in ("session_id", "conversation_url", "submission_receipt", "result")):
+            raise BridgeError("USER_ATTESTED_NO_SUBMISSION_IDENTITY_PRESENT", "identified runs cannot be settled as no-submission")
+        owner = self.store._owner_observation(record)
+        if owner.get("same_process"):
+            raise BridgeError("USER_ATTESTED_NO_SUBMISSION_OWNER_ACTIVE", "live owner must stop before settlement")
+        reason = str(reason or "").strip()
+        if not reason or len(reason.encode("utf-8")) > 512:
+            raise BridgeError("USER_ATTESTED_NO_SUBMISSION_REASON_INVALID", "reason must be 1..512 UTF-8 bytes")
+        history = [item for item in (record.get("recovery_events") or []) if isinstance(item, Mapping) and str(item.get("kind") or "") in {"history-fingerprint-not-found", "history-adjudication-failed"}]
+        if not history:
+            raise BridgeError("USER_ATTESTED_NO_SUBMISSION_HISTORY_MISSING", "bounded exact history adjudication is required")
+        evidence = {"schema": "codex.chatgpt.user-attested-no-submission/v1", "explicit_user_request": True,
+                    "reason": reason, "run_id": record.get("run_id"), "project_root": record.get("project_root"),
+                    "phase": record.get("phase"), "identity": {"session_id": None, "target_id": record.get("current_target_id"), "conversation_url": None, "submission_receipt": None},
+                    "history_adjudication": {"kind": history[-1].get("kind"), "path": history[-1].get("adjudication_evidence"), "sha256": history[-1].get("adjudication_sha256"), "candidate_count": history[-1].get("candidate_count")}, "owner": owner}
+        descriptor = STATE.write_immutable_json_exclusive(state_file.parent / "user-attested-no-submission.json", evidence)
+        rejected = self.store.transition(run_dir, "SEND_REJECTED", recovery_event={"kind": "explicit-user-attested-no-submission", "explicit_user_request": True, "evidence_path": descriptor["path"], "evidence_sha256": descriptor["sha256"]})
+        return self.store.transition(run_dir, "CANCELLED_PRE_SUBMISSION", recovery_event={"kind": "explicit-user-attested-no-submission-settled", "evidence_path": descriptor["path"], "evidence_sha256": descriptor["sha256"], "prior_phase": rejected.get("phase")})
 
     def _parent_stop_final_tab_scan(self, parent_dir: Path) -> dict[str, Any]:
         parent_file, parent = self.store.load(parent_dir)
@@ -7247,6 +7284,28 @@ class Bridge:
             recovery_event={"kind": "poll-nonterminal-or-invalid", "evidence": evidence},
         )
 
+    def _approve_exact_app_use_if_present(self, run_dir: str, *, record: Mapping[str, Any], manifest: Mapping[str, Any], executable: str) -> dict[str, Any]:
+        app_name, target_id = str(manifest.get("chatgpt_app_name") or ""), str(record.get("current_target_id") or "")
+        if str(manifest.get("app_policy") or "") != "required" or not app_name or not target_id:
+            return {"state": "not-app-required"}
+        state_file, _ = self.store.load(run_dir)
+        env = bridge_env(dict(manifest))
+        switched, switch_evidence = self._run_recovery_command(run_dir=state_file.parent, name="app-use-approval-switch", command=[executable, "tab-switch", target_id, "--json"], env=env, timeout=60)
+        if switched.returncode:
+            return {"state": "switch-failed", "evidence": switch_evidence}
+        snapped, snapshot_evidence = self._run_recovery_command(run_dir=state_file.parent, name="app-use-approval-snapshot", command=[executable, "web-ai", "snapshot", "--vendor", "chatgpt", "--json"], env=env, timeout=60)
+        if snapped.returncode:
+            return {"state": "snapshot-failed", "evidence": snapshot_evidence}
+        refs = _app_use_approval_refs(_json_output(snapped.stdout), app_name)
+        if refs is None:
+            return {"state": "absent", "evidence": snapshot_evidence}
+        remember_ref, allow_ref = refs
+        checked, check_evidence = self._run_recovery_command(run_dir=state_file.parent, name="app-use-approval-remember", command=[executable, "check", remember_ref, "--json"], env=env, timeout=60)
+        allowed, allow_evidence = self._run_recovery_command(run_dir=state_file.parent, name="app-use-approval-allow", command=[executable, "click", allow_ref, "--json"], env=env, timeout=60)
+        if checked.returncode or allowed.returncode:
+            return {"state": "mutation-failed", "remember_evidence": check_evidence, "allow_evidence": allow_evidence}
+        return {"state": "approved", "app_name": app_name, "remember_evidence": check_evidence, "allow_evidence": allow_evidence}
+
     def poll(self, run_dir: str, *, timeout_seconds: int | None = None) -> dict[str, Any]:
         state_file, record = self.store.load(run_dir)
         self.store.verify_manifest(record)
@@ -7316,21 +7375,25 @@ class Bridge:
                         "RECOVERY_REQUIRED",
                         recovery_event={"kind": "poll-target-preflight-failed", "detail": exc.envelope()},
                     )
-            if (
-                observation.get("state") != "canonical"
-                or str(observation.get("url") or "") != STATE.canonical_conversation_url(saved_url)
-            ):
-                return self.store.transition(
-                    run_dir,
-                    "RECOVERY_REQUIRED",
-                    recovery_event={
-                        "kind": "poll-exact-target-drift",
-                        "observation": sanitize_evidence(observation),
-                        "tabs_evidence": tabs_evidence,
-                    },
-                )
-            if record.get("phase") in {"URL_BOUND", "RECOVERING"}:
-                record = self.store.transition(run_dir, "RESPONSE_IN_PROGRESS")
+                if (
+                    observation.get("state") != "canonical"
+                    or str(observation.get("url") or "") != STATE.canonical_conversation_url(saved_url)
+                ):
+                    return self.store.transition(
+                        run_dir,
+                        "RECOVERY_REQUIRED",
+                        recovery_event={
+                            "kind": "poll-exact-target-drift",
+                            "observation": sanitize_evidence(observation),
+                            "tabs_evidence": tabs_evidence,
+                        },
+                    )
+                if self.exact_url_only_poll:
+                    approval = self._approve_exact_app_use_if_present(run_dir, record=record, manifest=manifest, executable=executable)
+                    if approval.get("state") == "approved":
+                        record = self.store.transition(run_dir, "RESPONSE_IN_PROGRESS", recovery_event={"kind": "exact-app-use-approved", "approval": sanitize_evidence(approval)})
+                if record.get("phase") in {"URL_BOUND", "RECOVERING"}:
+                    record = self.store.transition(run_dir, "RESPONSE_IN_PROGRESS")
             if time.monotonic() >= deadline:
                 # Status/snapshot/text are active-target scoped in agbrowse
                 # 0.1.18 even when --url is supplied. Keep the full diagnostic
@@ -7712,6 +7775,9 @@ def build_parser() -> argparse.ArgumentParser:
     abandon.add_argument("--run", required=True)
     abandon.add_argument("--explicit-user-request", action="store_true")
     abandon.add_argument("--reason", required=True)
+    settle = sub.add_parser("settle-user-attested-no-submission")
+    settle.add_argument("--run", required=True)
+    settle.add_argument("--reason", required=True)
     confirm_stop = sub.add_parser("confirm-user-stop")
     confirm_stop.add_argument("--run", required=True)
     return parser
@@ -7743,6 +7809,8 @@ def main(argv: Iterable[str] | None = None) -> int:
                 explicit_user_request=args.explicit_user_request,
                 reason=args.reason,
             )
+        elif args.command == "settle-user-attested-no-submission":
+            result = bridge.settle_user_attested_no_submission(args.run, reason=args.reason)
         elif args.command == "confirm-user-stop":
             result = bridge.confirm_user_stop(args.run)
         else:

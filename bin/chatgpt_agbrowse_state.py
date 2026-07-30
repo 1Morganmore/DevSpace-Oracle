@@ -692,6 +692,19 @@ def _prompt_text(manifest: dict[str, Any]) -> str:
     return str(prompt_contract(manifest)["prompt_text"])
 
 
+def recovery_prompt_alias_name(run_id: str, manifest: dict[str, Any]) -> str:
+    """Return a readable but still run-owned recovery attachment name."""
+    correlation = manifest.get("workflow_correlation")
+    stage = str(correlation.get("stage") or "") if isinstance(correlation, dict) else ""
+    label = re.sub(r"[^a-z0-9]+", "-", stage.casefold()).strip("-")[:48]
+    return f"{label}-instructions-prompt-{run_id}.txt" if label else f"prompt-{run_id}.txt"
+
+
+def accepted_recovery_prompt_alias_names(run_id: str, manifest: dict[str, Any]) -> set[str]:
+    """Accept the deterministic alias as well as exact legacy run names."""
+    return {f"prompt-{run_id}.txt", recovery_prompt_alias_name(run_id, manifest)}
+
+
 def _requested_contract(manifest: dict[str, Any]) -> dict[str, Any]:
     mode = str(manifest.get("mode_label") or manifest.get("model") or "GPT-5.6")
     mode_key = mode.strip().casefold()
@@ -2142,6 +2155,31 @@ class RunStore:
         write_json_atomic(lock_file, lock)
         return record
 
+    def withdraw_unconfirmed_user_stop(self, run_dir: str | os.PathLike[str], *, authorization: dict[str, Any]) -> dict[str, Any]:
+        """Withdraw only a standalone recovering stop before provider confirmation."""
+        state_file, record = self.load(run_dir)
+        if str(record.get("record_kind") or "standalone") != "standalone":
+            raise StateError("USER_STOP_WITHDRAWAL_KIND_INVALID", "only standalone runs support stop withdrawal")
+        lock_file, lock = self._verify_lock(state_file, record)
+        stop = record.get("user_stop") if isinstance(record.get("user_stop"), dict) else {}
+        events = record.get("phase_events") if isinstance(record.get("phase_events"), list) else []
+        prior = events[-1] if events else {}
+        if (record.get("phase") != "USER_STOP_REQUESTED" or stop.get("status") != "requested"
+                or stop.get("confirmation") is not None or stop.get("provider_stop") is not None
+                or prior.get("from") != "RECOVERING" or prior.get("to") != "USER_STOP_REQUESTED"):
+            raise StateError("USER_STOP_WITHDRAWAL_NOT_SAFE", "withdrawal requires an unconfirmed RECOVERING stop")
+        clean = self._user_stop_authorization(record, authorization)
+        now = utc_now()
+        digest = sha256_bytes(json.dumps(clean, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        record["user_stop"] = {**stop, "status": "withdrawn-before-confirmation", "withdrawal_authorization": clean, "withdrawal_authorization_sha256": digest, "withdrawn_at": now}
+        record.setdefault("phase_events", []).append({"from": "USER_STOP_REQUESTED", "to": "RECOVERING", "at": now, "reason": "withdrawn-before-provider-stop"})
+        record.setdefault("recovery_events", []).append({"at": now, "kind": "explicit-user-stop-withdrawn-before-confirmation", "withdrawal_authorization_sha256": digest})
+        record.update({"phase": "RECOVERING", "phase_at": now, "updated_at": now, "terminal_block_code": None})
+        write_json_atomic(state_file, record)
+        lock.update({"phase": "RECOVERING", "heartbeat_at": now})
+        write_json_atomic(lock_file, lock)
+        return record
+
     def _begin_child_user_stop(self, state_file: Path, child: dict[str, Any], authorization: dict[str, Any]) -> dict[str, Any]:
         """Publish parent-owned stop intent before mutable parent/child state.
 
@@ -3183,7 +3221,7 @@ class RunStore:
             now = utc_now()
             manifest_hash = sha256_file(manifest_file)
             prompt_hash = str(prompt["prompt_sha256"])
-            alias_name = f"prompt-{run_id}.txt"
+            alias_name = recovery_prompt_alias_name(run_id, manifest)
             alias_path = child_paths.run_dir / alias_name
             owner = {**identity, "nonce": uuid.uuid4().hex, "epoch": int(time.time_ns())}
             record = {
@@ -6199,7 +6237,7 @@ class RunStore:
         recovery_identity: dict[str, Any] | None = None
         if prompt.get("transport") == "file":
             source = Path(str(prompt["prompt_file"]))
-            alias_name = f"prompt-{run_id}.txt"
+            alias_name = recovery_prompt_alias_name(run_id, manifest)
             alias_path = paths.run_dir / alias_name
             alias_path.parent.mkdir(parents=True, exist_ok=True)
             prompt_bytes = source.read_bytes()
@@ -6317,7 +6355,7 @@ class RunStore:
             )
         recovery_identity = record.get("recovery_identity")
         if recovery_identity:
-            expected_name = f"prompt-{record['run_id']}.txt"
+            expected_names = accepted_recovery_prompt_alias_names(str(record["run_id"]), manifest)
             alias_path = Path(str(recovery_identity.get("attachment_path") or ""))
             try:
                 alias_path = alias_path.expanduser().resolve(strict=True)
@@ -6329,8 +6367,8 @@ class RunStore:
             if (
                 recovery_identity.get("schema") != "codex.chatgpt.recovery-identity/v1"
                 or str(recovery_identity.get("token") or "") != str(record["run_id"])
-                or str(recovery_identity.get("attachment_name") or "") != expected_name
-                or alias_path.name != expected_name
+                or str(recovery_identity.get("attachment_name") or "") not in expected_names
+                or alias_path.name not in expected_names
                 or not alias_path.is_file()
                 or alias_path.is_symlink()
                 or sha256_file(alias_path) != record["prompt_sha256"]
@@ -6397,17 +6435,23 @@ class RunStore:
         current = str(record["phase"])
         if phase != current and phase not in ALLOWED_TRANSITIONS.get(current, set()):
             raise StateError("PHASE_TRANSITION_INVALID", f"cannot transition {current} -> {phase}")
-        if current in {"SUBMISSION_UNCERTAIN_IDENTITY_MISSING", "BLOCKED_RECOVERY_EXHAUSTED"} and phase == "SEND_REJECTED":
+        if current in {"SUBMISSION_UNCERTAIN_IDENTITY_MISSING", "BLOCKED_RECOVERY_EXHAUSTED", "RECOVERING"} and phase == "SEND_REJECTED":
             event_kind = str((recovery_event or {}).get("kind") or "")
-            if (
-                record.get("session_id")
-                or record.get("conversation_url")
-                or event_kind != "verified-mutation-disallowed-reclassification"
-            ):
+            user_attested = event_kind == "explicit-user-attested-no-submission"
+            if record.get("session_id") or record.get("conversation_url") or (not user_attested and event_kind != "verified-mutation-disallowed-reclassification"):
                 raise StateError(
                     "UNCERTAIN_RECLASSIFICATION_UNPROVEN",
                     "uncertain or exhausted recovery can be reclassified only with verified mutationAllowed=false evidence and no identity",
                 )
+            if user_attested:
+                try:
+                    evidence_path = Path(str((recovery_event or {}).get("evidence_path") or "")).expanduser().resolve(strict=True)
+                    evidence_path.relative_to(state_file.parent)
+                    evidence = read_json(evidence_path)
+                except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+                    raise StateError("USER_ATTESTED_NO_SUBMISSION_EVIDENCE_INVALID", "settlement needs immutable in-run evidence") from exc
+                if not ((recovery_event or {}).get("explicit_user_request") is True and str((recovery_event or {}).get("evidence_sha256") or "") == sha256_file(evidence_path) and evidence.get("schema") == "codex.chatgpt.user-attested-no-submission/v1" and evidence.get("explicit_user_request") is True and evidence.get("run_id") == record.get("run_id") and evidence.get("project_root") == record.get("project_root")):
+                    raise StateError("USER_ATTESTED_NO_SUBMISSION_EVIDENCE_INVALID", "settlement evidence does not bind this exact run")
         if (
             current == "SEND_REJECTED"
             and phase == "PREFLIGHTED"

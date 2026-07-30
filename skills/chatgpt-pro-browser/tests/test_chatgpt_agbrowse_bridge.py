@@ -27,6 +27,21 @@ SPEC.loader.exec_module(BRIDGE)
 PROMPT_FILE_HANDOFF = BRIDGE.STATE.PROMPT_FILE_HANDOFF
 
 
+def test_exact_app_approval_requires_one_named_modal_pair():
+    snapshot = {
+        "text": "Allow ChatGPT to use DevSpace?",
+        "snapshotNodes": [
+            {"ref": "remember", "role": "checkbox", "name": "Remember in this conversation"},
+            {"ref": "allow", "role": "button", "name": "Allow"},
+        ],
+    }
+    assert BRIDGE._app_use_approval_refs(snapshot, "DevSpace") == ("remember", "allow")
+    snapshot["snapshotNodes"].append({"ref": "allow-2", "role": "button", "name": "Allow"})
+    with pytest.raises(BRIDGE.BridgeError) as caught:
+        BRIDGE._app_use_approval_refs(snapshot, "DevSpace")
+    assert caught.value.code == "APP_USE_APPROVAL_CONTROL_AMBIGUOUS"
+
+
 def write_contract(path: Path):
     source = Path.home() / ".codex" / "contracts" / "agbrowse-0.1.18.json"
     path.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
