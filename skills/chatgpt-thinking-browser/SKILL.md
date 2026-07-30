@@ -19,6 +19,21 @@ sends plain `@DevSpace` plus the absolute mission path. It never attaches files,
 opens ChatGPT settings, inspects/selects/deletes an app, or falls back to
 agbrowse, Playwright, in-app Browser, or Chrome.
 
+`orchestrator` is a single web submission that carries the orchestrator
+ownership contract: that one GPT session owns delegated exploration, code
+authoring, tests, and internal parallel lanes, and its answer is the result.
+It has no stages, no stage receipts, and no local gate. Do not confuse it with
+comprehensive mode, which is a multi-stage workflow owned by
+`chatgpt-pro-plan-handoff` and `bin/chatgpt_oracle_comprehensive.py`.
+Comprehensive mode runs `orchestrator`-equivalent work as its implementation
+stage, so it contains this mode rather than competing with it.
+
+Choose `orchestrator` when the goal and approach are already settled and one
+authorized execution pass should finish the work at the lowest cost. Choose
+comprehensive mode when the plan itself needs an independent review stage,
+when Pro or Web Multi must participate, or when completion must be proven by a
+deterministic local gate.
+
 CodexPro is frozen for new work. Never mention it in a new mission, probe its
 endpoint, repair/register/delete its app, or use it as a DevSpace fallback.
 

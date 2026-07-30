@@ -25,5 +25,30 @@ Use this routing in the Codex global `AGENTS.md` after installing the package.
   independent throwaway copies of the signed-in Oracle profile, run in waves
   of at most five, and hand compact files to one merger.
 
+## Orchestrator versus comprehensive
+
+These two are often confused because both let the web GPT own implementation.
+They differ in structure, not in ambition.
+
+| | `orchestrator` (지휘) | comprehensive (종합) |
+|---|---|---|
+| Runner | `chatgpt_oracle_dispatch.py --mode orchestrator` | `chatgpt_oracle_comprehensive.py` |
+| Web submissions | one | several, one per stage |
+| Stage receipts | none | hash-bound per workflow/stage/attempt/input |
+| Independent review | no | yes, review repairs and finalizes the plan |
+| Pro / Web Multi stage | not available | selectable |
+| Completion | the answer itself | final web PASS plus zero-exit local gate |
+| Recovery unit | one run | workflow plus stage identity |
+
+Comprehensive mode runs orchestrator-equivalent work as its implementation
+stage, so it contains that mode rather than competing with it.
+
+Pick `orchestrator` when the goal and approach are settled and one authorized
+pass should finish the work at the lowest local and web cost. Pick comprehensive
+when the plan needs independent review, when Pro or Web Multi must participate,
+or when completion must be proven by a deterministic local gate. Do not hand-chain
+`orchestrator` submissions to imitate staging; same-project submissions stay
+serialized and the workflow engine owns stage identity and recovery.
+
 The package does not overwrite an existing user `AGENTS.md` automatically.
 Apply this block deliberately so unrelated personal rules are preserved.

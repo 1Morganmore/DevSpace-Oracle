@@ -18,6 +18,22 @@ plan -> optional Pro or Oracle Web Multi -> review
      -> implementation -> final web gate -> one local deterministic gate
 ```
 
+Comprehensive mode is a staged workflow, not a prompt variant. Its
+implementation stage carries the same orchestrator ownership contract used by
+the single-submission `orchestrator` mode in `chatgpt-thinking-browser`, so
+comprehensive mode contains that mode as one stage. The difference is
+structural: comprehensive mode makes several separate web submissions, each
+authoring the next mission and a hash-bound receipt, and it can only complete
+through a final web PASS plus a zero-exit local gate.
+
+Use single-submission `orchestrator` when the goal and approach are settled and
+one authorized pass should finish the work at the lowest cost. Use
+comprehensive mode when the plan needs an independent review stage, when Pro or
+Web Multi must participate, or when completion must be proven deterministically.
+Do not emulate comprehensive staging by chaining `orchestrator` submissions by
+hand; same-project web submissions stay serialized and the workflow engine owns
+stage identity and recovery.
+
 The manifest supplies absolute `project_root`, `workflow_dir`,
 `initial_mission_path`, stable `workflow_id`, and a nonempty
 `local_gate_command`. Every regular web stage writes its own next mission and a
