@@ -14,3 +14,6 @@ All new modes use Oracle:
 
 See [GLOBAL_CHATGPT_ROUTING.md](GLOBAL_CHATGPT_ROUTING.md) and the current
 mode skills for the authoritative prompt and transport contracts.
+
+The exact frozen inventory and its boundary are listed in
+[FROZEN_LEGACY.md](FROZEN_LEGACY.md).

@@ -1,6 +1,6 @@
 ---
 name: chatgpt-oracle-runtime
-description: Run new non-Pro ChatGPT work through Oracle plus the manually registered DevSpace workspace app, including direct modes, recovery, comprehensive relay, and genuine multi-session Web Multi-GPT.
+description: Current Oracle runtime path for new ChatGPT work: regular modes use the manually registered DevSpace app, Pro is attachment-only, and it includes recovery, comprehensive relay, and genuine multi-session Web Multi-GPT.
 ---
 
 # ChatGPT Oracle Runtime
@@ -9,8 +9,11 @@ This is the only active browser path for all new GPT work. CodexPro and
 agbrowse are frozen for exact legacy recovery only. Regular modes use DevSpace;
 Pro uses Oracle attachment transport without any app.
 
-Use `chatgpt_oracle_dispatch.py` for `direct`, `plan`, `review`, `edit`,
-`orchestrator`, `deep-research`, `manual`, and `pro` routing. Regular routes
+`chatgpt_oracle_dispatch.py` supports exactly `direct`, `plan`, `review`, `edit`,
+`orchestrator`, `deep-research`, `manual`, and `pro`. `manual` is a supported
+`manual-no-launch` profile, not a new submission route. `answer` in
+`chatgpt-question-designer` is the prompt-design alias for dispatcher mode
+`direct`, not a separate dispatcher key. Regular routes
 select `gpt-5.6` and send only `@DevSpace` plus the absolute project mission
 path and a compact exact-workspace guard. The web GPT must use only the exact
 project root recorded in that mission, read the mission and applicable

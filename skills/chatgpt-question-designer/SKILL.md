@@ -1,6 +1,6 @@
 ---
 name: chatgpt-question-designer
-description: Use before submitting GPT/browser questions for answering, designing, debugging, reviewing, planning, researching, synthesizing, editing, or orchestration. Selects an explicit purpose-specific cognitive profile without collapsing every task into adversarial review.
+description: Part of the current Oracle prompt-design path; use before submitting GPT/browser questions for answering, designing, debugging, reviewing, planning, researching, synthesizing, editing, or orchestration. Selects an explicit purpose-specific cognitive profile without collapsing every task into adversarial review.
 ---
 
 # ChatGPT Question Designer

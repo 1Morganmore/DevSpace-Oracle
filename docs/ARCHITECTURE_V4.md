@@ -10,3 +10,6 @@ authors the next semantic mission while the host validates immutable hashes and
 performs the final deterministic gate.
 
 See [GLOBAL_CHATGPT_ROUTING.md](GLOBAL_CHATGPT_ROUTING.md).
+
+The exact frozen inventory and its boundary are listed in
+[FROZEN_LEGACY.md](FROZEN_LEGACY.md).

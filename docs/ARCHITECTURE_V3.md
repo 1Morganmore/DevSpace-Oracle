@@ -9,3 +9,6 @@ implementation ownership remains inside the Oracle comprehensive workflow,
 with regular stages using DevSpace and Pro using Oracle attachment-only.
 
 See [GLOBAL_CHATGPT_ROUTING.md](GLOBAL_CHATGPT_ROUTING.md).
+
+The exact frozen inventory and its boundary are listed in
+[FROZEN_LEGACY.md](FROZEN_LEGACY.md).

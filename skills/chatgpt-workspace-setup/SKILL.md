@@ -1,6 +1,6 @@
 ---
 name: chatgpt-workspace-setup
-description: Perform the one-time, user-authorized DevSpace and Tailscale Funnel setup or read-only diagnosis for ChatGPT workspace access. Never use this during ordinary GPT runs and never automate ChatGPT settings or app selection.
+description: Part of the current Oracle path, perform the one-time, user-authorized DevSpace and Tailscale Funnel setup or read-only diagnosis for ChatGPT workspace access. Never use this during ordinary GPT runs and never automate ChatGPT settings or app selection.
 ---
 
 # ChatGPT Workspace Setup

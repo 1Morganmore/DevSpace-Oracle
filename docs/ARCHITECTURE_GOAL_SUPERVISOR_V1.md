@@ -9,3 +9,6 @@ use DevSpace; an optional Pro stage uses Oracle attachment-only. Existing
 persisted legacy state may still be recovered by its exact original runner.
 
 See [GLOBAL_CHATGPT_ROUTING.md](GLOBAL_CHATGPT_ROUTING.md).
+
+The exact frozen inventory and its boundary are listed in
+[FROZEN_LEGACY.md](FROZEN_LEGACY.md).

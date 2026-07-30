@@ -10,3 +10,6 @@
 
 최신 설치 및 모드 설명은 [README](../README.md)와
 [GLOBAL_CHATGPT_ROUTING.md](GLOBAL_CHATGPT_ROUTING.md)를 참고하세요.
+
+동결된 자산의 정확한 목록과 경계는
+[FROZEN_LEGACY.md](FROZEN_LEGACY.md)에 있습니다.

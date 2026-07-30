@@ -8,3 +8,6 @@ persisted legacy run must be observed, recovered, or cleaned up under its
 original immutable identity.
 
 See [GLOBAL_CHATGPT_ROUTING.md](GLOBAL_CHATGPT_ROUTING.md).
+
+The exact frozen inventory and its boundary are listed in
+[FROZEN_LEGACY.md](FROZEN_LEGACY.md).

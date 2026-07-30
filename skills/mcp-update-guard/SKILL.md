@@ -1,6 +1,6 @@
 ---
 name: mcp-update-guard
-description: Safely update MCP servers, shared harness helpers, Oracle GPT runners, global skills, plugins, and related automation while preserving local customizations.
+description: Part of the current Oracle automation path, safely update MCP servers, shared harness helpers, Oracle GPT runners, global skills, plugins, and related automation while preserving local customizations.
 ---
 
 # MCP update guard

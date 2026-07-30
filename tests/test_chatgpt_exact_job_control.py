@@ -380,7 +380,9 @@ def test_exact_url_timeout_records_long_running_app_work_instead_of_generic_reco
     def runner(command, env, timeout):
         assert global_lock.is_file(), "timeout diagnostic must retain exact-target browser ownership"
         commands.append(command)
-        if command[1:] == ["active-tab", "--json"]:
+        if command[1] == "tab-switch":
+            payload = {"ok": True}
+        elif command[1:] == ["active-tab", "--json"]:
             payload = {"targetId": "T-1", "url": "https://chatgpt.com/c/exact-job"}
         elif command[1:3] == ["web-ai", "sessions"]:
             payload = {"sessionId": "S-1", "targetId": "T-1", "conversationUrl": "https://chatgpt.com/c/exact-job", "status": "streaming", "trace": []}

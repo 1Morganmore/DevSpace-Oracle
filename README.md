@@ -10,9 +10,13 @@ Codex가 웹 ChatGPT에 계획·검토·수정·구현을 맡기고 로컬 토�
 - [DevSpace](https://github.com/Waishnav/devspace): 허용한 로컬
   작업공간의 읽기·쓰기·명령 실행 MCP
 
-과거 `agbrowse`·CodexPro 기반 실행 파일은 삭제하지 않았지만 새 질문에는
-쓰지 않습니다. 기존 실행의 정확한 복구와 롤백 증거로만 남습니다. 일반
-GPT부터 Pro까지 모든 신규 브라우저 실행은 Oracle 하나로 통일합니다.
+일반 GPT부터 Pro까지 **모든 신규 브라우저 실행은 Oracle 하나로 통일**합니다.
+과거 `agbrowse`·CodexPro 기반 파일은 삭제하지 않았지만 새 질문에는 절대
+쓰지 않습니다. 기존 실행의 정확한 복구와 롤백 증거로만 남아 있는
+**동결(frozen) 자산**입니다. 어떤 실패에서도 Oracle이
+agbrowse·CodexPro·in-app Browser·`@chrome`·Playwright/CDP로 자동
+전환하지 않습니다. 자세한 경계는
+[동결 자산 안내](docs/FROZEN_LEGACY.md)를 참고하세요.
 
 ## 왜 단순해졌나
 
@@ -30,17 +34,23 @@ ChatGPT 설정·앱 목록·권한·삭제·선택 UI를 자동화하지 않습�
 
 ## 모드
 
-| 모드 | 새 실행 경로 |
-|---|---|
-| 일반 GPT | Oracle direct + DevSpace |
-| 계획 | Oracle plan + DevSpace |
-| 검토 | Oracle review + DevSpace |
-| 수정 | Oracle edit + DevSpace |
-| 지휘 | Oracle orchestrator + DevSpace |
-| 심층 리서치 | Oracle browser research deep + DevSpace |
-| 종합모드 | Oracle plan → optional Pro/Multi → review → implementation → final web gate → local gate |
-| Web Multi-GPT | 독립 Oracle solver 2~25개, 최대 5개씩 wave, 별도 merger |
-| Pro | Oracle attachment-only, DevSpace 금지 |
+아래 9개가 현행 모드 전부입니다. 표에 없는 실행 경로는 동결 자산입니다.
+
+| 모드 | 호출 키워드 | 새 실행 경로 | 담당 스킬 |
+|---|---|---|---|
+| 일반 GPT | `GPT`, `지피티` | Oracle direct + DevSpace | `chatgpt-thinking-browser` |
+| 계획 | `계획` | Oracle plan + DevSpace | `chatgpt-thinking-browser` |
+| 검토 | `검토` | Oracle review + DevSpace | `chatgpt-thinking-browser` |
+| 수정 | `수정` | Oracle edit + DevSpace | `chatgpt-thinking-browser` |
+| 지휘 | `지휘모드` | Oracle orchestrator + DevSpace | `chatgpt-thinking-browser` |
+| 심층 리서치 | `심층 리서치` | Oracle browser research deep + DevSpace | `chatgpt-deep-research-browser` |
+| 종합모드 | `종합모드` | Oracle plan → optional Pro/Multi → review → implementation → final web gate → local gate | `chatgpt-pro-plan-handoff` |
+| Web Multi-GPT | `웹 멀티 GPT` | 독립 Oracle solver 2~25개, 최대 5개씩 wave, 별도 merger | `web-multi-gpt` |
+| Pro | `프로` | Oracle attachment-only, DevSpace 금지 | `chatgpt-pro-browser` |
+
+공통 실행기는 `chatgpt-oracle-runtime`이고, 질문 설계는
+`chatgpt-question-designer`, 최초 1회 연결 설정은
+`chatgpt-workspace-setup`이 담당합니다.
 
 Oracle 0.16.1의 통합 모델 선택 UI에 맞춘 해시 검증형 호환 패치를
 적용합니다. 일반·계획·검토·수정·지휘·종합·Web Multi는
@@ -201,8 +211,10 @@ DevSpace는 그 루트와 정확히 일치하는 작업공간만 재사용하거
 .\uninstall.ps1
 ```
 
-기존 agbrowse와 CodexPro 상태 파일은 삭제하지 않습니다. 신규 제출에는
-쓰지 않고 기존 실행의 정확한 복구 증거로만 보존합니다.
+`update.ps1`은 이 저장소가 배포하는 파일만 갱신합니다. 기본 실행은
+동결된 agbrowse·CodexPro 의존성을 설치하거나 갱신하지 않으며, 그 상태
+파일도 삭제하지 않습니다. 예전 실행을 복구해야 하는 컴퓨터에서만
+`-InstallLegacyRecoveryDependency`를 명시하세요.
 
 ## 보안과 라이선스
 
@@ -214,3 +226,22 @@ Funnel은 공개 endpoint이므로 Tailnet 정책·HTTPS·공개 범위를 확�
 
 자세한 제3자 고지는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md),
 보안 정책은 [SECURITY.md](SECURITY.md)를 참고하세요.
+
+## 문서 색인
+
+현행 문서만 읽으면 충분합니다.
+
+| 문서 | 내용 |
+|---|---|
+| [GLOBAL_CHATGPT_ROUTING.md](docs/GLOBAL_CHATGPT_ROUTING.md) | 전역 `AGENTS.md`에 넣을 모드 라우팅 규칙 |
+| [DEVSPACE_TAILSCALE_SETUP.md](docs/DEVSPACE_TAILSCALE_SETUP.md) | DevSpace + Tailscale Funnel 최초 1회 연결 |
+| [FROZEN_LEGACY.md](docs/FROZEN_LEGACY.md) | 동결된 agbrowse/CodexPro 자산의 정확한 경계 |
+| [RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) | 릴리스 전 게이트 |
+
+아래 파일들은 링크 호환을 위해 남긴 **레거시 스텁**입니다. 새 작업의
+지시로 사용하지 마세요.
+
+`ARCHITECTURE_V2.md`, `ARCHITECTURE_V3.md`, `ARCHITECTURE_V4.md`,
+`ARCHITECTURE_GOAL_SUPERVISOR_V1.md`,
+`codexpro-gpt55-orchestrator-runbook.md`,
+`gpt55-operation-mode-prompts.md`, `DCINSIDE_POST_KO.md`

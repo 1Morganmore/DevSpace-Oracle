@@ -10,3 +10,6 @@ Oracle. There is no Oracle-to-agbrowse fallback.
 See [GLOBAL_CHATGPT_ROUTING.md](GLOBAL_CHATGPT_ROUTING.md). Exact legacy
 recovery remains implemented by the frozen runners and their immutable state;
 new sends are rejected before browser mutation.
+
+The exact frozen inventory and its boundary are listed in
+[FROZEN_LEGACY.md](FROZEN_LEGACY.md).
