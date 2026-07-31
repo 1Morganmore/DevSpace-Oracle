@@ -284,7 +284,7 @@ def test_default_profile_copy_is_skipped_when_the_copy_dependency_is_absent(
     monkeypatch.setenv("ORACLE_BROWSER_PROFILE_DIR", str(seed.resolve()))
     monkeypatch.setattr(state.shutil, "which", lambda name: None)
 
-    config = state.load_manifest(manifest(tmp_path, mission.resolve()))
+    config = state.load_manifest(manifest(tmp_path, mission.resolve()), platform_name="posix")
 
     assert config.copy_profile is None
 
@@ -304,9 +304,42 @@ def test_default_profile_copy_is_used_when_the_copy_dependency_exists(
         lambda name: "/usr/bin/rsync" if name == state.PROFILE_COPY_DEPENDENCY else None,
     )
 
-    config = state.load_manifest(manifest(tmp_path, mission.resolve()))
+    config = state.load_manifest(manifest(tmp_path, mission.resolve()), platform_name="posix")
 
     assert config.copy_profile == seed.resolve()
+
+
+def test_windows_profile_copy_needs_no_external_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pinned Windows compat patch copies profiles without rsync.
+
+    Requiring rsync on `nt` silently removed per-run profile isolation and
+    blocked every parallel Web Multi lane before submission.
+    """
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    seed = tmp_path.parent / f"{tmp_path.name}-windows-profile"
+    seed.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("ORACLE_BROWSER_PROFILE_DIR", str(seed.resolve()))
+    monkeypatch.setattr(state.shutil, "which", lambda name: None)
+
+    assert state.profile_copy_is_supported(platform_name="nt") is True
+    assert state.profile_copy_is_supported(platform_name="posix") is False
+
+    default_config = state.load_manifest(
+        manifest(tmp_path, mission.resolve()), platform_name="nt"
+    )
+    assert default_config.copy_profile == seed.resolve()
+
+    explicit = tmp_path.parent / f"{tmp_path.name}-windows-explicit"
+    explicit.mkdir(parents=True, exist_ok=True)
+    explicit_config = state.load_manifest(
+        manifest(tmp_path, mission.resolve(), copy_profile=str(explicit.resolve())),
+        platform_name="nt",
+    )
+    assert explicit_config.copy_profile == explicit.resolve()
 
 
 def test_explicit_profile_copy_fails_closed_without_the_copy_dependency(
@@ -321,7 +354,8 @@ def test_explicit_profile_copy_fails_closed_without_the_copy_dependency(
 
     with pytest.raises(state.OracleStateError) as exc:
         state.load_manifest(
-            manifest(tmp_path, mission.resolve(), copy_profile=str(seed.resolve()))
+            manifest(tmp_path, mission.resolve(), copy_profile=str(seed.resolve())),
+            platform_name="posix",
         )
 
     assert exc.value.code == "COPY_PROFILE_DEPENDENCY_MISSING"

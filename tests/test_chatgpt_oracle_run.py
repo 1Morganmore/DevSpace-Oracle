@@ -161,7 +161,7 @@ def test_default_signed_in_profile_is_copied_per_run_and_window_is_hidden(
     assert result["argv"].count("--browser-hide-window") == 1
 
 
-def test_missing_copy_dependency_still_launches_without_profile_copy(
+def test_missing_posix_copy_dependency_still_launches_without_profile_copy(
     tmp_path: Path, monkeypatch
 ) -> None:
     runner = load_runner()
@@ -170,9 +170,33 @@ def test_missing_copy_dependency_still_launches_without_profile_copy(
     monkeypatch.setenv("ORACLE_BROWSER_PROFILE_DIR", str(profile.resolve()))
     monkeypatch.setattr(runner.STATE.shutil, "which", lambda name: None)
 
-    result = execute_run(runner, manifest(tmp_path), dry_run=True)
+    result = execute_run(
+        runner, manifest(tmp_path), dry_run=True, platform_name="posix"
+    )
 
     assert "--copy-profile" not in result["argv"]
+    assert result["argv"].count("--browser-hide-window") == 1
+
+
+def test_windows_lanes_keep_profile_isolation_without_rsync(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Windows uses the pinned native profile copy, so lanes stay isolated.
+
+    Probing PATH for rsync here dropped `--copy-profile` and blocked parallel
+    Web Multi lanes before submission.
+    """
+    runner = load_runner()
+    profile = tmp_path.parent / f"{tmp_path.name}-signed-in-oracle-profile"
+    profile.mkdir()
+    monkeypatch.setenv("ORACLE_BROWSER_PROFILE_DIR", str(profile.resolve()))
+    monkeypatch.setattr(runner.STATE.shutil, "which", lambda name: None)
+
+    result = execute_run(runner, manifest(tmp_path), dry_run=True, platform_name="nt")
+
+    assert result["argv"][result["argv"].index("--copy-profile") + 1] == str(
+        profile.resolve()
+    )
     assert result["argv"].count("--browser-hide-window") == 1
 
 

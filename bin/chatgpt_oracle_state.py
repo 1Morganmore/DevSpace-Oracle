@@ -68,16 +68,24 @@ ORACLE_DUPLICATE_PROMPT_RE = re.compile(
     r'Reattach with "oracle session (?P=locator)" or rerun with --force to start another run\.',
     re.IGNORECASE,
 )
-# Oracle copies a signed-in browser profile with rsync.  On hosts without
-# rsync the copy fails after launch, which historically produced a pre-submit
-# failure for every run.  Decide feasibility while loading the manifest so the
-# run either starts with a working isolation strategy or is rejected with an
-# actionable local error instead of a mid-launch crash.
+# Upstream Oracle copies a signed-in browser profile with rsync.  On POSIX
+# hosts without rsync the copy fails after launch, so feasibility is decided
+# while loading the manifest instead of crashing mid-launch.  The pinned
+# `oracle-compat/0.16.1/profileCopy.patch` replaces that spawn with Node's
+# built-in recursive copy on Windows, so `nt` needs no external dependency.
+# Checking PATH there would drop per-run profile isolation and block every
+# parallel Web Multi lane, which is the exact failure this guard must avoid.
 PROFILE_COPY_DEPENDENCY = "rsync"
+PROFILE_COPY_NATIVE_PLATFORMS = ("nt",)
 
 
-def profile_copy_is_supported(*, which_runner: Any = None) -> bool:
+def profile_copy_is_supported(
+    *, which_runner: Any = None, platform_name: str | None = None
+) -> bool:
     """Report whether Oracle can actually copy a signed-in browser profile."""
+    platform = os.name if platform_name is None else platform_name
+    if platform in PROFILE_COPY_NATIVE_PLATFORMS:
+        return True
     resolver = shutil.which if which_runner is None else which_runner
     return bool(resolver(PROFILE_COPY_DEPENDENCY))
 APP_RE = re.compile(r"^[^\r\n]+$")
@@ -352,7 +360,7 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
             raise OracleStateError("COPY_PROFILE_NOT_DIRECTORY", "copy_profile must identify a directory")
         if is_within(project_root, copy_profile) or is_within(copy_profile, project_root):
             raise OracleStateError("COPY_PROFILE_OVERLAPS_PROJECT", "copy_profile must be outside the DevSpace project")
-        if not profile_copy_is_supported():
+        if not profile_copy_is_supported(platform_name=platform_name):
             # Without the copy dependency Oracle aborts after launch, so every
             # run failed before reaching the composer.  Fall back to the
             # signed-in profile directly instead of forcing that failure.
