@@ -168,6 +168,10 @@ LIVE_SESSION_STATES = {"running", "streaming", "thinking", "active"}
 TERMINAL_SESSION_STATES = {
     "complete", "completed", "done", "finished", "failed", "error", "cancelled", "canceled",
 }
+RECOVERY_BINDING_UNAVAILABLE_MARKERS = (
+    'No live ChatGPT tab matched session',
+    'session metadata has no recoverable ChatGPT conversation URL',
+)
 
 
 def exact_session_state(path: Path) -> str | None:
@@ -177,6 +181,15 @@ def exact_session_state(path: Path) -> str | None:
         return None
     matches = SESSION_STATE_RE.findall(text)
     return matches[-1].casefold() if matches else None
+
+
+def exact_recovery_binding_unavailable(path: Path) -> bool:
+    """Return true only for Oracle's exact no-live-tab plus no-saved-URL proof."""
+    try:
+        value = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return all(marker in value for marker in RECOVERY_BINDING_UNAVAILABLE_MARKERS)
 
 
 def historical_session_authority(run_dir: Path, state: dict[str, Any]) -> str:
@@ -487,6 +500,30 @@ def _recover_run_locked(
     finally:
         STATE.cleanup_owned_browser_temp(recovery_browser_temp)
     observed_session_state = exact_session_state(stdout_path)
+    if exact_recovery_binding_unavailable(stdout_path):
+        if argv_output.exists():
+            argv_output.unlink()
+        updated = STATE.update_state(
+            directory / "state.json",
+            status="attention_required",
+            exit_code=exit_code,
+            session_authority="submitted_unknown",
+        )
+        return {
+            "ok": False,
+            "status": "recovery_binding_unavailable",
+            "run_dir": str(directory),
+            "action": action,
+            "exit_code": exit_code,
+            "exact_session_state": observed_session_state,
+            "result": updated,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "next_action": (
+                "restore the exact persisted ChatGPT conversation URL for this slug, "
+                "then resume exact-slug recovery; never replace or resubmit"
+            ),
+        }
     if observed_session_state in LIVE_SESSION_STATES:
         if argv_output.exists():
             argv_output.unlink()
@@ -719,6 +756,8 @@ def recover_run(
         deadline = time.monotonic() + settle_timeout_seconds
         while True:
             if result.get("ok"):
+                return result
+            if result.get("status") == "recovery_binding_unavailable":
                 return result
             if result.get("status") == "terminal_observed":
                 return _recover_run_locked(

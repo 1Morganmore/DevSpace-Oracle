@@ -78,6 +78,12 @@ The CLI keeps `--action live` inside one exact-slug recovery process for up to
 states keep the same live authority and project lock; they do not return every
 few minutes for Codex-side polling. When the exact session becomes terminal,
 the same process performs one harvest and returns once.
+If Oracle proves both that no live tab matches the exact slug and that its
+metadata has no recoverable canonical conversation URL, the runner returns
+`recovery_binding_unavailable` immediately instead of repeating that invariant
+failure for 90 minutes. It preserves `submitted_unknown` ownership; restore the
+exact persisted conversation URL before recovering the same slug, and never
+replace or resubmit it.
 
 Direct same-project runs hold one cross-process mutex for the entire Oracle
 process lifetime. A Multi parent owns that project mutex while authorized

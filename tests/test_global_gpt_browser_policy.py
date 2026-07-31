@@ -80,6 +80,9 @@ def test_oracle_recovery_is_exact_slug_no_restart_and_monotonic() -> None:
     assert "never downgrades durable COMPLETE" in value
     assert "exact persisted" in value
     assert "replacement" in value
+    runtime = text(ORACLE)
+    assert "`recovery_binding_unavailable`" in runtime
+    assert "restore the\nexact persisted conversation URL" in runtime
 
 
 def test_oracle_runs_use_isolated_profile_copies_and_owned_hidden_windows() -> None:

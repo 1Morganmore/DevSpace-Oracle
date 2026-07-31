@@ -832,6 +832,51 @@ def test_live_recovery_cli_defaults_to_one_ninety_minute_settle_process() -> Non
     assert args.settle_interval_seconds == 15
 
 
+def test_live_recovery_returns_once_when_exact_binding_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+    initial = execute_run(
+        runner,
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(7, None, {}, []),
+    )
+    run_dir = Path(initial["run_dir"])
+    calls: list[str] = []
+    sleeps: list[float] = []
+
+    def no_binding(command, **kwargs):
+        calls.append("live")
+        kwargs["stdout"].write(
+            b'No live ChatGPT tab matched session "exact". Attempting recovery by reopening the saved conversation URL.\n'
+            b'Cannot recover conversation: session metadata has no recoverable ChatGPT conversation URL.\n'
+        )
+        kwargs["stdout"].flush()
+        return Process(1, [])
+
+    result = runner.recover_run(
+        run_dir,
+        action="live",
+        oracle_command=["oracle"],
+        popen_factory=no_binding,
+        settle_timeout_seconds=5400,
+        settle_interval_seconds=15,
+        sleep=sleeps.append,
+    )
+
+    assert calls == ["live"]
+    assert sleeps == []
+    assert result["ok"] is False
+    assert result["status"] == "recovery_binding_unavailable"
+    assert result["exact_session_state"] is None
+    assert "never replace or resubmit" in result["next_action"]
+    assert result["result"]["status"] == "attention_required"
+    assert result["result"]["session_authority"] == "submitted_unknown"
+    assert result["result"]["terminal_harvested"] is False
+    assert not (run_dir / "recovery-live-candidate.md").exists()
+
+
 def test_unresolved_exact_session_blocks_different_parent_submission(tmp_path: Path) -> None:
     runner = load_runner()
     first_parent = "a" * 64
