@@ -226,7 +226,10 @@ def test_regular_runs_raise_the_answer_timeout_above_the_upstream_default(
     argv = result["argv"]
     assert argv.count("--browser-timeout") == 1
     assert argv[argv.index("--browser-timeout") + 1] == runner.STATE.DEFAULT_BROWSER_ANSWER_TIMEOUT
-    assert runner.STATE.DEFAULT_BROWSER_ANSWER_TIMEOUT == "45m"
+    # Upstream doubles the primary wait through its recovery pass, so 90m here
+    # is the documented ~180 minute effective ceiling.
+    assert runner.STATE.DEFAULT_BROWSER_ANSWER_TIMEOUT == "90m"
+    assert runner.STATE.DEFAULT_BROWSER_ANSWER_CEILING_MINUTES == 180
 
 
 def test_explicit_answer_timeout_is_honored_without_duplication(tmp_path: Path) -> None:

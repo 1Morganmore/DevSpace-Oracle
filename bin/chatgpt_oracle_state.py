@@ -75,9 +75,11 @@ SAFE_ORACLE_VALUE_OPTIONS = {
     "--browser-timeout",
     "--browser-recheck-timeout",
 }
-# Primary answer wait for a heavy non-Pro run.  Upstream doubles this through
-# its recovery pass, so the effective ceiling is roughly 90 minutes.
-DEFAULT_BROWSER_ANSWER_TIMEOUT = "45m"
+# Primary answer wait for a heavy non-Pro run.  Upstream grants its recovery
+# pass the same budget, so the effective ceiling is twice this value: 90m here
+# yields roughly 180 minutes total before a streaming answer is abandoned.
+DEFAULT_BROWSER_ANSWER_TIMEOUT = "90m"
+DEFAULT_BROWSER_ANSWER_CEILING_MINUTES = 180
 ORACLE_DUPLICATE_PROMPT_RE = re.compile(
     r'A session with the same prompt is already running '
     r'\((?P<locator>oracle-[a-z0-9-]+)\)\.\s*'
