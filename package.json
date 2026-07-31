@@ -2,7 +2,7 @@
   "name": "codexpro-automation",
   "version": "1.6.0",
   "private": false,
-  "description": "Unified Oracle ChatGPT workflows for Codex with DevSpace and frozen legacy recovery",
+  "description": "Windows orchestrator that delegates Codex planning, research, implementation, and review to web ChatGPT through Oracle and DevSpace",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -15,11 +15,14 @@
   "keywords": [
     "codex",
     "chatgpt",
-    "agbrowse",
     "oracle",
-    "automation"
+    "devspace",
+    "web-multi-gpt",
+    "automation",
+    "windows"
   ],
   "files": [
+    "README.en.md",
     "bin/chatgpt_agbrowse_bridge.py",
     "bin/chatgpt_agbrowse_composer.py",
     "bin/chatgpt_agbrowse_contract.py",

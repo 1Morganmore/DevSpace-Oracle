@@ -1,0 +1,201 @@
+# Codex Web GPT Orchestrator
+
+English | [한국어](README.md)
+
+A Windows automation toolkit that delegates planning, research, review, code
+changes, and testing to web ChatGPT while keeping local Codex work focused on
+transport, recovery, identity, hashes, and the final deterministic gate.
+
+It connects two upstream tools:
+
+- [Oracle](https://github.com/steipete/oracle) creates signed-in ChatGPT browser
+  sessions, selects the model, waits for the response, and harvests the result.
+- [DevSpace](https://github.com/Waishnav/devspace) lets ChatGPT read, edit, and
+  run commands only inside project roots approved by the user.
+
+Regular GPT runs send one line containing `@DevSpace` and the absolute UTF-8
+mission-file path. Pro runs do not use DevSpace; they use exact, hash-frozen
+attachments through Oracle.
+
+## What it provides
+
+- Web GPT can inspect, change, and test a local project.
+- Direct, plan, review, edit, orchestrator, deep-research, and Pro modes.
+- Genuine Web Multi-GPT with independent ChatGPT sessions.
+- Comprehensive workflows from planning through implementation and final gate.
+- Per-project exclusion, immutable mission and attachment hashes, and exact
+  session recovery.
+- Isolated browser profiles so different projects can run concurrently.
+- Automatic archive lifecycle for conversations owned by Oracle.
+- Install receipts, backups, rollback, and uninstall support.
+
+## How it works
+
+```text
+User request
+    -> Codex writes a UTF-8 mission and manifest
+    -> Oracle starts a signed-in ChatGPT session
+       |-- regular GPT: @DevSpace + mission path
+       `-- Pro: mission + hash-frozen attachments
+    -> web GPT explores, plans, edits, and tests
+    -> Oracle saves the answer as a local artifact
+    -> Codex checks identity, hashes, and one deterministic final gate
+```
+
+Host state and ChatGPT output are stored outside DevSpace projects under
+`%USERPROFILE%\.codex\state\chatgpt-oracle`.
+
+## Modes and English invocation names
+
+| Mode | CLI / natural-language name | Purpose | Transport |
+|---|---|---|---|
+| Regular GPT | `direct` / GPT | Questions, analysis, and small tasks | Oracle + DevSpace |
+| Plan | `plan` / plan | Design before implementation | Oracle + DevSpace, read-only |
+| Review | `review` / review | Independent code or plan review | Oracle + DevSpace, read-only |
+| Edit | `edit` / edit | Scoped changes and tests | Oracle + DevSpace |
+| Orchestrator | `orchestrator` / orchestrator | One GPT completes an already-scoped task | Oracle + DevSpace |
+| Deep Research | `deep-research` / deep research | Public research plus project evidence | Oracle Deep Research + DevSpace |
+| Web Multi-GPT | Web Multi-GPT | Independent parallel perspectives and merger | 2-25 Oracle sessions |
+| Comprehensive | comprehensive mode | Plan, optional Pro/Multi, review, implementation, gate | Staged Oracle workflow |
+| Pro | `pro` / Pro | Highest-strength judgment and design review | Oracle attachments only |
+
+Orchestrator mode is a single web submission. Comprehensive mode contains an
+orchestrator-equivalent implementation stage plus planning, independent review,
+optional Pro or Web Multi-GPT, and final gates.
+
+## Requirements
+
+- Windows 11
+- Python
+- Node.js 22.19 or later and earlier than 27
+- Git for Windows / Git Bash
+- Tailscale
+- An Oracle browser profile signed in to ChatGPT
+- One manually registered DevSpace app in ChatGPT Developer Mode
+
+The validated combination is Oracle `0.16.1` and DevSpace `1.0.4`. The installer
+applies Windows compatibility patches only when exact upstream file hashes
+match.
+
+## Install
+
+```powershell
+git clone https://github.com/ventianima-lab/codexpro-automation.git
+cd codexpro-automation
+.\install.ps1 -WhatIf
+.\install.ps1
+```
+
+The installer backs up replaced files and writes durable install receipts under
+`%USERPROFILE%\.codex\receipts`.
+
+## One-time DevSpace setup
+
+You do not install one ChatGPT app per project. Register one DevSpace app and
+add each permitted project as another `--root` argument.
+
+```powershell
+python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py setup `
+  --root C:\projects\alpha `
+  --root C:\projects\beta `
+  --hostname your-device.your-tailnet.ts.net `
+  --public-port 8443 `
+  --dry-run
+```
+
+Review the output, then replace `--dry-run` with `--apply`. In ChatGPT Developer
+Mode, manually register one app:
+
+- Name: `DevSpace`
+- URL: `https://your-device.your-tailnet.ts.net:8443/mcp`
+
+After owner approval, the automation does not inspect or manipulate ChatGPT
+settings, app lists, permissions, deletion, or picker UI per task. Adding a new
+project only changes the DevSpace allowed roots.
+
+See [DevSpace and Tailscale setup](docs/DEVSPACE_TAILSCALE_SETUP.md) for the
+complete procedure.
+
+## Regular GPT example
+
+Create a UTF-8 mission file inside the project, then dry-run the manifest:
+
+```powershell
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
+  --mode orchestrator `
+  --project-root C:\project `
+  --mission-path C:\project\mission.md `
+  --manifest-output C:\project\.ai-bridge\oracle.json `
+  --reasoning-level "Very High" `
+  --dry-run
+```
+
+Remove `--dry-run` only when the run is authorized.
+
+## Pro example
+
+Pro uses no project app. It attaches the exact mission and evidence files with
+frozen hashes.
+
+```powershell
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
+  --mode pro `
+  --project-root C:\project `
+  --mission-path C:\project\pro.md `
+  --attachment C:\project\evidence.zip `
+  --manifest-output C:\project\.ai-bridge\pro.json `
+  --dry-run
+```
+
+## Execution and recovery rules
+
+- One active or uncertain Oracle workflow is allowed per normalized project.
+- Different projects can run concurrently through isolated profiles.
+- Web Multi-GPT runs child sessions in waves of at most five.
+- Heavy non-Pro work receives about 90 minutes initially and another 90 minutes
+  for exact recovery, for an effective ceiling of roughly 180 minutes.
+- A browser or local-process exit is not proof that the web task failed.
+- Recovery uses only the persisted Oracle slug and exact conversation URL. It
+  never resubmits the task.
+- Completion requires Oracle exit code zero and a fresh, nonempty durable output.
+
+Recover one exact run with:
+
+```powershell
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_run.py" recover `
+  --run-dir C:\exact\oracle-run `
+  --action harvest
+```
+
+## Update, rollback, and uninstall
+
+```powershell
+.\install.ps1 -WhatIf
+.\install.ps1
+.\rollback.ps1
+.\uninstall.ps1
+```
+
+Use `-InstallLegacyRecoveryDependency` only on a machine that must recover an
+already persisted legacy run.
+
+## Documentation
+
+- [Global ChatGPT routing and mode selection](docs/GLOBAL_CHATGPT_ROUTING.md)
+- [DevSpace and Tailscale setup](docs/DEVSPACE_TAILSCALE_SETUP.md)
+- [Technical changelog](docs/CHANGELOG.md)
+- [Frozen legacy recovery assets](docs/FROZEN_LEGACY.md)
+- [Release checklist](docs/RELEASE_CHECKLIST.md)
+- [Security policy](SECURITY.md)
+- [Third-party notices](THIRD_PARTY_NOTICES.md)
+
+## Legacy compatibility
+
+The former CodexPro and agbrowse files remain only for exact recovery of already
+persisted legacy runs. They are not a new-work route or fallback. See
+[Frozen legacy assets](docs/FROZEN_LEGACY.md) for the inventory.
+
+## License
+
+MIT License. Third-party copyrights and licenses for Oracle, DevSpace, and other
+components are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -124,7 +124,18 @@ def test_readme_declares_manual_one_time_registration_not_ui_automation() -> Non
     value = text(ROOT / "README.md")
     assert "최초 한 번 수동 등록" in value
     assert "ChatGPT 설정·앱 목록·권한·삭제·선택 UI를 자동화하지 않습니다" in value
-    assert "기존 실행의 정확한 복구" in value
+    assert "실행 신원으로 정확히 복구" in value
+
+
+def test_english_readme_maps_modes_to_the_same_oracle_routes() -> None:
+    value = text(ROOT / "README.en.md")
+    assert "Oracle + DevSpace" in value
+    assert "`orchestrator` / orchestrator" in value
+    assert "`deep-research` / deep research" in value
+    assert "comprehensive mode" in value
+    assert "Web Multi-GPT" in value
+    assert "Oracle attachments only" in value
+    assert "never resubmits the task" in value
 
 
 def test_question_designer_cannot_route_new_work_through_codexpro_or_legacy_sessions() -> None:

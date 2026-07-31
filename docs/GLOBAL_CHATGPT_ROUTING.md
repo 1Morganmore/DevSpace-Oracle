@@ -1,5 +1,10 @@
 # Global ChatGPT routing
 
+The supported English names are `GPT`/`direct`, `plan`, `review`, `edit`,
+`orchestrator`, `deep research`/`deep-research`, `Web Multi-GPT`,
+`comprehensive mode`, and `Pro`. Korean names documented in the main README map
+to the same runners; language never selects a different backend.
+
 Use this routing in the Codex global `AGENTS.md` after installing the package.
 
 - New regular ChatGPT work, including direct, plan, review, edit,
