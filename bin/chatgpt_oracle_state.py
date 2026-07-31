@@ -61,7 +61,23 @@ SAFE_ORACLE_SWITCHES = {
     "--verbose",
     "--browser-hide-window",
 }
-SAFE_ORACLE_VALUE_OPTIONS = {"--heartbeat", "--timeout", "--zombie-timeout"}
+SAFE_ORACLE_VALUE_OPTIONS = {
+    "--heartbeat",
+    "--timeout",
+    "--zombie-timeout",
+    # Upstream waits `--browser-timeout` for the answer and then grants the
+    # recovery pass the same budget, so the effective ceiling is twice this
+    # value.  Oracle's default is 20m, which caps a heavy run at 40m even
+    # though its own guidance says a run may take about an hour.  Measured
+    # GPT-5.6 Extra High DevSpace lanes finished at 24m and 27m only because
+    # the recovery pass rescued them, and two lanes were cut at exactly 40m
+    # while still streaming.  Allow the caller to raise the ceiling.
+    "--browser-timeout",
+    "--browser-recheck-timeout",
+}
+# Primary answer wait for a heavy non-Pro run.  Upstream doubles this through
+# its recovery pass, so the effective ceiling is roughly 90 minutes.
+DEFAULT_BROWSER_ANSWER_TIMEOUT = "45m"
 ORACLE_DUPLICATE_PROMPT_RE = re.compile(
     r'A session with the same prompt is already running '
     r'\((?P<locator>oracle-[a-z0-9-]+)\)\.\s*'

@@ -71,6 +71,19 @@ class OracleRunError(RuntimeError):
 
 def build_oracle_argv(config, layout, prompt: str) -> list[str]:
     lifecycle_args = [] if "--browser-hide-window" in config.oracle_args else ["--browser-hide-window"]
+    # Upstream waits `--browser-timeout` for the answer and then gives its
+    # recovery pass the same budget, so the effective ceiling is twice this
+    # value.  Oracle's 20m default cut heavy Extra High DevSpace lanes at
+    # exactly 40m while they were still streaming.  Pro keeps upstream timing.
+    answer_timeout_args = (
+        []
+        if config.transport == "pro-attachment-only"
+        or any(
+            item == "--browser-timeout" or item.startswith("--browser-timeout=")
+            for item in config.oracle_args
+        )
+        else ["--browser-timeout", STATE.DEFAULT_BROWSER_ANSWER_TIMEOUT]
+    )
     command = [
         *config.oracle_command,
         "--engine", "browser",
@@ -80,6 +93,7 @@ def build_oracle_argv(config, layout, prompt: str) -> list[str]:
         "--browser-research", config.research,
         "--browser-archive", config.archive,
         *lifecycle_args,
+        *answer_timeout_args,
         *config.oracle_args,
         "--slug", layout.slug,
         "--prompt", prompt,

@@ -210,6 +210,47 @@ def test_explicit_hide_window_arg_is_safe_and_not_duplicated(tmp_path: Path) -> 
     assert result["argv"].count("--browser-hide-window") == 1
 
 
+def test_regular_runs_raise_the_answer_timeout_above_the_upstream_default(
+    tmp_path: Path,
+) -> None:
+    """Heavy Extra High lanes must not be cut while still streaming.
+
+    Upstream waits `--browser-timeout` and then grants its recovery pass the
+    same budget, so its 20m default capped real runs at exactly 40m. Measured
+    lanes finished at 24m and 27m, and two were cut at 40m mid-stream.
+    """
+    runner = load_runner()
+
+    result = execute_run(runner, manifest(tmp_path), dry_run=True)
+
+    argv = result["argv"]
+    assert argv.count("--browser-timeout") == 1
+    assert argv[argv.index("--browser-timeout") + 1] == runner.STATE.DEFAULT_BROWSER_ANSWER_TIMEOUT
+    assert runner.STATE.DEFAULT_BROWSER_ANSWER_TIMEOUT == "45m"
+
+
+def test_explicit_answer_timeout_is_honored_without_duplication(tmp_path: Path) -> None:
+    runner = load_runner()
+
+    result = execute_run(
+        runner,
+        manifest(tmp_path, oracle_args=["--browser-timeout", "70m"]),
+        dry_run=True,
+    )
+
+    argv = result["argv"]
+    assert argv.count("--browser-timeout") == 1
+    assert argv[argv.index("--browser-timeout") + 1] == "70m"
+
+
+def test_pro_keeps_upstream_answer_timing(tmp_path: Path) -> None:
+    runner = load_runner()
+
+    result = execute_run(runner, pro_manifest(tmp_path), dry_run=True)
+
+    assert "--browser-timeout" not in result["argv"]
+
+
 def test_pro_dry_run_uses_oracle_attachments_and_no_app_mention(tmp_path: Path) -> None:
     runner = load_runner()
     result = execute_run(runner, pro_manifest(tmp_path), dry_run=True)
