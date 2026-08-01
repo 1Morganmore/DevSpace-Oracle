@@ -8,7 +8,11 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-FOCUSED = ["tests/test_release_packaging.py", "tests/test_install_lifecycle.py"]
+FOCUSED = [
+    "tests/test_global_gpt_browser_policy.py",
+    "tests/test_release_packaging.py",
+    "tests/test_install_lifecycle.py",
+]
 
 
 def main() -> int:

@@ -27,6 +27,7 @@ FAST_TARGETS = [
     "tests/test_chatgpt_oracle_incident.py",
     "tests/test_chatgpt_oracle_compat.py",
     "tests/test_chatgpt_oracle_profiles.py",
+    "tests/test_global_gpt_browser_policy.py",
     "tests/test_release_packaging.py",
 ]
 

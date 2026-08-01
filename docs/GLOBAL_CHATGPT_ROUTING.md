@@ -30,6 +30,19 @@ Use this routing in the Codex global `AGENTS.md` after installing the package.
   independent throwaway copies of the signed-in Oracle profile, run in waves
   of at most five, and hand compact files to one merger.
 
+## Standalone Pro versus comprehensive
+
+`chatgpt-pro-browser` is the visible standalone Pro skill. It submits one
+attachment-only Oracle Pro session, saves the durable result, returns it to the
+calling Codex task, and stops. It never starts implementation or another web
+stage automatically.
+
+`chatgpt-pro-plan-handoff` owns comprehensive mode. Only that staged runner may
+place an optional Pro decision between plan and review and continue afterward
+to implementation and gates. Natural-language `Pro` or `GPT Pro` requests route
+to the standalone skill; explicit comprehensive-mode requests route to the
+handoff skill.
+
 ## Orchestrator versus comprehensive
 
 These two are often confused because both let the web GPT own implementation.

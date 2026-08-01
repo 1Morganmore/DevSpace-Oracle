@@ -156,4 +156,13 @@ def test_agent_metadata_exposes_oracle_active_routes() -> None:
     pro = text(ROOT / "skills" / "chatgpt-pro-browser" / "agents" / "openai.yaml")
     assert "Oracle and DevSpace" in thinking
     assert "parallel Oracle GPT sessions" in multi
-    assert "attachment-only Pro through Oracle" in pro
+    assert "one-shot attachment-only Pro review through Oracle" in pro
+    assert "allow_implicit_invocation: true" in pro
+
+
+def test_standalone_pro_never_transitions_into_comprehensive_implementation() -> None:
+    pro = text(PRO)
+    assert "standalone, one-shot Pro route" in pro
+    assert "returns that durable Pro result to Codex\nand stops" in pro
+    assert "never starts a review-to-implementation chain" in pro
+    assert "If the user asks for comprehensive mode, use `chatgpt-pro-plan-handoff`" in pro

@@ -1,6 +1,6 @@
 interface:
   display_name: "ChatGPT Pro Browser"
-  short_description: "Run attachment-only Pro through Oracle"
+  short_description: "Run one-shot attachment-only Pro review through Oracle"
   default_prompt: "$chatgpt-pro-browser C:\\project\\pro-mission.md C:\\project\\packet.zip"
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true

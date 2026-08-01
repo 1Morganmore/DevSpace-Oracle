@@ -206,8 +206,17 @@ def test_temp_codex_home_install_and_rollback_is_exact_inverse() -> None:
         receipts = sorted((codex_home / 'receipts').glob('codexpro-automation-*.json'))
         assert len(receipts) == 1
         created = codex_home / 'bin' / 'chatgpt_agbrowse_composer.py'
+        installed_pro_skill = codex_home / 'skills' / 'chatgpt-pro-browser' / 'SKILL.md'
+        installed_pro_metadata = codex_home / 'skills' / 'chatgpt-pro-browser' / 'agents' / 'openai.yaml'
         assert overwritten.read_bytes() != original
         assert created.is_file()
+        assert installed_pro_skill.read_bytes() == (
+            ROOT / 'skills' / 'chatgpt-pro-browser' / 'SKILL.md'
+        ).read_bytes()
+        assert installed_pro_metadata.read_bytes() == (
+            ROOT / 'skills' / 'chatgpt-pro-browser' / 'agents' / 'openai.yaml'
+        ).read_bytes()
+        assert b'allow_implicit_invocation: true' in installed_pro_metadata.read_bytes()
 
         rolled_back = run_powershell(
             '-File', str(ROOT / 'rollback.ps1'),
@@ -217,6 +226,8 @@ def test_temp_codex_home_install_and_rollback_is_exact_inverse() -> None:
         assert rolled_back.returncode == 0, rolled_back.stderr
         assert overwritten.read_bytes() == original
         assert not created.exists()
+        assert not installed_pro_skill.exists()
+        assert not installed_pro_metadata.exists()
         assert '"status":  "COMPLETE"' in rolled_back.stdout
 
 

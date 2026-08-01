@@ -61,11 +61,15 @@ Codex가 해시·상태·최종 결정론적 테스트만 확인
 | Web Multi-GPT | Web Multi-GPT | 여러 관점의 독립 탐색·검증 | 독립 Oracle 세션 2~25개 + merger |
 | Local Multi-GPT | Local Multi-GPT | 로컬 병렬 자문·반례 탐색 | `gpt-5.6-luna` + `max` 고정, 읽기 전용 |
 | 종합모드 | comprehensive mode | 계획부터 구현·최종 게이트까지 자동 연결 | plan → optional Pro/Multi → review → implementation → gate |
-| Pro | `pro` / Pro | 가장 강한 최종 판단·설계 검토 | Oracle 첨부 전용, DevSpace 없음 |
+| Pro | `pro` / Pro | 독립적인 최종 판단·설계 검토 후 결과만 반환 | Oracle 첨부 전용, DevSpace 없음 |
 
 지휘는 웹 제출 한 번으로 끝나는 실행 모드입니다. 종합모드는 지휘와 같은
 구현 단계를 포함하면서 계획·독립 검토·선택적 Pro/Web Multi·최종 게이트를
 추가한 다단계 워크플로입니다.
+
+단순 Pro는 종합모드와 별개인 한 번짜리 검토 경로입니다. 첨부된 계획·코드·문서를
+검토하고 결과 파일을 반환하면 끝나며, 자동으로 구현이나 다음 단계로 넘어가지
+않습니다. 계획부터 구현까지 이어야 할 때만 종합모드를 사용합니다.
 
 Local Multi-GPT와 Web Multi-GPT는 서로 다른 경로입니다. Local Multi-GPT는
 PC의 Codex 하위 레인을 사용하는 선택적 자문 도구이며, 모든 단계가

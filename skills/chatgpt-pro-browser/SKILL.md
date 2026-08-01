@@ -1,9 +1,19 @@
 ---
 name: chatgpt-pro-browser
-description: Use for ChatGPT Pro planning, research, and attachment-only work through Oracle; agbrowse and CodexPro are legacy recovery-only.
+description: Use for a one-shot ChatGPT Pro attachment-only plan, research, or review through Oracle. Return the Pro result only; never continue into comprehensive implementation. agbrowse and CodexPro are legacy recovery-only.
 ---
 
 # ChatGPT Pro through Oracle
+
+## Standalone scope
+
+This is the standalone, one-shot Pro route. It may produce a plan, research
+finding, review, or decision, but it returns that durable Pro result to Codex
+and stops. It never starts a review-to-implementation chain, authors a
+follow-on implementation stage, or invokes `chatgpt-pro-plan-handoff` on its
+own. If the user asks for comprehensive mode, use `chatgpt-pro-plan-handoff`
+instead; an optional Pro stage inside that workflow remains owned by the
+comprehensive runner.
 
 Oracle is the only backend for a new Pro run. It owns model selection, exact
 file attachment, submission, durable output, exact-slug recovery, and one-shot
