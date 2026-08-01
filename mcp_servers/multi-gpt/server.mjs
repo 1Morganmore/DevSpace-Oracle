@@ -13,14 +13,14 @@ const SERVER_VERSION = '0.1.0';
 // through to whatever the Codex CLI picks, which is how this pipeline kept running on an
 // older economy tier even after the documented default moved to GPT-5.6.
 const DEFAULT_MODEL = 'gpt-5.6-luna';
-const DEFAULT_REASONING_EFFORT = 'max';
+const DEFAULT_REASONING_EFFORT = 'xhigh';
 const DEFAULT_MAX_ITERATIONS = 5;
 // This is an execution contract, rather than a caller preference.  The pipeline
 // fan-outs can create many Codex children, so accepting a lower-cost override
 // would silently make one advisory run heterogeneous and non-reproducible.
 const EXECUTION_CONTRACT = Object.freeze({
   model: 'gpt-5.6-luna',
-  reasoning_effort: 'max',
+  reasoning_effort: 'xhigh',
 });
 // Evidence files are inlined verbatim into EVERY stage prompt (Planner, Solver, Refiner,
 // Merger, Organizer), so these caps are a context budget, not an I/O limit. They are sized
@@ -58,7 +58,7 @@ const TOOLS = [
         prompt: { type: 'string', description: 'Original user request.' },
         files: { type: 'array', items: { type: 'string' }, description: 'Optional local file paths to read and attach as context. Each file is read-only and size-limited.' },
         model: { type: 'string', enum: ['gpt-5.6-luna'], description: 'Optional execution-contract model. Omitted values are fixed to gpt-5.6-luna.' },
-        reasoning_effort: { type: 'string', enum: ['max'], description: 'Optional execution-contract reasoning effort. Omitted values are fixed to max.' },
+        reasoning_effort: { type: 'string', enum: ['xhigh'], description: 'Optional execution-contract reasoning effort. Omitted values are fixed to xhigh.' },
         max_iterations: { type: 'number', description: 'Maximum Merger -> Refiner -> Judge loop iterations. Default 5.' },
       },
       required: ['prompt'],
