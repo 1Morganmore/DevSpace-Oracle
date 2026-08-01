@@ -1,0 +1,88 @@
+import json
+import subprocess
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SERVER = ROOT / "mcp_servers" / "multi-gpt" / "server.mjs"
+
+
+def mcp_response(method: str, params: dict) -> dict:
+    request = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    completed = subprocess.run(
+        ["node", str(SERVER)],
+        input=json.dumps(request) + "\n",
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=10,
+    )
+    return json.loads(completed.stdout.strip())
+
+
+def mcp_tools() -> dict[str, dict]:
+    response = mcp_response("tools/list", {})
+    return {tool["name"]: tool for tool in response["result"]["tools"]}
+
+
+def test_mcp_schema_exposes_only_the_fixed_execution_contract() -> None:
+    tool = mcp_tools()["multi_gpt_start"]
+    properties = tool["inputSchema"]["properties"]
+    assert properties["model"]["enum"] == ["gpt-5.6-luna"]
+    assert properties["reasoning_effort"]["enum"] == ["max"]
+
+
+def test_mcp_rejects_lower_contract_overrides_before_a_job_or_child_starts() -> None:
+    for arguments in (
+        {"prompt": "contract test", "model": "gpt-5.6-sol"},
+        {"prompt": "contract test", "reasoning_effort": "high"},
+    ):
+        response = mcp_response(
+            "tools/call", {"name": "multi_gpt_start", "arguments": arguments}
+        )
+        payload = json.loads(response["result"]["content"][0]["text"])
+        assert payload["ok"] is False
+        assert "execution-contract violation" in payload["error"]
+
+
+def test_runtime_defaults_reject_overrides_and_pin_every_stage_argv() -> None:
+    source = SERVER.read_text(encoding="utf-8")
+
+    assert "const DEFAULT_MODEL = 'gpt-5.6-luna';" in source
+    assert "const DEFAULT_REASONING_EFFORT = 'max';" in source
+    assert "const EXECUTION_CONTRACT = Object.freeze({" in source
+    assert "model: 'gpt-5.6-luna'" in source
+    assert "reasoning_effort: 'max'" in source
+    assert "const model = requestedContract.model || DEFAULT_MODEL;" in source
+    assert "const reasoningEffort = requestedContract.reasoning_effort || DEFAULT_REASONING_EFFORT;" in source
+    assert "assertExecutionContract(model, reasoningEffort);" in source
+    assert "model must be exactly ${EXECUTION_CONTRACT.model}" in source
+    assert "reasoning_effort must be exactly ${EXECUTION_CONTRACT.reasoning_effort}" in source
+
+    # Every Planner/Solver/Refiner/Merger/Judge/Organizer call converges at this
+    # one launcher, which re-checks the contract before building argv.
+    assert source.count("async function runCodexStage(") == 1
+    launcher = source[source.index("async function runCodexStage("):source.index("function spawnWithInput(")]
+    assert "assertExecutionContract(model, reasoningEffort);" in launcher
+    assert "'--model', EXECUTION_CONTRACT.model," in launcher
+    assert "`model_reasoning_effort=\"${reasoningEffort}\"`" in launcher
+    assert "args.splice" not in launcher
+
+
+def test_job_and_result_surfaces_preserve_contract_evidence() -> None:
+    source = SERVER.read_text(encoding="utf-8")
+    assert "requested_contract: options.requestedContract" in source
+    assert "enforced_launch_contract: options.enforcedLaunchContract" in source
+    assert "requested_contract: job.requested_contract" in source
+    assert "enforced_launch_contract: job.enforced_launch_contract" in source
+
+
+def test_packaging_and_installer_deploy_multi_gpt_sources() -> None:
+    manifest = json.loads((ROOT / "install-manifest.json").read_text(encoding="utf-8"))
+    package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+    required = {"mcp_servers/multi-gpt/server.mjs", "skills/multi-gpt/SKILL.md"}
+    assert required <= set(manifest["include"])
+    assert required <= set(package["files"])
+
+    installer = (ROOT / "install.ps1").read_text(encoding="utf-8")
+    assert "elseif($pattern.StartsWith('mcp_servers/')){Join-Path $Root 'mcp_servers'}" in installer

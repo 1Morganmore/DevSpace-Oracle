@@ -22,6 +22,7 @@ attachments through Oracle.
 - Web GPT can inspect, change, and test a local project.
 - Direct, plan, review, edit, orchestrator, deep-research, and Pro modes.
 - Genuine Web Multi-GPT with independent ChatGPT sessions.
+- Read-only Local Multi-GPT with parallel Codex lanes on the PC.
 - Comprehensive workflows from planning through implementation and final gate.
 - Per-project exclusion, immutable mission and attachment hashes, and exact
   session recovery.
@@ -56,12 +57,19 @@ Host state and ChatGPT output are stored outside DevSpace projects under
 | Orchestrator | `orchestrator` / orchestrator | One GPT completes an already-scoped task | Oracle + DevSpace |
 | Deep Research | `deep-research` / deep research | Public research plus project evidence | Oracle Deep Research + DevSpace |
 | Web Multi-GPT | Web Multi-GPT | Independent parallel perspectives and merger | 2-25 Oracle sessions |
+| Local Multi-GPT | Local Multi-GPT | Local advisory synthesis and counterexample search | Fixed `gpt-5.6-luna` + `max`, read-only |
 | Comprehensive | comprehensive mode | Plan, optional Pro/Multi, review, implementation, gate | Staged Oracle workflow |
 | Pro | `pro` / Pro | Highest-strength judgment and design review | Oracle attachments only |
 
 Orchestrator mode is a single web submission. Comprehensive mode contains an
 orchestrator-equivalent implementation stage plus planning, independent review,
 optional Pro or Web Multi-GPT, and final gates.
+
+Local Multi-GPT and Web Multi-GPT are separate paths. Local Multi-GPT is an
+optional advisory tool that runs Codex child lanes on the PC. Every stage is
+fixed to `gpt-5.6-luna` with `max` reasoning; any other model or lower effort is
+rejected before a child process starts. Web Multi-GPT instead runs independent
+ChatGPT web sessions through Oracle and merges their results.
 
 ## Requirements
 

@@ -20,6 +20,7 @@ Codex가 웹 ChatGPT에 계획·리서치·검토·코드 구현을 맡기고, �
 - 웹 GPT가 로컬 프로젝트를 읽고 직접 수정·테스트
 - 계획, 검토, 수정, 지휘, 심층 리서치 모드
 - 여러 독립 ChatGPT 세션을 동시에 실행하는 Web Multi-GPT
+- PC 로컬 Codex 레인을 병렬 실행하는 읽기 전용 Local Multi-GPT
 - 계획 → 검토 → 구현 → 최종 검증을 연결하는 종합모드
 - 프로젝트별 실행 잠금, 미션·첨부 해시, 정확한 세션 복구
 - 다른 프로젝트의 ChatGPT 작업과 분리된 브라우저 프로필
@@ -58,12 +59,19 @@ Codex가 해시·상태·최종 결정론적 테스트만 확인
 | 지휘 | `orchestrator` / orchestrator | 계획이 확정된 작업을 한 GPT가 끝까지 수행 | Oracle + DevSpace, 단일 세션 |
 | 심층 리서치 | `deep-research` / deep research | 공개 자료와 프로젝트 증거 조사 | Oracle Deep Research + DevSpace |
 | Web Multi-GPT | Web Multi-GPT | 여러 관점의 독립 탐색·검증 | 독립 Oracle 세션 2~25개 + merger |
+| Local Multi-GPT | Local Multi-GPT | 로컬 병렬 자문·반례 탐색 | `gpt-5.6-luna` + `max` 고정, 읽기 전용 |
 | 종합모드 | comprehensive mode | 계획부터 구현·최종 게이트까지 자동 연결 | plan → optional Pro/Multi → review → implementation → gate |
 | Pro | `pro` / Pro | 가장 강한 최종 판단·설계 검토 | Oracle 첨부 전용, DevSpace 없음 |
 
 지휘는 웹 제출 한 번으로 끝나는 실행 모드입니다. 종합모드는 지휘와 같은
 구현 단계를 포함하면서 계획·독립 검토·선택적 Pro/Web Multi·최종 게이트를
 추가한 다단계 워크플로입니다.
+
+Local Multi-GPT와 Web Multi-GPT는 서로 다른 경로입니다. Local Multi-GPT는
+PC의 Codex 하위 레인을 사용하는 선택적 자문 도구이며, 모든 단계가
+`gpt-5.6-luna`와 `max` 사고 레벨로 고정됩니다. 다른 모델이나 낮은 사고
+레벨을 요청하면 하위 프로세스를 시작하기 전에 거부합니다. Web Multi-GPT는
+Oracle이 여러 독립 ChatGPT 웹 세션을 실행한 뒤 결과를 병합합니다.
 
 ## 요구사항
 
