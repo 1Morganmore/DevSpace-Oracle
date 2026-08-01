@@ -24,7 +24,7 @@ Subagents must not start Multi GPT. They return `needs-manager-decision` with a 
 Do not run a resource preflight before Multi GPT and never gate a run on memory, CPU, or helper count. If parent-missing helper accumulation is actually suspected, use the orphan-only cleanup path:
 
 ```powershell
-python C:\Users\GPUVM\.codex\bin\mcp_resource_guard.py --cleanup-orphans --json
+python "$env:USERPROFILE\.codex\bin\mcp_resource_guard.py" --cleanup-orphans --json
 ```
 
 Do not kill live Multi-GPT, Codex, Chrome, or browser work because counts are high.

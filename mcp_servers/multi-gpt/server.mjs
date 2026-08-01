@@ -8,9 +8,8 @@ import path from 'node:path';
 
 const SERVER_NAME = 'multi-gpt';
 const SERVER_VERSION = '0.1.0';
-// Host defaults for GPUVM. These are the values used when a caller omits `model` or
-// `reasoning_effort`, so they must match the documented default in
-// C:\Users\GPUVM\.codex\skills\multi-gpt\SKILL.md. Leaving the model unset here would fall
+// Runtime defaults. These are the values used when a caller omits `model` or
+// `reasoning_effort`, so they must match the installed multi-gpt skill. Leaving the model unset here would fall
 // through to whatever the Codex CLI picks, which is how this pipeline kept running on an
 // older economy tier even after the documented default moved to GPT-5.6.
 const DEFAULT_MODEL = 'gpt-5.6-luna';
