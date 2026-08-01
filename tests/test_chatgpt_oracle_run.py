@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 RUNNER_PATH = Path(__file__).resolve().parents[1] / "bin" / "chatgpt_oracle_run.py"
 
@@ -749,6 +752,228 @@ def test_recovery_no_session_never_releases_submitted_unknown_run(tmp_path: Path
     assert recovered["status"] == "attention_required"
     assert recovered.get("safe_for_fresh_run") is not True
     assert settled["session_authority"] == "submitted_unknown"
+
+
+def test_user_confirmed_no_submission_is_hash_bound_idempotent_and_fail_closed(tmp_path: Path) -> None:
+    runner = load_runner()
+    run_id = "a" * 32
+    workflow_id = "b4362f04-3cf2-4f5e-b6a2-8d9443175298"
+    parallel_parent_id = hashlib.sha256(workflow_id.encode("utf-8")).hexdigest()
+    manifest_path = manifest(
+        tmp_path,
+        run_id=run_id,
+        parallel_parent_id=parallel_parent_id,
+    )
+    input_mission = tmp_path / "input.md"
+    input_mission.write_text("bound input", encoding="utf-8")
+    input_sha = hashlib.sha256(input_mission.read_bytes()).hexdigest()
+    (tmp_path / "mission.md").write_text(
+        "\n".join((
+            "mission body",
+            "",
+            "[HOST_STAGE_CONTRACT]",
+            f"workflow_id={workflow_id}",
+            "stage=implementation",
+            f"attempt_id={run_id}",
+            f"input_mission_sha256={input_sha}",
+            f"exact_project_root={tmp_path.resolve()}",
+            f"exact_input_mission_path={input_mission.resolve()}",
+            f"Write the small UTF-8 stage receipt to: {(tmp_path / 'stage-result.json').resolve()}",
+            "",
+            "[DEVSPACE_WORKSPACE_ENTRY_CONTRACT]",
+            "workspace body",
+            "",
+        )),
+        encoding="utf-8",
+    )
+
+    def prompt_not_observed(command, **kwargs):
+        slug = command[command.index("--slug") + 1]
+        kwargs["stdout"].write(
+            (
+                f"Session: {slug}\n"
+                "ERROR: Prompt did not appear in conversation before timeout (send may have failed)\n"
+            ).encode()
+        )
+        kwargs["stdout"].flush()
+        return Process(1, [])
+
+    failed = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=prompt_not_observed,
+    )
+    run_dir = Path(failed["run_dir"])
+    state_path = run_dir / "state.json"
+    state = runner.STATE.load_state(state_path)
+    slug = state["oracle"]["slug"]
+    recovery_stdout = run_dir / "recovery-harvest-stdout.log"
+    recovery_stderr = run_dir / "recovery-harvest-stderr.log"
+    recovery_stdout.write_text(
+        f'No live ChatGPT tab matched session "{slug}". Attempting recovery.\n',
+        encoding="utf-8",
+    )
+    recovery_stderr.write_text(
+        "Cannot recover conversation: session metadata has no recoverable ChatGPT conversation URL.\n",
+        encoding="utf-8",
+    )
+
+    assert runner.exact_recovery_binding_unavailable(recovery_stdout, recovery_stderr) is True
+    settled = runner.settle_user_confirmed_no_submission(
+        run_dir,
+        confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION,
+        reason="user inspected the exact ChatGPT state and confirmed no submission",
+    )
+    settlement_path = run_dir / "user-confirmed-no-submission.json"
+    proof = runner.STATE.proven_user_confirmed_no_submission(state_path)
+
+    assert settled["ok"] is True
+    assert settled["safe_for_fresh_run"] is True
+    assert settled["result"]["session_authority"] == "pre_submit"
+    assert proof is not None
+    assert proof["workflow_id"] == workflow_id
+    assert proof["stage"] == "implementation"
+    assert proof["attempt_id"] == run_id
+    assert proof["input_mission_sha256"] == input_sha
+    assert settlement_path.is_file()
+    # Repeating the exact adjudication is idempotent and launches nothing.
+    repeated = runner.settle_user_confirmed_no_submission(
+        run_dir,
+        confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION,
+        reason="user inspected the exact ChatGPT state and confirmed no submission",
+    )
+    assert repeated["result"] == settled["result"]
+    other_run_id = "9" * 32
+    other_state_path = run_dir.parent / other_run_id / "state.json"
+    other_state_path.parent.mkdir()
+    other_state = {
+        "schema": "codex.chatgpt.oracle-run-state/v1",
+        "run_id": other_run_id,
+        "project_root": str(tmp_path.resolve()),
+        "status": "running",
+        "session_authority": "submitted_unknown",
+        "oracle": {"session_locator": "oracle-project-other"},
+    }
+    runner.STATE.write_json_atomic(other_state_path, other_state)
+    blocked = runner.settle_user_confirmed_no_submission(
+        run_dir,
+        confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION,
+        reason="user inspected the exact ChatGPT state and confirmed no submission",
+    )
+    assert blocked["safe_for_fresh_run"] is False
+    assert [owner["run_id"] for owner in blocked["unresolved_owners"]] == [other_run_id]
+    other_state.update({"status": "attention_required", "session_authority": "pre_submit"})
+    runner.STATE.write_json_atomic(other_state_path, other_state)
+    assert runner.STATE.unresolved_project_sessions(
+        runner.STATE.load_manifest(manifest_path).run_root,
+        tmp_path,
+        parallel_parent_id="e" * 64,
+    ) == []
+
+    reference = settled["result"]["user_confirmed_no_submission"]
+    missing_reference_state = runner.STATE.load_state(state_path)
+    missing_reference_state.pop("user_confirmed_no_submission")
+    runner.STATE.write_json_atomic(state_path, missing_reference_state)
+    owners = runner.STATE.unresolved_project_sessions(
+        runner.STATE.load_manifest(manifest_path).run_root,
+        tmp_path,
+        parallel_parent_id=parallel_parent_id,
+    )
+    assert owners[0]["run_id"] == run_id
+    restored = runner.STATE.load_state(state_path)
+    restored["user_confirmed_no_submission"] = reference
+    runner.STATE.write_json_atomic(state_path, restored)
+
+    # Any contradictory later recovery revokes the release even though the
+    # original no-tab/no-URL recovery still exists.
+    (run_dir / "recovery-live-stdout.log").write_text(
+        "State: running\n",
+        encoding="utf-8",
+    )
+    (run_dir / "recovery-live-stderr.log").write_text("", encoding="utf-8")
+    assert runner.STATE.proven_user_confirmed_no_submission(state_path) is None
+    owners = runner.STATE.unresolved_project_sessions(
+        runner.STATE.load_manifest(manifest_path).run_root,
+        tmp_path,
+        parallel_parent_id="e" * 64,
+    )
+    assert owners[0]["run_id"] == run_id
+
+
+def test_user_confirmation_rejects_bare_bindings_without_host_contract(tmp_path: Path) -> None:
+    runner = load_runner()
+    run_id = "e" * 32
+    workflow_id = "b4362f04-3cf2-4f5e-b6a2-8d9443175298"
+    parent_id = hashlib.sha256(workflow_id.encode("utf-8")).hexdigest()
+    manifest_path = manifest(tmp_path, run_id=run_id, parallel_parent_id=parent_id)
+    (tmp_path / "mission.md").write_text(
+        "\n".join((
+            f"workflow_id={workflow_id}",
+            "stage=implementation",
+            f"attempt_id={run_id}",
+            f"input_mission_sha256={'f' * 64}",
+            "",
+        )),
+        encoding="utf-8",
+    )
+
+    def prompt_not_observed(command, **kwargs):
+        slug = command[command.index("--slug") + 1]
+        kwargs["stdout"].write(
+            (
+                f"Session: {slug}\n"
+                "ERROR: Prompt did not appear in conversation before timeout (send may have failed)\n"
+            ).encode()
+        )
+        kwargs["stdout"].flush()
+        return Process(1, [])
+
+    failed = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=prompt_not_observed,
+    )
+    run_dir = Path(failed["run_dir"])
+    state = runner.STATE.load_state(run_dir / "state.json")
+    slug = state["oracle"]["slug"]
+    (run_dir / "recovery-harvest-stdout.log").write_text(
+        f'No live ChatGPT tab matched session "{slug}". Attempting recovery.\n',
+        encoding="utf-8",
+    )
+    (run_dir / "recovery-harvest-stderr.log").write_text(
+        "Cannot recover conversation: session metadata has no recoverable ChatGPT conversation URL.\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(runner.STATE.OracleStateError) as exc:
+        runner.settle_user_confirmed_no_submission(
+            run_dir,
+            confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION,
+            reason="user said no submission",
+        )
+    assert exc.value.code == "NO_SUBMISSION_EVIDENCE_INCOMPLETE"
+
+
+def test_user_confirmation_cannot_replace_missing_recovery_evidence(tmp_path: Path) -> None:
+    runner = load_runner()
+    config = runner.STATE.load_manifest(manifest(tmp_path, run_id="f" * 32))
+    layout = runner.STATE.create_layout(config, run_id=config.requested_run_id)
+    layout.run_dir.mkdir(parents=True)
+    state = runner.STATE.state_payload(config, layout, status="attention_required", resolved_version="0.16.1")
+    state["session_authority"] = "submitted_unknown"
+    runner.STATE.write_json_atomic(layout.state_path, state)
+    for path in (layout.stdout_path, layout.stderr_path):
+        path.touch()
+
+    with pytest.raises(runner.STATE.OracleStateError) as exc:
+        runner.settle_user_confirmed_no_submission(
+            layout.run_dir,
+            confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION,
+            reason="user said no submission",
+        )
+    assert exc.value.code == "NO_SUBMISSION_EVIDENCE_INCOMPLETE"
 
 
 def test_recovery_captures_output_and_updates_state(tmp_path: Path) -> None:

@@ -99,6 +99,22 @@ complete. A Pro selection launches an explicit Oracle attachment-only stage
 and waits for a bound receipt; it is never downgraded. Missing receipt/output,
 crash, or ambiguity returns attention-required without a replacement submit.
 
+`Prompt did not appear in conversation before timeout (send may have failed)`
+remains submission-uncertain by default. Exact recovery reporting no live tab
+and no saved conversation URL is still not enough to release ownership. Only
+after the user explicitly confirms that the exact attempt was not submitted may
+the maintenance owner run:
+
+```powershell
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_run.py" settle-no-submission --run-dir <exact-run-dir> --confirmation user-confirmed-no-submission --reason <concise-user-confirmation>
+```
+
+The command never launches Oracle. It requires hash-valid prompt-timeout and
+recovery evidence, writes a workflow/stage/attempt/input-bound settlement, and
+lets comprehensive mode consume at most one replacement for that immutable
+binding. Missing or changed evidence restores fail-closed project ownership;
+a replacement failure never authorizes a second submission.
+
 Existing v1-v4 agbrowse comprehensive state and v3 parallel implementation are
 legacy recovery-only. Their files remain installed for exact recovery but are
 not the new-work route.

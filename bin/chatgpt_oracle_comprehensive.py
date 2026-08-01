@@ -884,6 +884,145 @@ def _is_unambiguous_pre_submit_failure(run_dir: Path) -> bool:
     return any(marker in text for marker in UNAMBIGUOUS_PRE_SUBMIT_MARKERS)
 
 
+def _pre_submit_retry_count(
+    records: list[dict[str, Any]],
+    *,
+    stage: str,
+    input_sha256: str,
+    current_run_dir: Path,
+    legacy_total: int = 0,
+) -> int:
+    """Count replacement attempts for one stage plus immutable input binding.
+
+    Older workflows stored one global counter.  Records are the durable,
+    stage-scoped ledger, so legacy retry records without an input hash bind to
+    their recorded stage.  A user-confirmed settlement whose run differs from
+    the current run proves that its one replacement has already started.
+    """
+    current = str(current_run_dir.resolve()).casefold()
+    count = 0
+    attributed_total = 0
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        record_stage = str(record.get("stage") or "")
+        binding = str(record.get("input_mission_sha256") or "")
+        if record.get("pre_submit_retry_consumed") is True:
+            attributed_total += 1
+            if record_stage == stage and (not binding or binding == input_sha256):
+                count += 1
+            continue
+        if record.get("pre_submit_failure") is True:
+            attributed_total += 1
+            if record_stage == stage and (not binding or binding == input_sha256):
+                count += 1
+            continue
+        if record_stage == stage and record.get("settlement") == "user-confirmed-no-submission":
+            settled_run = str(record.get("run_dir") or "").strip()
+            if settled_run and str(Path(settled_run).resolve()).casefold() != current:
+                count += 1
+                attributed_total += 1
+    # Old versions persisted only one workflow-global integer.  If records do
+    # not attribute all of it to a stage, fail closed instead of guessing that
+    # the current binding still owns another attempt.
+    if max(0, legacy_total) > attributed_total:
+        return max(count, 1)
+    return count
+
+
+def _user_confirmed_retry_binding_matches(
+    run_dir: Path,
+    *,
+    config: dict[str, Any],
+    workflow_id: str,
+    stage: str,
+    attempt_id: str,
+    input_sha256: str,
+    augmented_mission_path: Path,
+    augmented_mission_sha256: str,
+    binding_source_path: Path,
+) -> bool:
+    proof = RUNNER.STATE.proven_user_confirmed_no_submission(run_dir / "state.json")
+    if proof is None:
+        return True
+    try:
+        proof_project = Path(str(proof.get("project_root") or "")).resolve(strict=True)
+        proof_augmented = Path(str(proof.get("_augmented_mission_path") or ""))
+        proof_input = Path(str(proof.get("_input_mission_path") or ""))
+        expected_augmented = augmented_mission_path.expanduser()
+        expected_input = binding_source_path.expanduser()
+        if (
+            proof_augmented.is_symlink()
+            or proof_input.is_symlink()
+            or expected_augmented.is_symlink()
+            or expected_input.is_symlink()
+        ):
+            return False
+        proof_augmented = proof_augmented.resolve(strict=True)
+        proof_input = proof_input.resolve(strict=True)
+        expected_augmented = expected_augmented.resolve(strict=True)
+        expected_input = expected_input.resolve(strict=True)
+    except OSError:
+        return False
+    return all((
+        proof_project == config["project_root"],
+        str(proof.get("workflow_id") or "") == workflow_id,
+        str(proof.get("stage") or "") == stage,
+        str(proof.get("attempt_id") or "") == attempt_id,
+        str(proof.get("run_id") or "") == attempt_id,
+        str(proof.get("input_mission_sha256") or "") == input_sha256,
+        proof_augmented == expected_augmented,
+        proof_input == expected_input,
+        str(proof.get("mission_sha256") or "") == augmented_mission_sha256,
+        sha(expected_augmented) == augmented_mission_sha256,
+        sha(expected_input) == input_sha256,
+    ))
+
+
+def _pre_submit_retry_record(
+    run_dir: Path,
+    *,
+    stage: str,
+    input_sha256: str,
+    config: dict[str, Any],
+    workflow_id: str,
+    attempt_id: str,
+    augmented_mission_path: Path,
+    augmented_mission_sha256: str,
+    binding_source_path: Path,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "stage": stage,
+        "run_dir": str(run_dir),
+        "pre_submit_failure": True,
+        "pre_submit_retry_consumed": True,
+        "input_mission_sha256": input_sha256,
+    }
+    proof = RUNNER.STATE.proven_user_confirmed_no_submission(run_dir / "state.json")
+    if proof is not None:
+        if not _user_confirmed_retry_binding_matches(
+            run_dir,
+            config=config,
+            workflow_id=workflow_id,
+            stage=stage,
+            attempt_id=attempt_id,
+            input_sha256=input_sha256,
+            augmented_mission_path=augmented_mission_path,
+            augmented_mission_sha256=augmented_mission_sha256,
+            binding_source_path=binding_source_path,
+        ):
+            raise WorkflowError("user-confirmed no-submission settlement binding mismatch")
+        run_state = RUNNER.STATE.load_state(run_dir / "state.json")
+        reference = run_state.get("user_confirmed_no_submission")
+        if isinstance(reference, dict):
+            record.update({
+                "settlement": "user-confirmed-no-submission",
+                "settlement_path": reference.get("path"),
+                "settlement_sha256": reference.get("sha256"),
+            })
+    return record
+
+
 def _run_local_gate(config: dict[str, Any], runner: Callable[..., Any]) -> dict[str, Any]:
     completed = runner(
         config["local_gate_command"],
@@ -1133,12 +1272,43 @@ def _run_workflow_locked(
             persisted_receipt = Path(str(stored.get("receipt_path") or "")).resolve()
             persisted_run_dir = Path(str(stored.get("oracle_run_dir") or "")).resolve()
             pre_submit_retries = int(stored.get("pre_submit_retries") or 0)
+            stored_records = list(stored.get("records") or [])
+            stored_stage = str(stored["current_stage"])
+            stored_input_sha = str(stored.get("current_input_sha256") or "")
             if (
-                pre_submit_retries < 1
+                _pre_submit_retry_count(
+                    stored_records,
+                    stage=stored_stage,
+                    input_sha256=stored_input_sha,
+                    current_run_dir=persisted_run_dir,
+                    legacy_total=pre_submit_retries,
+                ) < 1
                 and persisted_run_dir.is_dir()
                 and _is_unambiguous_pre_submit_failure(persisted_run_dir)
+                and _user_confirmed_retry_binding_matches(
+                    persisted_run_dir,
+                    config=config,
+                    workflow_id=workflow_id,
+                    stage=stored_stage,
+                    attempt_id=str(stored.get("current_attempt_id") or stored.get("oracle_run_id") or ""),
+                    input_sha256=stored_input_sha,
+                    augmented_mission_path=Path(str(stored.get("current_augmented_mission_path") or "")),
+                    augmented_mission_sha256=str(stored.get("current_augmented_mission_sha256") or ""),
+                    binding_source_path=Path(str(stored.get("current_binding_source_path") or "")),
+                )
             ):
                 source = Path(str(stored["current_mission_path"])).resolve(strict=True)
+                retry_record = _pre_submit_retry_record(
+                    persisted_run_dir,
+                    stage=stored_stage,
+                    input_sha256=stored_input_sha,
+                    config=config,
+                    workflow_id=workflow_id,
+                    attempt_id=str(stored.get("current_attempt_id") or stored.get("oracle_run_id") or ""),
+                    augmented_mission_path=Path(str(stored.get("current_augmented_mission_path") or "")),
+                    augmented_mission_sha256=str(stored.get("current_augmented_mission_sha256") or ""),
+                    binding_source_path=Path(str(stored.get("current_binding_source_path") or "")),
+                )
                 prepared = {
                     "schema": STATE_SCHEMA,
                     "status": "prepared",
@@ -1148,11 +1318,7 @@ def _run_workflow_locked(
                     "next_mission_path": str(source),
                     "next_mission_sha256": sha(source),
                     "next_index": int(stored["next_index"]),
-                    "records": list(stored.get("records") or []) + [{
-                        "stage": stored["current_stage"],
-                        "run_dir": str(persisted_run_dir),
-                        "pre_submit_failure": True,
-                    }],
+                    "records": stored_records + [retry_record],
                     "pre_submit_retries": pre_submit_retries + 1,
                 }
                 _write_workflow_state(state_path, config, prepared)
@@ -1319,10 +1485,38 @@ def _run_workflow_locked(
             failed_run_dir = Path(str(run.get("run_dir") or "")).resolve()
             pre_submit_retries = int(_json(state_path).get("pre_submit_retries") or 0)
             if (
-                pre_submit_retries < 1
+                _pre_submit_retry_count(
+                    records,
+                    stage=stage,
+                    input_sha256=input_sha,
+                    current_run_dir=failed_run_dir,
+                    legacy_total=pre_submit_retries,
+                ) < 1
                 and failed_run_dir.is_dir()
                 and _is_unambiguous_pre_submit_failure(failed_run_dir)
+                and _user_confirmed_retry_binding_matches(
+                    failed_run_dir,
+                    config=config,
+                    workflow_id=workflow_id,
+                    stage=stage,
+                    attempt_id=attempt_id,
+                    input_sha256=input_sha,
+                    augmented_mission_path=mission,
+                    augmented_mission_sha256=sha(mission),
+                    binding_source_path=source,
+                )
             ):
+                retry_record = _pre_submit_retry_record(
+                    failed_run_dir,
+                    stage=stage,
+                    input_sha256=input_sha,
+                    config=config,
+                    workflow_id=workflow_id,
+                    attempt_id=attempt_id,
+                    augmented_mission_path=mission,
+                    augmented_mission_sha256=sha(mission),
+                    binding_source_path=source,
+                )
                 _write_workflow_state(state_path, config, {
                     "schema": STATE_SCHEMA,
                     "status": "prepared",
@@ -1332,7 +1526,7 @@ def _run_workflow_locked(
                     "next_mission_path": str(source),
                     "next_mission_sha256": sha(source),
                     "next_index": index,
-                    "records": records,
+                    "records": records + [retry_record],
                     "pre_submit_retries": pre_submit_retries + 1,
                 })
                 return _run_workflow_locked(

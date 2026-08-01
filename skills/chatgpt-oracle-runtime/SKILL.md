@@ -85,6 +85,16 @@ failure for 90 minutes. It preserves `submitted_unknown` ownership; restore the
 exact persisted conversation URL before recovering the same slug, and never
 replace or resubmit it.
 
+Oracle's `Prompt did not appear in conversation before timeout (send may have
+failed)` message is likewise submission-uncertain. No-live-tab plus missing
+saved-URL recovery evidence does not mechanically prove non-submission. A
+maintenance owner may release that exact run only after explicit user
+confirmation through `chatgpt_oracle_run.py settle-no-submission` with the
+exact run directory, `--confirmation user-confirmed-no-submission`, and a
+concise reason. The settlement is hash-bound to
+project/workflow/stage/attempt/input evidence and does not launch Oracle;
+comprehensive mode may consume only one replacement for that binding.
+
 Direct same-project runs hold one cross-process mutex for the entire Oracle
 process lifetime. A Multi parent owns that project mutex while authorized
 children use a short parent-scoped launch mutex and isolated copied Chrome

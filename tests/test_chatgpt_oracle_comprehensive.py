@@ -560,6 +560,226 @@ def test_version_resolution_prelaunch_failure_retries_same_stage_once_then_stops
     assert result["current_binding_source_sha256"] == module.sha(config["initial_mission_path"])
 
 
+def test_pre_submit_retry_budget_is_stage_input_scoped_and_counts_started_replacement(tmp_path: Path) -> None:
+    module = load()
+    failed_plan = tmp_path / "plan-failed"
+    failed_implementation = tmp_path / "implementation-failed"
+    replacement = tmp_path / "implementation-replacement"
+    for path in (failed_plan, failed_implementation, replacement):
+        path.mkdir()
+    plan_input = "a" * 64
+    implementation_input = "b" * 64
+    records = [
+        {
+            "stage": "plan",
+            "run_dir": str(failed_plan),
+            "pre_submit_failure": True,
+            "pre_submit_retry_consumed": True,
+            "input_mission_sha256": plan_input,
+        },
+        {
+            "stage": "implementation",
+            "run_dir": str(failed_implementation),
+            "settlement": "user-confirmed-no-submission",
+        },
+    ]
+
+    assert module._pre_submit_retry_count(
+        records,
+        stage="plan",
+        input_sha256=plan_input,
+        current_run_dir=failed_plan,
+    ) == 1
+    # The plan retry does not consume the implementation binding's budget.
+    assert module._pre_submit_retry_count(
+        records,
+        stage="implementation",
+        input_sha256=implementation_input,
+        current_run_dir=failed_implementation,
+    ) == 0
+    # Once a different attempt is current, the recorded settlement has already
+    # produced its one replacement and no second submission is permitted.
+    assert module._pre_submit_retry_count(
+        records,
+        stage="implementation",
+        input_sha256=implementation_input,
+        current_run_dir=replacement,
+    ) == 1
+    # An unattributed legacy global retry is conservatively treated as spent.
+    assert module._pre_submit_retry_count(
+        [{"stage": "plan", "run_dir": str(failed_plan), "ok": False}],
+        stage="implementation",
+        input_sha256=implementation_input,
+        current_run_dir=failed_implementation,
+        legacy_total=1,
+    ) == 1
+
+
+def test_user_confirmed_settlement_submits_one_bound_replacement_then_never_a_second(tmp_path: Path) -> None:
+    module = load()
+    submissions: list[Path] = []
+
+    def fake_execute(oracle_manifest: Path, *, dry_run: bool):
+        run_dir = _oracle_running_state(module, oracle_manifest)
+        submissions.append(run_dir)
+        state_path = run_dir / "state.json"
+        state = module.RUNNER.STATE.load_state(state_path)
+        state.update({
+            "status": "attention_required",
+            "exit_code": 1,
+            "session_authority": "submitted_unknown",
+            "transport_status": "incomplete",
+        })
+        module.RUNNER.STATE.write_json_atomic(state_path, state)
+        Path(state["mission"]["transport_path"]).write_bytes(
+            Path(state["mission"]["path"]).read_bytes()
+        )
+        if len(submissions) == 1:
+            slug = state["oracle"]["slug"]
+            (run_dir / "stdout.log").write_text(
+                f"Session: {slug}\n"
+                "ERROR: Prompt did not appear in conversation before timeout (send may have failed)\n",
+                encoding="utf-8",
+            )
+            (run_dir / "stderr.log").write_text("", encoding="utf-8")
+            (run_dir / "recovery-harvest-stdout.log").write_text(
+                f'No live ChatGPT tab matched session "{slug}". Attempting recovery.\n',
+                encoding="utf-8",
+            )
+            (run_dir / "recovery-harvest-stderr.log").write_text(
+                "Cannot recover conversation: session metadata has no recoverable ChatGPT conversation URL.\n",
+                encoding="utf-8",
+            )
+        else:
+            (run_dir / "stdout.log").write_text("unrelated failure\n", encoding="utf-8")
+            (run_dir / "stderr.log").write_text("", encoding="utf-8")
+        return {"ok": False, "run_dir": str(run_dir)}
+
+    workflow_manifest = manifest(tmp_path)
+    first = module.run_workflow(workflow_manifest, oracle_execute=fake_execute)
+    assert first["status"] == "attention_required"
+    assert len(submissions) == 1
+
+    module.RUNNER.STATE.settle_user_confirmed_no_submission(
+        submissions[0] / "state.json",
+        confirmation=module.RUNNER.STATE.USER_CONFIRMED_NO_SUBMISSION,
+        reason="user confirmed the exact attempt was not submitted",
+    )
+    second = module.run_workflow(workflow_manifest, oracle_execute=fake_execute)
+    assert second["status"] == "attention_required"
+    assert len(submissions) == 2
+    settlement_records = [
+        record for record in second["records"]
+        if isinstance(record, dict) and record.get("settlement") == "user-confirmed-no-submission"
+    ]
+    assert len(settlement_records) == 1
+    assert settlement_records[0]["settlement_path"]
+    assert settlement_records[0]["settlement_sha256"]
+
+    recoveries: list[Path] = []
+
+    def exact_recovery_only(run_dir: Path, *, action: str, dry_run: bool):
+        recoveries.append(run_dir)
+        return {"ok": False, "status": "attention_required", "run_dir": str(run_dir)}
+
+    third = module.run_workflow(
+        workflow_manifest,
+        oracle_execute=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("a second replacement must never be submitted")
+        ),
+        oracle_recover=exact_recovery_only,
+    )
+    assert third["status"] == "attention_required"
+    assert recoveries == [submissions[1]]
+    assert len(submissions) == 2
+
+
+def test_user_confirmed_retry_binding_rejects_any_identity_drift(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    attempt = "a" * 32
+    workflow_id = "b" * 32
+    input_path = project_root / "input.md"
+    input_path.write_text("input", encoding="utf-8")
+    input_sha = module.sha(input_path)
+    augmented_path = project_root / "augmented.md"
+    augmented_path.write_text("augmented", encoding="utf-8")
+    augmented_sha = module.sha(augmented_path)
+    proof = {
+        "project_root": str(project_root.resolve()),
+        "workflow_id": workflow_id,
+        "stage": "implementation",
+        "attempt_id": attempt,
+        "run_id": attempt,
+        "input_mission_sha256": input_sha,
+        "mission_sha256": augmented_sha,
+        "_augmented_mission_path": str(augmented_path.resolve()),
+        "_input_mission_path": str(input_path.resolve()),
+    }
+    monkeypatch.setattr(module.RUNNER.STATE, "proven_user_confirmed_no_submission", lambda path: dict(proof))
+    config = {"project_root": project_root.resolve()}
+
+    assert module._user_confirmed_retry_binding_matches(
+        run_dir,
+        config=config,
+        workflow_id=workflow_id,
+        stage="implementation",
+        attempt_id=attempt,
+        input_sha256=input_sha,
+        augmented_mission_path=augmented_path,
+        augmented_mission_sha256=augmented_sha,
+        binding_source_path=input_path,
+    ) is True
+    for field, wrong in (
+        ("workflow_id", "d" * 32),
+        ("stage", "review"),
+        ("attempt_id", "e" * 32),
+        ("run_id", "f" * 32),
+        ("input_mission_sha256", "0" * 64),
+        ("mission_sha256", "1" * 64),
+        ("_augmented_mission_path", str(project_root / "wrong-augmented.md")),
+        ("_input_mission_path", str(project_root / "wrong-input.md")),
+    ):
+        changed = dict(proof)
+        changed[field] = wrong
+        monkeypatch.setattr(
+            module.RUNNER.STATE,
+            "proven_user_confirmed_no_submission",
+            lambda path, value=changed: value,
+        )
+        assert module._user_confirmed_retry_binding_matches(
+            run_dir,
+            config=config,
+            workflow_id=workflow_id,
+            stage="implementation",
+            attempt_id=attempt,
+            input_sha256=input_sha,
+            augmented_mission_path=augmented_path,
+            augmented_mission_sha256=augmented_sha,
+            binding_source_path=input_path,
+        ) is False
+
+    monkeypatch.setattr(
+        module.RUNNER.STATE,
+        "proven_user_confirmed_no_submission",
+        lambda path: dict(proof),
+    )
+    assert module._user_confirmed_retry_binding_matches(
+        run_dir,
+        config=config,
+        workflow_id=workflow_id,
+        stage="implementation",
+        attempt_id=attempt,
+        input_sha256=input_sha,
+        augmented_mission_path=augmented_path,
+        augmented_mission_sha256="2" * 64,
+        binding_source_path=input_path,
+    ) is False
+
+
 def test_durable_output_prevents_pre_submit_retry_even_with_a_launch_marker(tmp_path: Path) -> None:
     module = load()
     submitted = 0

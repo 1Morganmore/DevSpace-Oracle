@@ -230,6 +230,27 @@ def test_uncertain_submission_timeout_is_a_post_submit_bucket(tmp_path: Path) ->
     assert "post-submit-provider-incomplete" not in report["safe_for_fresh_run_buckets"]
 
 
+def test_user_confirmed_no_submission_overrides_prompt_timeout_only_with_validated_proof() -> None:
+    module = load()
+    state = {
+        "status": "attention_required",
+        "session_authority": "pre_submit",
+        "terminal_harvested": False,
+        "task_outcome": "pending",
+    }
+    verdict = module.classify_run(
+        state,
+        stdout_text="ERROR: Prompt did not appear in conversation before timeout (send may have failed)\n",
+        has_output=False,
+        user_confirmed_no_submission=True,
+    )
+
+    assert verdict == {
+        "bucket": "pre-submit-ui-contract",
+        "signature": "user-confirmed-no-submission-after-prompt-timeout",
+    }
+
+
 def test_answer_without_a_durable_artifact_is_recoverable_not_unknown(tmp_path: Path) -> None:
     module = load()
     state_root = tmp_path / "oracle-state"

@@ -90,6 +90,15 @@ ORACLE_NO_SESSION_RE = re.compile(
     r"No session found with ID\s+(?P<locator>oracle-[a-z0-9-]+)\.?",
     re.IGNORECASE,
 )
+ORACLE_PROMPT_NOT_OBSERVED_MARKER = (
+    "Prompt did not appear in conversation before timeout (send may have failed)"
+)
+ORACLE_NO_LIVE_TAB_MARKER = "No live ChatGPT tab matched session"
+ORACLE_NO_RECOVERABLE_URL_MARKER = (
+    "session metadata has no recoverable ChatGPT conversation URL"
+)
+USER_CONFIRMED_NO_SUBMISSION = "user-confirmed-no-submission"
+ORACLE_RECOVERY_STATE_RE = re.compile(r"(?im)^\s*State:\s*[a-z][a-z0-9_-]*\s*$")
 # Upstream Oracle copies a signed-in browser profile with rsync.  On POSIX
 # hosts without rsync the copy fails after launch, so feasibility is decided
 # while loading the manifest instead of crashing mid-launch.  The pinned
@@ -725,6 +734,305 @@ def _artifact_bytes(state: dict[str, Any], name: str) -> tuple[Path, bytes] | No
         return None
 
 
+def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
+    """Return exact evidence for a user-adjudicable Oracle composer timeout.
+
+    The Oracle message is not mechanical proof of non-submission.  This helper
+    only proves that the run is eligible for an explicit user adjudication: no
+    output or conversation URL exists, Oracle reported that the prompt was not
+    observed, and exact recovery has neither a live tab nor a saved URL.
+    """
+    state = load_state(state_path)
+    authority = str(state.get("session_authority") or "")
+    if authority not in {"submitted_unknown", "pre_submit"}:
+        return None
+    if state.get("terminal_harvested") is True or _state_has_conversation_url(state):
+        return None
+    run_dir = state_path.parent
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    output = Path(str(artifacts.get("output") or ""))
+    if output.resolve() != (run_dir / "output.md").resolve() or output.is_symlink():
+        return None
+    if str(output) and output_is_nonempty(output):
+        return None
+    stdout_record = _artifact_bytes(state, "stdout")
+    stderr_record = _artifact_bytes(state, "stderr")
+    if stdout_record is None or stderr_record is None:
+        return None
+    stdout_path, stdout_bytes = stdout_record
+    stderr_path, stderr_bytes = stderr_record
+    if (
+        stdout_path.resolve() != (run_dir / "stdout.log").resolve()
+        or stderr_path.resolve() != (run_dir / "stderr.log").resolve()
+        or stdout_path.is_symlink()
+        or stderr_path.is_symlink()
+    ):
+        return None
+    try:
+        stdout_text = stdout_bytes.decode("utf-8", errors="strict")
+        stderr_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
+    if not locator or ORACLE_PROMPT_NOT_OBSERVED_MARKER not in stdout_text:
+        return None
+    if f"Session: {locator}" not in stdout_text:
+        return None
+    mission = state.get("mission") if isinstance(state.get("mission"), dict) else {}
+    transport_path = Path(str(mission.get("transport_path") or ""))
+    if transport_path.resolve() != (run_dir / "mission.md").resolve() or transport_path.is_symlink():
+        return None
+    try:
+        mission_bytes = transport_path.read_bytes()
+        mission_text = mission_bytes.decode("utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
+        return None
+    mission_sha256 = hashlib.sha256(mission_bytes).hexdigest()
+    if mission_sha256 != str(mission.get("sha256") or ""):
+        return None
+    host_marker = "[HOST_STAGE_CONTRACT]"
+    workspace_marker = "[DEVSPACE_WORKSPACE_ENTRY_CONTRACT]"
+    if mission_text.count(host_marker) != 1 or mission_text.count(workspace_marker) != 1:
+        return None
+    host_start = mission_text.index(host_marker) + len(host_marker)
+    workspace_start = mission_text.index(workspace_marker)
+    if workspace_start <= host_start:
+        return None
+    host_contract = mission_text[host_start:workspace_start]
+    binding: dict[str, str] = {}
+    for key, pattern in {
+        "workflow_id": (
+            r"(?m)^workflow_id=((?:[a-f0-9]{32,64}|"
+            r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}))\r?$"
+        ),
+        "stage": r"(?m)^stage=([a-z][a-z0-9-]*)\r?$",
+        "attempt_id": r"(?m)^attempt_id=([a-f0-9]{32,64})\r?$",
+        "input_mission_sha256": r"(?m)^input_mission_sha256=([a-f0-9]{64})\r?$",
+    }.items():
+        matches = re.findall(pattern, host_contract)
+        if len(matches) != 1:
+            return None
+        binding[key] = matches[0]
+    if binding["attempt_id"] != str(state.get("run_id") or ""):
+        return None
+    expected_parent = hashlib.sha256(binding["workflow_id"].encode("utf-8")).hexdigest()
+    if str(state.get("parallel_parent_id") or "") != expected_parent:
+        return None
+    contract_paths: dict[str, str] = {}
+    for key, pattern in {
+        "project_root": r"(?m)^exact_project_root=([^\r\n]+)\r?$",
+        "input_mission": r"(?m)^exact_input_mission_path=([^\r\n]+)\r?$",
+        "receipt": r"(?m)^Write the small UTF-8 stage receipt to: ([^\r\n]+)\r?$",
+    }.items():
+        matches = re.findall(pattern, host_contract)
+        if len(matches) != 1:
+            return None
+        contract_paths[key] = matches[0]
+    try:
+        project_root = Path(str(state.get("project_root") or ""))
+        contract_project_root = Path(contract_paths["project_root"])
+        if (
+            not project_root.is_absolute()
+            or not contract_project_root.is_absolute()
+            or project_root.resolve(strict=True) != contract_project_root.resolve(strict=True)
+            or not project_root.resolve(strict=True).is_dir()
+        ):
+            return None
+        canonical_root = project_root.resolve(strict=True)
+        source_mission = Path(str(mission.get("path") or ""))
+        input_mission = Path(contract_paths["input_mission"])
+        receipt_path = Path(contract_paths["receipt"])
+        if (
+            not source_mission.is_absolute()
+            or source_mission.is_symlink()
+            or not input_mission.is_absolute()
+            or input_mission.is_symlink()
+            or not receipt_path.is_absolute()
+            or receipt_path.is_symlink()
+        ):
+            return None
+        source_mission = source_mission.resolve(strict=True)
+        input_mission = input_mission.resolve(strict=True)
+        receipt_path = receipt_path.resolve(strict=False)
+        if (
+            not source_mission.is_file()
+            or not input_mission.is_file()
+            or not is_within(canonical_root, source_mission)
+            or not is_within(canonical_root, input_mission)
+            or not is_within(canonical_root, receipt_path)
+            or receipt_path != source_mission.parent / "stage-result.json"
+            or source_mission.read_bytes() != mission_bytes
+            or sha256_file(input_mission) != binding["input_mission_sha256"]
+        ):
+            return None
+    except OSError:
+        return None
+    recovery_records: list[dict[str, str]] = []
+    for recovery_stdout in sorted(run_dir.glob("recovery-*-stdout.log"), key=lambda item: item.name):
+        recovery_stderr = recovery_stdout.with_name(
+            recovery_stdout.name.replace("-stdout.log", "-stderr.log")
+        )
+        try:
+            if recovery_stdout.is_symlink() or recovery_stderr.is_symlink():
+                continue
+            recovery_stdout_bytes = recovery_stdout.read_bytes()
+            recovery_stderr_bytes = recovery_stderr.read_bytes()
+            combined = b"\n".join((recovery_stdout_bytes, recovery_stderr_bytes))
+            recovery_text = combined.decode("utf-8", errors="strict")
+        except (OSError, UnicodeDecodeError):
+            return None
+        if ORACLE_RECOVERY_STATE_RE.search(recovery_text):
+            return None
+        if (
+            ORACLE_NO_LIVE_TAB_MARKER not in recovery_text
+            or f'"{locator}"' not in recovery_text
+            or ORACLE_NO_RECOVERABLE_URL_MARKER not in recovery_text
+        ):
+            return None
+        recovery_records.append({
+            "stdout_name": recovery_stdout.name,
+            "stdout_sha256": hashlib.sha256(recovery_stdout_bytes).hexdigest(),
+            "stderr_name": recovery_stderr.name,
+            "stderr_sha256": hashlib.sha256(recovery_stderr_bytes).hexdigest(),
+        })
+    if not recovery_records:
+        return None
+    return {
+        "project_root": str(state.get("project_root") or ""),
+        "run_id": str(state.get("run_id") or ""),
+        **binding,
+        "mission_sha256": mission_sha256,
+        "oracle_locator": locator,
+        "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+        "recovery_evidence": recovery_records,
+        "output_absent": True,
+        "conversation_url_absent": True,
+        "_augmented_mission_path": str(source_mission),
+        "_input_mission_path": str(input_mission),
+        "_receipt_path": str(receipt_path),
+    }
+
+
+def proven_user_confirmed_no_submission(state_path: Path) -> dict[str, Any] | None:
+    """Revalidate a persisted user confirmation against immutable run artifacts."""
+    state = load_state(state_path)
+    reference = state.get("user_confirmed_no_submission")
+    if not isinstance(reference, dict):
+        return None
+    expected_path = state_path.parent / "user-confirmed-no-submission.json"
+    if (
+        reference.get("schema") != "codex.chatgpt.oracle-settlement-reference/v1"
+        or Path(str(reference.get("path") or "")).resolve() != expected_path.resolve()
+        or expected_path.is_symlink()
+    ):
+        return None
+    try:
+        artifact_bytes = expected_path.read_bytes()
+        if hashlib.sha256(artifact_bytes).hexdigest() != str(reference.get("sha256") or ""):
+            return None
+        recorded = json.loads(artifact_bytes.decode("utf-8", errors="strict"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if (
+        recorded.get("schema") != "codex.chatgpt.oracle-user-confirmed-no-submission/v1"
+        or recorded.get("code") != "ORACLE_USER_CONFIRMED_NO_SUBMISSION"
+        or recorded.get("confirmation") != USER_CONFIRMED_NO_SUBMISSION
+        or not str(recorded.get("reason") or "").strip()
+    ):
+        return None
+    current = _user_confirmable_no_submission_evidence(state_path)
+    if current is None:
+        return None
+    for key in (
+        "project_root",
+        "run_id",
+        "workflow_id",
+        "stage",
+        "attempt_id",
+        "input_mission_sha256",
+        "mission_sha256",
+        "oracle_locator",
+        "stdout_sha256",
+        "stderr_sha256",
+        "recovery_evidence",
+        "output_absent",
+        "conversation_url_absent",
+    ):
+        if recorded.get(key) != current.get(key):
+            return None
+    return {
+        **recorded,
+        "_augmented_mission_path": current["_augmented_mission_path"],
+        "_input_mission_path": current["_input_mission_path"],
+        "_receipt_path": current["_receipt_path"],
+    }
+
+
+def settle_user_confirmed_no_submission(
+    state_path: Path,
+    *,
+    confirmation: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Release one ambiguous send only after explicit user adjudication.
+
+    Mechanical evidence remains fail-closed: it merely makes the run eligible.
+    The exact confirmation token is the authority that resolves non-submission.
+    """
+    if confirmation.strip().casefold() != USER_CONFIRMED_NO_SUBMISSION:
+        raise OracleStateError(
+            "NO_SUBMISSION_CONFIRMATION_REQUIRED",
+            f"confirmation must be exactly {USER_CONFIRMED_NO_SUBMISSION}",
+        )
+    normalized_reason = reason.strip()
+    if not normalized_reason:
+        raise OracleStateError("NO_SUBMISSION_REASON_REQUIRED", "confirmation reason is required")
+    payload = load_state(state_path)
+    existing = proven_user_confirmed_no_submission(state_path)
+    if existing is not None:
+        return payload
+    if str(payload.get("session_authority") or "") != "submitted_unknown":
+        raise OracleStateError(
+            "NO_SUBMISSION_AUTHORITY_INVALID",
+            "only a submitted_unknown run may be adjudicated as not submitted",
+        )
+    evidence = _user_confirmable_no_submission_evidence(state_path)
+    if evidence is None:
+        raise OracleStateError(
+            "NO_SUBMISSION_EVIDENCE_INCOMPLETE",
+            "run lacks the exact prompt-timeout and recovery-binding evidence required for user adjudication",
+        )
+    recorded = {
+        "schema": "codex.chatgpt.oracle-user-confirmed-no-submission/v1",
+        "code": "ORACLE_USER_CONFIRMED_NO_SUBMISSION",
+        "confirmation": USER_CONFIRMED_NO_SUBMISSION,
+        "reason": normalized_reason,
+        **{key: value for key, value in evidence.items() if not key.startswith("_")},
+    }
+    settlement_path = state_path.parent / "user-confirmed-no-submission.json"
+    write_json_atomic(settlement_path, recorded)
+    settlement_sha256 = sha256_file(settlement_path)
+    payload.update({
+        "status": "attention_required",
+        "exit_code": int(payload.get("exit_code") or 1),
+        "session_authority": "pre_submit",
+        "terminal_harvested": False,
+        "artifact_sha256": None,
+        "transport_status": "not_submitted_user_confirmed",
+        "task_outcome": "pending",
+        "task_outcome_reason": "user-confirmed-no-submission-after-prompt-timeout",
+        "user_confirmed_no_submission": {
+            "schema": "codex.chatgpt.oracle-settlement-reference/v1",
+            "path": str(settlement_path),
+            "sha256": settlement_sha256,
+        },
+    })
+    write_json_atomic(state_path, payload)
+    return payload
+
+
 def proven_pre_submit_rejection(state_path: Path) -> dict[str, Any] | None:
     """Return immutable evidence only for Oracle's own pre-submit prompt dedup rejection."""
     state = load_state(state_path)
@@ -802,7 +1110,11 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
 
 
 def proven_pre_submit_failure(state_path: Path) -> dict[str, Any] | None:
-    return proven_pre_submit_rejection(state_path) or proven_pre_submit_host_failure(state_path)
+    return (
+        proven_pre_submit_rejection(state_path)
+        or proven_pre_submit_host_failure(state_path)
+        or proven_user_confirmed_no_submission(state_path)
+    )
 
 
 def settle_proven_pre_submit_rejection(state_path: Path) -> dict[str, Any] | None:
@@ -831,6 +1143,9 @@ def settle_proven_pre_submit_failure(state_path: Path) -> dict[str, Any] | None:
     rejection = proven_pre_submit_rejection(state_path)
     if rejection is not None:
         return settle_proven_pre_submit_rejection(state_path)
+    confirmed = proven_user_confirmed_no_submission(state_path)
+    if confirmed is not None:
+        return load_state(state_path)
     evidence = proven_pre_submit_host_failure(state_path)
     if evidence is None:
         return None
@@ -1000,6 +1315,24 @@ def unresolved_project_sessions(
         if run_id == exclude_run_id or str(payload.get("project_root") or "").casefold() != expected_project:
             continue
         authority = str(payload.get("session_authority") or "").strip().casefold()
+        settlement_artifact = candidate.parent / "user-confirmed-no-submission.json"
+        settlement_derived = (
+            "user_confirmed_no_submission" in payload
+            or str(payload.get("transport_status") or "") == "not_submitted_user_confirmed"
+            or str(payload.get("task_outcome_reason") or "")
+            == "user-confirmed-no-submission-after-prompt-timeout"
+            or settlement_artifact.exists()
+        )
+        invalid_settlement = False
+        if (
+            authority == "pre_submit"
+            and settlement_derived
+            and proven_user_confirmed_no_submission(candidate) is None
+        ):
+            # A missing or changed settlement artifact revokes the release and
+            # restores fail-closed ownership before any new submission.
+            authority = "submitted_unknown"
+            invalid_settlement = True
         # Legacy running records fail closed because the provider may still be
         # active. Legacy attention-required records predate explicit session
         # authority and must not become permanent project locks; new runs
@@ -1009,7 +1342,7 @@ def unresolved_project_sessions(
         if authority not in active_authorities:
             continue
         owner_parent = str(payload.get("parallel_parent_id") or "").strip().casefold()
-        if expected_parent and owner_parent == expected_parent:
+        if expected_parent and owner_parent == expected_parent and not invalid_settlement:
             continue
         owners.append({
             "run_id": run_id,

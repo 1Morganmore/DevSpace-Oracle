@@ -72,6 +72,27 @@ def test_packet_carries_exact_run_bucket_and_evidence(tmp_path: Path) -> None:
     assert str(run_dir / "state.json") in packet["evidence_paths"]
 
 
+def test_packet_never_marks_fresh_run_safe_while_another_session_owns_project(tmp_path: Path) -> None:
+    module = load()
+    failed = write_run(
+        tmp_path,
+        "1" * 8,
+        status="failed",
+        stdout="ERROR: ChatGPT app mention was not confirmed in the composer.\n",
+    )
+    owner = write_run(
+        tmp_path,
+        "2" * 8,
+        status="running",
+        session_authority="submitted_unknown",
+    )
+
+    packet = module.build_packet(failed)
+
+    assert packet["safe_for_fresh_run"] is False
+    assert [item["run_id"] for item in packet["unresolved_owners"]] == [owner.name]
+
+
 def test_reporter_is_never_the_repair_owner(tmp_path: Path) -> None:
     module = load()
     run_dir = write_run(tmp_path, "b" * 8, status="failed", stdout="ERROR: unknown\n")

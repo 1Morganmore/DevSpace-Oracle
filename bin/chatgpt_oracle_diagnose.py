@@ -112,6 +112,7 @@ def classify_run(
     stdout_text: str,
     has_output: bool,
     transcript_text: str = "",
+    user_confirmed_no_submission: bool = False,
 ) -> dict[str, str]:
     """Return the bucket and signature for one persisted run.
 
@@ -134,6 +135,11 @@ def classify_run(
         return {"bucket": ACTIVE, "signature": "explicitly-abandoned"}
     if outcome == "not_executed" and has_output:
         return {"bucket": TASK_NOT_EXECUTED, "signature": "durable-output-reports-no-execution"}
+    if user_confirmed_no_submission:
+        return {
+            "bucket": PRE_SUBMIT_UI,
+            "signature": "user-confirmed-no-submission-after-prompt-timeout",
+        }
 
     for needle, bucket, signature in SIGNATURE_RULES:
         if needle in stdout_text:
@@ -181,6 +187,9 @@ def diagnose(state_root: Path | None = None) -> dict[str, Any]:
             stdout_text=_read_text(run_dir / "stdout.log"),
             has_output=_output_is_nonempty(output_path),
             transcript_text=_read_text(run_dir / "transcript.md"),
+            user_confirmed_no_submission=(
+                STATE.proven_user_confirmed_no_submission(run_dir / "state.json") is not None
+            ),
         )
         runs.append({
             "run_dir": str(run_dir),

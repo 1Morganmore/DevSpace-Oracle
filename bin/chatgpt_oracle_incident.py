@@ -86,11 +86,20 @@ def build_packet(run_dir: Path, *, reporter_role: str = REPORTER_ROLE) -> dict[s
         stdout_text=DIAGNOSE._read_text(directory / "stdout.log"),
         has_output=DIAGNOSE._output_is_nonempty(output_path),
         transcript_text=DIAGNOSE._read_text(directory / "transcript.md"),
+        user_confirmed_no_submission=(
+            STATE.proven_user_confirmed_no_submission(state_path) is not None
+        ),
     )
     lifecycle = STATE.resolve_lifecycle(
         state, output_is_present=DIAGNOSE._output_is_nonempty(output_path)
     )
     bucket = str(verdict["bucket"])
+    project_root = Path(str(state.get("project_root") or "")).expanduser().resolve(strict=True)
+    owners = STATE.unresolved_project_sessions(
+        directory.parent,
+        project_root,
+        exclude_run_id=str(state.get("run_id") or ""),
+    )
     return {
         "schema": SCHEMA,
         "run_dir": str(directory),
@@ -107,7 +116,10 @@ def build_packet(run_dir: Path, *, reporter_role: str = REPORTER_ROLE) -> dict[s
         "reporter_may_edit_automation_sources": False,
         # Only a proven pre-submit failure is safe to retry: nothing reached the
         # composer, so a fresh run cannot duplicate a live web submission.
-        "safe_for_fresh_run": bucket in {DIAGNOSE.PRE_SUBMIT_HOST, DIAGNOSE.PRE_SUBMIT_UI},
+        "safe_for_fresh_run": (
+            bucket in {DIAGNOSE.PRE_SUBMIT_HOST, DIAGNOSE.PRE_SUBMIT_UI} and not owners
+        ),
+        "unresolved_owners": owners,
         "remediation": DIAGNOSE.REMEDIATION.get(bucket, ""),
         "evidence_paths": sorted(
             str(path)

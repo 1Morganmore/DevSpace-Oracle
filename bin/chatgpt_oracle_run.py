@@ -183,12 +183,19 @@ def exact_session_state(path: Path) -> str | None:
     return matches[-1].casefold() if matches else None
 
 
-def exact_recovery_binding_unavailable(path: Path) -> bool:
-    """Return true only for Oracle's exact no-live-tab plus no-saved-URL proof."""
-    try:
-        value = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
+def exact_recovery_binding_unavailable(*paths: Path) -> bool:
+    """Return true only for Oracle's exact no-live-tab plus no-saved-URL proof.
+
+    Oracle 0.16.1 writes the no-live-tab line to stdout and the missing-URL
+    detail to stderr.  Both streams belong to one exact recovery attempt.
+    """
+    chunks: list[str] = []
+    for path in paths:
+        try:
+            chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            chunks.append("")
+    value = "\n".join(chunks)
     return all(marker in value for marker in RECOVERY_BINDING_UNAVAILABLE_MARKERS)
 
 
@@ -537,7 +544,7 @@ def _recover_run_locked(
             "stderr_path": str(stderr_path),
         }
     observed_session_state = exact_session_state(stdout_path)
-    if exact_recovery_binding_unavailable(stdout_path):
+    if exact_recovery_binding_unavailable(stdout_path, stderr_path):
         if argv_output.exists():
             argv_output.unlink()
         updated = STATE.update_state(
@@ -748,6 +755,51 @@ def adjudicate_task_outcome(
     }
 
 
+def settle_user_confirmed_no_submission(
+    run_dir: Path,
+    *,
+    confirmation: str,
+    reason: str,
+    platform_name: str | None = None,
+) -> dict[str, Any]:
+    """Settle one exact ambiguous send without launching or recovering Oracle."""
+    directory = run_dir.expanduser().resolve(strict=True)
+    state_path = directory / "state.json"
+    stored = STATE.load_state(state_path)
+    project_root = Path(str(stored.get("project_root") or "")).expanduser().resolve(strict=True)
+    parallel_parent_id = str(stored.get("parallel_parent_id") or "").strip().casefold()
+    if parallel_parent_id and STATE.PARENT_ID_RE.fullmatch(parallel_parent_id) is None:
+        raise OracleRunError(
+            "SETTLEMENT_PARALLEL_PARENT_ID_INVALID",
+            "stored parallel parent id is invalid",
+            {"parallel_parent_id": parallel_parent_id},
+        )
+    mutex_root = (
+        project_root / ".oracle-parallel-submit" / parallel_parent_id
+        if parallel_parent_id
+        else project_root
+    )
+    with STATE.project_submit_mutex(mutex_root, timeout_seconds=30, platform_name=platform_name):
+        settled = STATE.settle_user_confirmed_no_submission(
+            state_path,
+            confirmation=confirmation,
+            reason=reason,
+        )
+        owners = STATE.unresolved_project_sessions(
+            directory.parent,
+            project_root,
+            exclude_run_id=str(settled.get("run_id") or ""),
+        )
+    return {
+        "ok": True,
+        "status": "pre_submit_user_confirmed",
+        "safe_for_fresh_run": not owners,
+        "unresolved_owners": owners,
+        "run_dir": str(directory),
+        "result": settled,
+    }
+
+
 def recover_run(
     run_dir: Path,
     *,
@@ -866,6 +918,14 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     adjudicate_parser.add_argument("--reason", required=True)
+    settle_parser = commands.add_parser("settle-no-submission")
+    settle_parser.add_argument("--run-dir", type=Path, required=True)
+    settle_parser.add_argument(
+        "--confirmation",
+        choices=(STATE.USER_CONFIRMED_NO_SUBMISSION,),
+        required=True,
+    )
+    settle_parser.add_argument("--reason", required=True)
     return parser
 
 
@@ -883,11 +943,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 settle_timeout_seconds=args.settle_timeout_seconds,
                 settle_interval_seconds=args.settle_interval_seconds,
             )
-        else:
+        elif args.command == "adjudicate":
             payload = adjudicate_task_outcome(
                 args.run_dir,
                 expected_output_sha256=args.expected_output_sha256,
                 task_outcome=args.task_outcome,
+                reason=args.reason,
+            )
+        else:
+            payload = settle_user_confirmed_no_submission(
+                args.run_dir,
+                confirmation=args.confirmation,
                 reason=args.reason,
             )
     except STATE.OracleStateError as exc:
