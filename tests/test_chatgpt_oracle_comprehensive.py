@@ -982,6 +982,66 @@ def test_awaiting_receipt_rebind_advances_to_next_stage_without_replaying_plan(t
     assert result["next_index"] == 1
 
 
+def test_awaiting_relative_receipt_resumes_same_workflow_without_replaying_plan(tmp_path: Path) -> None:
+    module = load()
+    workflow_path = manifest(tmp_path)
+    config = module.load_manifest(workflow_path)
+    workflow_id = config["workflow_id"]
+    attempt_id = "b" * 32
+    mission, receipt_path, input_sha = module._stage_mission(
+        config, workflow_id, 0, "plan", config["initial_mission_path"], attempt_id
+    )
+    output = mission.parent / "plan.md"
+    review = mission.parent / "review.md"
+    output.write_text("plan", encoding="utf-8")
+    review.write_text("review", encoding="utf-8")
+    receipt_path.write_text(json.dumps({
+        "schema": module.RECEIPT_SCHEMA,
+        "workflow_id": workflow_id,
+        "stage": "plan",
+        "attempt_id": attempt_id,
+        "input_mission_sha256": input_sha,
+        "status": "PLAN_READY",
+        "output_path": str(output.relative_to(tmp_path)),
+        "output_sha256": module.sha(output),
+        "next_stage": "review",
+        "next_mission_path": str(review.relative_to(tmp_path)),
+        "next_mission_sha256": module.sha(review),
+        "ready_for_next": True,
+        "blocker": None,
+    }), encoding="utf-8")
+    state_path = module._state_path(config, workflow_id)
+    module._write(state_path, {
+        "schema": module.STATE_SCHEMA,
+        "status": "awaiting_receipt",
+        "workflow_id": workflow_id,
+        "manifest_sha256": config["manifest_sha256"],
+        "current_stage": "plan",
+        "current_attempt_id": attempt_id,
+        "current_input_sha256": input_sha,
+        "current_mission_path": str(config["initial_mission_path"]),
+        "receipt_path": str(receipt_path),
+        "next_index": 0,
+        "records": [],
+    })
+    calls: list[str] = []
+
+    def review_only(oracle_manifest: Path, *, dry_run: bool):
+        data = json.loads(oracle_manifest.read_text(encoding="utf-8"))
+        stage_mission = Path(data["mission_path"])
+        text = stage_mission.read_text(encoding="utf-8")
+        assert "stage=plan\n" not in text
+        assert "stage=review\n" in text
+        calls.append("review")
+        return {"ok": False, "run_dir": str(_oracle_running_state(module, oracle_manifest))}
+
+    result = module.run_workflow(workflow_path, oracle_execute=review_only)
+
+    assert result["status"] == "attention_required"
+    assert result["current_stage"] == "review"
+    assert calls == ["review"]
+
+
 def test_running_web_multi_rebinds_only_persisted_parent_result(tmp_path: Path) -> None:
     module = load()
     path = manifest(tmp_path)
@@ -1152,6 +1212,56 @@ def test_plan_mission_teaches_declared_packet_contract(tmp_path: Path) -> None:
     assert "[PRO_ATTACHMENT_AUTHORING_CONTRACT]" in text
     assert module.PRO_ATTACHMENT_SCHEMA in text
     assert "Canonical plan receipt status is PLAN_READY" in text
+    assert "output_path and next_mission_path MUST be absolute paths" in text
+
+
+def test_receipt_compatibly_resolves_project_relative_paths_with_hash_binding(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    output = tmp_path / "artifacts" / "plan.md"
+    next_mission = tmp_path / "missions" / "review.md"
+    output.parent.mkdir(parents=True)
+    next_mission.parent.mkdir(parents=True)
+    output.write_text("plan", encoding="utf-8")
+    next_mission.write_text("review", encoding="utf-8")
+    receipt_path = tmp_path / "stage-result.json"
+    receipt_path.write_text(json.dumps({
+        "schema": module.RECEIPT_SCHEMA,
+        "workflow_id": "a" * 32,
+        "stage": "plan",
+        "attempt_id": "b" * 32,
+        "input_mission_sha256": "c" * 64,
+        "status": "PLAN_READY",
+        "output_path": str(output.relative_to(tmp_path)),
+        "output_sha256": module.sha(output),
+        "next_stage": "review",
+        "next_mission_path": str(next_mission.relative_to(tmp_path)),
+        "next_mission_sha256": module.sha(next_mission),
+        "ready_for_next": True,
+        "blocker": None,
+    }), encoding="utf-8")
+
+    value = module._validate_receipt(
+        config, receipt_path, "a" * 32, "plan", "b" * 32, "c" * 64
+    )
+
+    assert value["output_path"] == str(output.resolve())
+    assert value["next_mission_path"] == str(next_mission.resolve())
+    assert value["_next_mission"] == next_mission.resolve()
+    assert set(value["_receipt_path_compatibility"]) == {"output_path", "next_mission_path"}
+    persisted = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert persisted["output_path"] == str(output.relative_to(tmp_path))
+    assert persisted["next_mission_path"] == str(next_mission.relative_to(tmp_path))
+
+
+def test_receipt_relative_path_escape_remains_fail_closed(tmp_path: Path) -> None:
+    module = load()
+    root = tmp_path / "project"
+    root.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside", encoding="utf-8")
+    with pytest.raises(module.WorkflowError, match="path outside project"):
+        module._receipt_path(root.resolve(), Path("..") / outside.name)
 
 
 def test_completed_plan_receipt_is_compatibly_normalized_only_when_fully_valid(tmp_path: Path) -> None:

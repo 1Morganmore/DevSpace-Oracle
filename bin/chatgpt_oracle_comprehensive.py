@@ -93,6 +93,25 @@ def _inside(root: Path, value: Any, *, exists: bool = True) -> Path:
     return path
 
 
+def _receipt_path(root: Path, value: Any, *, exists: bool = True) -> tuple[Path, bool]:
+    """Resolve a receipt artifact, compatibly anchoring legacy relative paths to project_root."""
+    raw = str(value or "").strip()
+    if not raw:
+        raise WorkflowError("workflow path is required")
+    candidate = Path(raw).expanduser()
+    relative_compat = not candidate.is_absolute()
+    if relative_compat:
+        if candidate.drive:
+            raise WorkflowError("drive-relative workflow paths are forbidden")
+        candidate = root / candidate
+    path = candidate.resolve(strict=exists)
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise WorkflowError(f"path outside project: {path}") from exc
+    return path, relative_compat
+
+
 def load_manifest(path: Path) -> dict[str, Any]:
     value = _json(path.resolve(strict=True))
     if value.get("schema") != SCHEMA:
@@ -275,7 +294,8 @@ def _stage_mission(
         f"Write the small UTF-8 stage receipt to: {receipt}\n"
         "Receipt JSON must use the key schema=codex.chatgpt.oracle-stage-result/v1. Include workflow_id, "
         "stage, attempt_id, input_mission_sha256, status, output_path, output_sha256, next_stage, next_mission_path, "
-        "next_mission_sha256, ready_for_next, blocker. Write the next mission itself; "
+        "next_mission_sha256, ready_for_next, blocker. output_path and next_mission_path MUST be absolute paths "
+        "inside exact_project_root; project-relative paths are invalid. Write the next mission itself; "
         "the host will validate bytes and hashes but will not rewrite its meaning. "
         "The supplied input_mission_sha256 binds the upstream source mission bytes before this HOST_STAGE_CONTRACT "
         "was appended; copy it exactly into the receipt and do not replace it with a hash of this augmented mission.md.\n"
@@ -778,9 +798,23 @@ def _validate_receipt(
         and not (stage == "review" and status == "FAIL")
     ):
         raise WorkflowError("stage receipt did not pass")
-    output = _inside(config["project_root"], value.get("output_path"))
+    output_raw = value.get("output_path")
+    output, output_relative = _receipt_path(config["project_root"], output_raw)
     if not output.is_file() or not output.read_bytes().strip() or value.get("output_sha256") != sha(output):
         raise WorkflowError("stage output is missing or hash-mismatched")
+    path_compatibility: dict[str, dict[str, str]] = {}
+    if output_relative:
+        path_compatibility["output_path"] = {"source": str(output_raw), "resolved": str(output)}
+    compatibility = (
+        {"_receipt_status_original": raw_status, "_receipt_status_normalized": "PLAN_READY"}
+        if completed_plan_compat else {}
+    )
+    normalized = {
+        **value,
+        **compatibility,
+        "output_path": str(output),
+        **({"_receipt_path_compatibility": path_compatibility} if path_compatibility else {}),
+    }
     if stage == "review":
         config.setdefault("_review_policy", _review_policy_from_history(config))
         finding_ids = _receipt_finding_ids(value, legacy_fallback=status == "REVISE")
@@ -789,13 +823,13 @@ def _validate_receipt(
             raise WorkflowError("passing review cannot retain critical findings")
         if status == "FAIL":
             return {
-                **value,
+                **normalized,
                 "_next_mission": None,
                 "_terminal_attention": str(value["blocker"]),
             }
         if status == "REVISE":
             return {
-                **value,
+                **normalized,
                 "_next_mission": None,
                 "_terminal_attention": (
                     "legacy REVISE cannot create a new plan; the review stage owns all locally repairable plan "
@@ -804,16 +838,27 @@ def _validate_receipt(
             }
     if next_stage not in TRANSITIONS[stage]:
         raise WorkflowError(f"invalid transition {stage}->{next_stage}")
-    compatibility = (
-        {"_receipt_status_original": raw_status, "_receipt_status_normalized": "PLAN_READY"}
-        if completed_plan_compat else {}
-    )
     if next_stage == "complete":
-        return {**value, **compatibility, "_next_mission": None}
-    next_mission = _inside(config["project_root"], value.get("next_mission_path"))
+        return {
+            **normalized,
+            **({"_receipt_path_compatibility": path_compatibility} if path_compatibility else {}),
+            "_next_mission": None,
+        }
+    next_mission_raw = value.get("next_mission_path")
+    next_mission, next_mission_relative = _receipt_path(config["project_root"], next_mission_raw)
     if value.get("next_mission_sha256") != sha(next_mission):
         raise WorkflowError("next mission hash mismatch")
-    return {**value, **compatibility, "_next_mission": next_mission}
+    if next_mission_relative:
+        path_compatibility["next_mission_path"] = {
+            "source": str(next_mission_raw),
+            "resolved": str(next_mission),
+        }
+    return {
+        **normalized,
+        "next_mission_path": str(next_mission),
+        **({"_receipt_path_compatibility": path_compatibility} if path_compatibility else {}),
+        "_next_mission": next_mission,
+    }
 
 
 def _state_path(config: dict[str, Any], workflow_id: str) -> Path:
