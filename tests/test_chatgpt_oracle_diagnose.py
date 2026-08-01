@@ -230,6 +230,26 @@ def test_uncertain_submission_timeout_is_a_post_submit_bucket(tmp_path: Path) ->
     assert "post-submit-provider-incomplete" not in report["safe_for_fresh_run_buckets"]
 
 
+def test_host_watchdog_transition_is_post_submit_and_never_retry_safe() -> None:
+    module = load()
+    verdict = module.classify_run(
+        {
+            "status": "attention_required",
+            "session_authority": "submitted_unknown",
+            "terminal_harvested": False,
+            "transport_status": "post_submit_watchdog_timeout",
+            "task_outcome": "pending",
+        },
+        stdout_text="response streaming",
+        has_output=False,
+    )
+
+    assert verdict == {
+        "bucket": "post-submit-provider-incomplete",
+        "signature": "host-wall-clock-expired-process-preserved",
+    }
+
+
 def test_user_confirmed_no_submission_overrides_prompt_timeout_only_with_validated_proof() -> None:
     module = load()
     state = {

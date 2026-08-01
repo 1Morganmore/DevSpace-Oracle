@@ -81,8 +81,11 @@ class Process:
     def __init__(self, code: int, events: list[str]):
         self.code = code
         self.events = events
+        self.pid = 1234
+        self.wait_timeout = None
 
-    def wait(self):
+    def wait(self, timeout=None):
+        self.wait_timeout = timeout
         self.events.append("wait")
         return self.code
 
@@ -220,12 +223,7 @@ def test_explicit_hide_window_arg_is_safe_and_not_duplicated(tmp_path: Path) -> 
 def test_regular_runs_raise_the_answer_timeout_above_the_upstream_default(
     tmp_path: Path,
 ) -> None:
-    """Heavy Extra High lanes must not be cut while still streaming.
-
-    Upstream waits `--browser-timeout` and then grants its recovery pass the
-    same budget, so its 20m default capped real runs at exactly 40m. Measured
-    lanes finished at 24m and 27m, and two were cut at 40m mid-stream.
-    """
+    """Heavy Extra High lanes get one explicit overall answer budget."""
     runner = load_runner()
 
     result = execute_run(runner, manifest(tmp_path), dry_run=True)
@@ -233,10 +231,9 @@ def test_regular_runs_raise_the_answer_timeout_above_the_upstream_default(
     argv = result["argv"]
     assert argv.count("--browser-timeout") == 1
     assert argv[argv.index("--browser-timeout") + 1] == runner.STATE.DEFAULT_BROWSER_ANSWER_TIMEOUT
-    # Upstream doubles the primary wait through its recovery pass, so 90m here
-    # is the documented ~180 minute effective ceiling.
     assert runner.STATE.DEFAULT_BROWSER_ANSWER_TIMEOUT == "90m"
-    assert runner.STATE.DEFAULT_BROWSER_ANSWER_CEILING_MINUTES == 180
+    assert runner.STATE.DEFAULT_BROWSER_ANSWER_CEILING_MINUTES == 90
+    assert result["host_watchdog_timeout_seconds"] == 5430
 
 
 def test_explicit_answer_timeout_is_honored_without_duplication(tmp_path: Path) -> None:
@@ -251,6 +248,24 @@ def test_explicit_answer_timeout_is_honored_without_duplication(tmp_path: Path) 
     argv = result["argv"]
     assert argv.count("--browser-timeout") == 1
     assert argv[argv.index("--browser-timeout") + 1] == "70m"
+    assert result["host_watchdog_timeout_seconds"] == 4230
+
+
+@pytest.mark.parametrize("duration", ["9d", "999999999h", "9" * 400])
+def test_answer_timeout_must_produce_a_finite_bounded_host_deadline(
+    tmp_path: Path,
+    duration: str,
+) -> None:
+    runner = load_runner()
+
+    with pytest.raises(runner.OracleRunError) as exc:
+        execute_run(
+            runner,
+            manifest(tmp_path, oracle_args=["--browser-timeout", duration]),
+            dry_run=True,
+        )
+
+    assert exc.value.code in {"BROWSER_TIMEOUT_INVALID", "BROWSER_TIMEOUT_OUT_OF_RANGE"}
 
 
 def test_pro_keeps_upstream_answer_timing(tmp_path: Path) -> None:
@@ -259,6 +274,7 @@ def test_pro_keeps_upstream_answer_timing(tmp_path: Path) -> None:
     result = execute_run(runner, pro_manifest(tmp_path), dry_run=True)
 
     assert "--browser-timeout" not in result["argv"]
+    assert result["host_watchdog_timeout_seconds"] is None
 
 
 def test_pro_dry_run_uses_oracle_attachments_and_no_app_mention(tmp_path: Path) -> None:
@@ -471,6 +487,117 @@ def test_post_submit_nonzero_requires_exact_recovery_and_never_restarts(tmp_path
         assert "--no-recover" not in recovery["argv"]
         assert "restart" not in recovery["argv"]
         assert "--prompt" not in recovery["argv"]
+
+
+@pytest.mark.parametrize("parallel_parent_id", [None, "d" * 64])
+def test_post_submit_host_watchdog_preserves_exact_process_and_returns_attention(
+    tmp_path: Path,
+    parallel_parent_id: str | None,
+) -> None:
+    runner = load_runner()
+    waits: list[float | None] = []
+    process_actions: list[str] = []
+    launches: list[list[str]] = []
+
+    class HungProcess:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            raise subprocess.TimeoutExpired("oracle", timeout)
+
+        def terminate(self):
+            process_actions.append("terminate")
+
+        def kill(self):
+            process_actions.append("kill")
+
+    def hung_popen(command, **kwargs):
+        launches.append(list(command))
+        kwargs["stdout"].write(b"Session: exact\nprompt submitted; response streaming\n")
+        kwargs["stdout"].flush()
+        return HungProcess()
+
+    extras = {
+        "oracle_args": ["--browser-timeout", "1s"],
+        "run_id": "4" * 32,
+    }
+    if parallel_parent_id is not None:
+        extras["parallel_parent_id"] = parallel_parent_id
+    result = execute_run(
+        runner,
+        manifest(tmp_path, **extras),
+        run_factory=version_runner,
+        popen_factory=hung_popen,
+    )
+    state = result["result"]
+
+    assert result["ok"] is False
+    assert result["status"] == "post_submit_watchdog_timeout"
+    assert result["safe_for_fresh_run"] is False
+    assert result["process_preserved"] is True
+    assert result["oracle_process_pid"] == 4242
+    assert waits == [31]
+    assert process_actions == []
+    assert len(launches) == 1
+    assert state["status"] == "attention_required"
+    assert state["exit_code"] is None
+    assert state["session_authority"] == "submitted_unknown"
+    assert state["terminal_harvested"] is False
+    assert state["transport_status"] == "post_submit_watchdog_timeout"
+    assert state["task_outcome_reason"] == "host-wall-clock-expired-process-preserved"
+    assert state["host_watchdog"] == {
+        "status": "expired",
+        "timeout_seconds": 31,
+        "oracle_process_pid": 4242,
+        "process_action": "preserved",
+        "next_action": "observe-or-recover-exact-session-only",
+    }
+    assert Path(state["artifacts"]["browser_temp"]).is_dir()
+    assert not Path(state["artifacts"]["output"]).exists()
+    assert not list(Path(result["run_dir"]).glob("recovery-*-stdout.log"))
+
+
+def test_host_watchdog_deadline_race_accepts_only_a_process_that_already_exited(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+    output_path: Path | None = None
+
+    class RacedExitProcess:
+        pid = 4343
+
+        def wait(self, timeout=None):
+            assert timeout == 31
+            assert output_path is not None
+            output_path.write_text("durable answer\nTASK_OUTCOME: EXECUTED\n", encoding="utf-8")
+            raise subprocess.TimeoutExpired("oracle", timeout)
+
+        def poll(self):
+            return 0
+
+    def raced_popen(command, **kwargs):
+        nonlocal output_path
+        output_path = Path(command[command.index("--write-output") + 1])
+        return RacedExitProcess()
+
+    result = execute_run(
+        runner,
+        manifest(
+            tmp_path,
+            oracle_args=["--browser-timeout", "1s"],
+            run_id="5" * 32,
+            task_outcome_contract="v1",
+        ),
+        run_factory=version_runner,
+        popen_factory=raced_popen,
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["status"] == "complete"
+    assert result["result"]["session_authority"] == "terminal"
+    assert result["result"]["terminal_harvested"] is True
+    assert result["result"]["host_watchdog"]["status"] == "process-exited"
 
 
 def test_pro_recovery_uses_exact_slug_without_attachments_or_resubmit(tmp_path: Path) -> None:

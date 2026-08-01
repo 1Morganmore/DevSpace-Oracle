@@ -65,21 +65,16 @@ SAFE_ORACLE_VALUE_OPTIONS = {
     "--heartbeat",
     "--timeout",
     "--zombie-timeout",
-    # Upstream waits `--browser-timeout` for the answer and then grants the
-    # recovery pass the same budget, so the effective ceiling is twice this
-    # value.  Oracle's default is 20m, which caps a heavy run at 40m even
-    # though its own guidance says a run may take about an hour.  Measured
-    # GPT-5.6 Extra High DevSpace lanes finished at 24m and 27m only because
-    # the recovery pass rescued them, and two lanes were cut at exactly 40m
-    # while still streaming.  Allow the caller to raise the ceiling.
+    # Oracle 0.16.1 is compatibility-patched so this is one overall answer
+    # budget, including fallback capture.  The host also enforces the same
+    # wall-clock deadline with a short grace if CDP evaluation itself wedges.
     "--browser-timeout",
     "--browser-recheck-timeout",
 }
-# Primary answer wait for a heavy non-Pro run.  Upstream grants its recovery
-# pass the same budget, so the effective ceiling is twice this value: 90m here
-# yields roughly 180 minutes total before a streaming answer is abandoned.
+# Overall answer budget for a heavy non-Pro run.
 DEFAULT_BROWSER_ANSWER_TIMEOUT = "90m"
-DEFAULT_BROWSER_ANSWER_CEILING_MINUTES = 180
+DEFAULT_BROWSER_ANSWER_CEILING_MINUTES = 90
+HOST_WATCHDOG_GRACE_SECONDS = 30
 ORACLE_DUPLICATE_PROMPT_RE = re.compile(
     r'A session with the same prompt is already running '
     r'\((?P<locator>oracle-[a-z0-9-]+)\)\.\s*'
@@ -662,6 +657,7 @@ def update_state(
     transport_status: str | None = None,
     task_outcome: str | None = None,
     task_outcome_reason: str | None = None,
+    host_watchdog: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if status not in STATUSES:
         raise OracleStateError("STATUS_INVALID", "invalid Oracle run status")
@@ -693,6 +689,8 @@ def update_state(
         payload["task_outcome"] = task_outcome
     if task_outcome_reason is not None:
         payload["task_outcome_reason"] = task_outcome_reason
+    if host_watchdog is not None:
+        payload["host_watchdog"] = host_watchdog
     write_json_atomic(state_path, payload)
     return payload
 

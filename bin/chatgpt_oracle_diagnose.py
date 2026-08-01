@@ -140,6 +140,11 @@ def classify_run(
             "bucket": PRE_SUBMIT_UI,
             "signature": "user-confirmed-no-submission-after-prompt-timeout",
         }
+    if str(state.get("transport_status") or "") == "post_submit_watchdog_timeout":
+        return {
+            "bucket": PROVIDER_INCOMPLETE,
+            "signature": "host-wall-clock-expired-process-preserved",
+        }
 
     for needle, bucket, signature in SIGNATURE_RULES:
         if needle in stdout_text:

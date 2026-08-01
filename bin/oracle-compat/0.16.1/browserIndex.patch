@@ -12,3 +12,32 @@ index d585a16..be389f6 100644
      const manualLogin = Boolean(config.manualLogin);
      if (manualLogin && usingCopiedProfile) {
          throw new BrowserAutomationError("--copy-profile cannot be combined with --browser-manual-login: choose either a throwaway copied profile or the persistent manual-login profile.", { stage: "profile-config" });
+@@ -3075,7 +3078,8 @@ export function isWebSocketClosureError(error) {
+         message.includes("target closed"));
+ }
+ async function waitForAssistantResponseWithReload(Runtime, Page, timeoutMs, logger, minTurnIndex, expectedConversationId) {
++    const startedAt = Date.now();
+     try {
+         return await waitForAssistantResponse(Runtime, timeoutMs, logger, minTurnIndex, expectedConversationId);
+     }
+     catch (error) {
+@@ -3087,10 +3091,18 @@ async function waitForAssistantResponseWithReload(Runtime, Page, timeoutMs, logg
+         if (!conversationUrl || !isConversationUrl(conversationUrl)) {
+             throw error;
+         }
++        let remainingMs = Math.max(0, timeoutMs - (Date.now() - startedAt));
++        if (remainingMs === 0) {
++            throw error;
++        }
+         logger("Assistant response stalled; reloading conversation and retrying once");
+         await Page.navigate({ url: conversationUrl });
+         await delay(1000);
++        remainingMs = Math.max(0, timeoutMs - (Date.now() - startedAt));
++        if (remainingMs === 0) {
++            throw error;
++        }
+-        return await waitForAssistantResponse(Runtime, timeoutMs, logger, minTurnIndex, expectedConversationId);
++        return await waitForAssistantResponse(Runtime, remainingMs, logger, minTurnIndex, expectedConversationId);
+     }
+ }
+ function shouldReloadAfterAssistantError(error) {

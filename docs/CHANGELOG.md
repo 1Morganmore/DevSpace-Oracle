@@ -21,7 +21,9 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
 ### 장기 작업과 복구
 
 - 비Pro 작업은 기본 `--browser-timeout 90m`을 사용합니다.
-- Oracle의 1차 대기와 복구 대기를 합쳐 실효 약 180분까지 기다립니다.
+- Oracle의 재로드·fallback은 같은 90분 예산의 남은 시간만 사용합니다.
+- CDP 호출이 멈춰도 host watchdog이 30초 grace 뒤 동일 세션을 보존한 채
+  `attention_required`로 반환합니다.
 - 제출 후 로컬 종료·브라우저 연결 끊김은 `attention_required`로 보존합니다.
 - 복구는 저장된 정확한 slug와 대화 URL만 사용하고 새 질문을 보내지 않습니다.
 - terminal 상태는 이후 관찰에서 live로 되돌아가지 않습니다.

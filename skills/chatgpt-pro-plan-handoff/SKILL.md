@@ -98,6 +98,12 @@ operator visibility. Only final web PASS plus a zero-exit local gate can
 complete. A Pro selection launches an explicit Oracle attachment-only stage
 and waits for a bound receipt; it is never downgraded. Missing receipt/output,
 crash, or ambiguity returns attention-required without a replacement submit.
+Regular-stage `--browser-timeout` is an overall answer deadline, not a fresh
+budget for each reload/fallback. If Oracle fails to exit within that deadline
+plus the host grace, comprehensive mode persists the same attempt as
+`post_submit_watchdog_timeout` and returns attention-required. It does not kill,
+replace, restart, or resubmit the exact session; later continuation may only
+observe or recover that stored slug.
 
 `Prompt did not appear in conversation before timeout (send may have failed)`
 remains submission-uncertain by default. Exact recovery reporting no live tab

@@ -461,6 +461,63 @@ def test_running_oracle_stage_recovers_exact_run_without_resubmission(tmp_path: 
     assert second["recovery"]["status"] == "recovered"
 
 
+def test_post_submit_watchdog_persists_same_attempt_and_only_exact_recovers(
+    tmp_path: Path,
+) -> None:
+    module = load()
+    submissions: list[Path] = []
+    recoveries: list[tuple[Path, str]] = []
+
+    def watchdog_execute(oracle_manifest: Path, *, dry_run: bool):
+        run_dir = _oracle_running_state(module, oracle_manifest)
+        submissions.append(run_dir)
+        state_path = run_dir / "state.json"
+        state = module.RUNNER.STATE.load_state(state_path)
+        state.update({
+            "status": "attention_required",
+            "session_authority": "submitted_unknown",
+            "transport_status": "post_submit_watchdog_timeout",
+            "task_outcome_reason": "host-wall-clock-expired-process-preserved",
+            "host_watchdog": {
+                "status": "expired",
+                "process_action": "preserved",
+            },
+        })
+        module.RUNNER.STATE.write_json_atomic(state_path, state)
+        return {
+            "ok": False,
+            "status": "post_submit_watchdog_timeout",
+            "safe_for_fresh_run": False,
+            "process_preserved": True,
+            "run_dir": str(run_dir),
+            "result": state,
+        }
+
+    def exact_recover(run_dir: Path, *, action: str, dry_run: bool):
+        recoveries.append((run_dir, action))
+        return {"ok": True, "status": "complete", "run_dir": str(run_dir)}
+
+    workflow_manifest = manifest(tmp_path)
+    first = module.run_workflow(
+        workflow_manifest,
+        oracle_execute=watchdog_execute,
+        oracle_recover=exact_recover,
+    )
+    second = module.run_workflow(
+        workflow_manifest,
+        oracle_execute=watchdog_execute,
+        oracle_recover=exact_recover,
+    )
+
+    assert first["status"] == "attention_required"
+    assert first["current_attempt_id"] == first["oracle_run_id"]
+    assert first["oracle_run_dir"] == str(submissions[0])
+    assert len(submissions) == 1
+    assert recoveries == [(submissions[0], "harvest")]
+    assert second["status"] == "awaiting_receipt"
+    assert second["recovery"]["status"] == "recovered"
+
+
 def test_unambiguous_app_mention_pre_submit_failure_retries_once(tmp_path: Path) -> None:
     module = load()
     submitted = 0

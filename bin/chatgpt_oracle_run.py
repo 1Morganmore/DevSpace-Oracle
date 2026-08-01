@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import subprocess
@@ -115,6 +116,74 @@ def build_oracle_argv(config, layout, prompt: str) -> list[str]:
     return command
 
 
+_BROWSER_TIMEOUT_RE = re.compile(r"^(?P<value>[0-9]+(?:\.[0-9]+)?)(?P<unit>ms|s|m|h)?$", re.IGNORECASE)
+MAX_HOST_WATCHDOG_SECONDS = 7 * 24 * 60 * 60
+
+
+def host_watchdog_timeout_seconds(config, argv: Sequence[str]) -> float | None:
+    """Return one host wall-clock ceiling without changing Pro timing.
+
+    Oracle 0.16.1 can remain inside a blocked CDP evaluation after its own
+    browser deadline.  The host deadline is therefore independent and only
+    releases the caller; it never terminates the submitted Oracle process.
+    """
+    if config.transport == "pro-attachment-only":
+        return None
+    values: list[str] = []
+    for index, item in enumerate(argv):
+        if item == "--browser-timeout":
+            if index + 1 >= len(argv):
+                raise OracleRunError("BROWSER_TIMEOUT_INVALID", "--browser-timeout requires a value")
+            values.append(str(argv[index + 1]))
+        elif item.startswith("--browser-timeout="):
+            values.append(item.split("=", 1)[1])
+    if len(values) != 1:
+        raise OracleRunError(
+            "BROWSER_TIMEOUT_INVALID",
+            "regular Oracle runs require exactly one browser timeout",
+            {"values": values},
+        )
+    match = _BROWSER_TIMEOUT_RE.fullmatch(values[0].strip())
+    if match is None:
+        raise OracleRunError(
+            "BROWSER_TIMEOUT_INVALID",
+            "browser timeout must be a positive ms/s/m/h duration",
+            {"value": values[0]},
+        )
+    value = float(match.group("value"))
+    unit = (match.group("unit") or "ms").casefold()
+    multiplier = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}[unit]
+    answer_seconds = value * multiplier
+    watchdog_seconds = answer_seconds + STATE.HOST_WATCHDOG_GRACE_SECONDS
+    if (
+        not math.isfinite(value)
+        or not math.isfinite(answer_seconds)
+        or not math.isfinite(watchdog_seconds)
+        or answer_seconds <= 0
+        or watchdog_seconds > MAX_HOST_WATCHDOG_SECONDS
+    ):
+        raise OracleRunError(
+            "BROWSER_TIMEOUT_OUT_OF_RANGE",
+            "browser timeout must produce a finite host deadline of at most seven days",
+            {"value": values[0]},
+        )
+    return watchdog_seconds
+
+
+def wait_for_oracle_process(process: Any, watchdog_timeout_seconds: float | None) -> tuple[int | None, bool]:
+    if watchdog_timeout_seconds is None:
+        return int(process.wait()), False
+    try:
+        return int(process.wait(timeout=watchdog_timeout_seconds)), False
+    except subprocess.TimeoutExpired:
+        poll = getattr(process, "poll", None)
+        if callable(poll):
+            raced_exit_code = poll()
+            if raced_exit_code is not None:
+                return int(raced_exit_code), False
+        return None, True
+
+
 def resolve_oracle_version(command: Sequence[str], *, run_factory=subprocess.run, platform_name: str | None = None) -> str:
     completed = run_factory(
         [*command, "--version"],
@@ -154,6 +223,7 @@ def dry_run_payload(config, layout, argv: Sequence[str], prompt: str) -> dict[st
         "stdout_path": str(layout.stdout_path),
         "stderr_path": str(layout.stderr_path),
         "contains_file_flag": "--file" in argv,
+        "host_watchdog_timeout_seconds": host_watchdog_timeout_seconds(config, argv),
     }
 
 
@@ -240,6 +310,7 @@ def execute_run(
         return dry_run_payload(config, layout, argv, prompt)
 
     STATE.cleanup_prior_boot_browser_temps(config.run_root, platform_name=platform_name)
+    watchdog_timeout_seconds = host_watchdog_timeout_seconds(config, argv)
     mission_bytes = config.mission_path.read_bytes()
     actual_mission_sha256 = hashlib.sha256(mission_bytes).hexdigest()
     if actual_mission_sha256 != config.mission_sha256:
@@ -262,6 +333,9 @@ def execute_run(
     layout.stdout_path.touch()
     layout.stderr_path.touch()
     oracle_env = STATE.browser_temp_environment(layout.browser_temp_path, platform_name=platform_name)
+    exit_code: int | None = None
+    watchdog_expired = False
+    oracle_process_pid: int | None = None
     try:
         version = resolve_oracle_version(config.oracle_command, run_factory=run_factory, platform_name=platform_name)
         compat_factory(version)
@@ -349,16 +423,32 @@ def execute_run(
                     shell=False,
                     **STATE.windows_subprocess_kwargs(platform_name=platform_name),
                 )
+                raw_pid = getattr(process, "pid", None)
+                oracle_process_pid = int(raw_pid) if isinstance(raw_pid, int) else None
                 STATE.update_state(
                     layout.state_path,
                     status="running",
                     resolved_version=version,
                     session_authority="submitted_unknown",
+                    host_watchdog=(
+                        {
+                            "status": "armed",
+                            "timeout_seconds": watchdog_timeout_seconds,
+                            "oracle_process_pid": oracle_process_pid,
+                            "process_action": "preserve",
+                        }
+                        if watchdog_timeout_seconds is not None
+                        else {"status": "disabled-for-pro"}
+                    ),
                 )
                 if not config.parallel_parent_id:
-                    exit_code = int(process.wait())
+                    exit_code, watchdog_expired = wait_for_oracle_process(
+                        process, watchdog_timeout_seconds
+                    )
             if config.parallel_parent_id:
-                exit_code = int(process.wait())
+                exit_code, watchdog_expired = wait_for_oracle_process(
+                    process, watchdog_timeout_seconds
+                )
     except Exception as exc:
         code = f"{exc.code}: " if isinstance(exc, OracleRunError) else ""
         append_error(layout.stderr_path, f"Oracle launch/run failed: {code}{exc}")
@@ -368,6 +458,34 @@ def execute_run(
             STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
         return {"ok": False, "run_dir": str(layout.run_dir), "result": STATE.update_state(layout.state_path, status="failed")}
     STATE.write_transcript(layout)
+    if watchdog_expired:
+        state = STATE.update_state(
+            layout.state_path,
+            status="attention_required",
+            exit_code=None,
+            session_authority="submitted_unknown",
+            transport_status="post_submit_watchdog_timeout",
+            task_outcome="pending",
+            task_outcome_reason="host-wall-clock-expired-process-preserved",
+            host_watchdog={
+                "status": "expired",
+                "timeout_seconds": watchdog_timeout_seconds,
+                "oracle_process_pid": oracle_process_pid,
+                "process_action": "preserved",
+                "next_action": "observe-or-recover-exact-session-only",
+            },
+        )
+        return {
+            "ok": False,
+            "status": "post_submit_watchdog_timeout",
+            "safe_for_fresh_run": False,
+            "process_preserved": True,
+            "oracle_process_pid": oracle_process_pid,
+            "host_watchdog_timeout_seconds": watchdog_timeout_seconds,
+            "next_action": "observe the original process or recover the exact slug; never replace or resubmit",
+            "run_dir": str(layout.run_dir),
+            "result": state,
+        }
     pre_submit_failure = STATE.settle_proven_pre_submit_failure(layout.state_path)
     if pre_submit_failure is not None:
         STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
@@ -414,6 +532,12 @@ def execute_run(
                 if task_outcome in {"executed", "not_executed", "blocked"}
                 else task_outcome
             ),
+            host_watchdog={
+                "status": "process-exited",
+                "timeout_seconds": watchdog_timeout_seconds,
+                "oracle_process_pid": oracle_process_pid,
+                "process_action": "none",
+            },
         )
         STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
     else:
@@ -424,6 +548,12 @@ def execute_run(
             session_authority="submitted_unknown",
             transport_status="failed" if exit_code else "incomplete",
             task_outcome=task_outcome,
+            host_watchdog={
+                "status": "process-exited",
+                "timeout_seconds": watchdog_timeout_seconds,
+                "oracle_process_pid": oracle_process_pid,
+                "process_action": "none",
+            },
         )
     return {"ok": status == "complete", "run_dir": str(layout.run_dir), "result": state}
 

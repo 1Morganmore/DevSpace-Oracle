@@ -63,6 +63,11 @@ A nonzero Oracle exit after launch, including a browser response timeout, is
 `attention_required` rather than proof that the web session failed. It retains
 same-project ownership and permits only exact-slug `live` or `harvest`
 recovery; it never authorizes a replacement submission.
+For non-Pro runs, `--browser-timeout` is one overall answer budget. Oracle
+fallback capture consumes only the remaining time. A host wall-clock watchdog
+adds a short grace for a wedged CDP call; if it expires, the runner returns
+`post_submit_watchdog_timeout`, preserves the exact process/session and browser
+evidence, and remains unsafe for a fresh submission.
 
 ## Recovery
 

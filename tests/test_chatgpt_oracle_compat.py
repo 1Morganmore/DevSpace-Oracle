@@ -224,3 +224,34 @@ def test_hidden_window_patch_supports_windows_without_headless_mode() -> None:
     assert "--window-position=-32000,-32000" in patch
     assert contract["pristine"] == "9eaffd8264051266581548ea9dbee1152bd94b7a6032ed0441b1ba3c11c5b5e9"
     assert contract["patched"] == "d852372c9c16c9a130a280001e62312542092b0c38397907897217f8af0c559d"
+
+
+def test_browser_timeout_compat_patches_consume_one_overall_budget() -> None:
+    compat = load_compat()
+    index_contract = compat.PATCHES["dist/src/browser/index.js"]
+    index_patch = (
+        Path(compat.__file__).resolve().parent
+        / "oracle-compat"
+        / "0.16.1"
+        / index_contract["patch"]
+    ).read_text(encoding="utf-8")
+    response_contract = compat.PATCHES["dist/src/browser/actions/assistantResponse.js"]
+    response_patch = (
+        Path(compat.__file__).resolve().parent
+        / "oracle-compat"
+        / "0.16.1"
+        / response_contract["patch"]
+    ).read_text(encoding="utf-8")
+
+    assert "const startedAt = Date.now();" in index_patch
+    assert "timeoutMs - (Date.now() - startedAt)" in index_patch
+    assert "waitForAssistantResponse(Runtime, remainingMs" in index_patch
+    assert index_patch.count("timeoutMs - (Date.now() - startedAt)") == 2
+    assert index_patch.index("await delay(1000)") < index_patch.rindex(
+        "timeoutMs - (Date.now() - startedAt)"
+    ) < index_patch.index("waitForAssistantResponse(Runtime, remainingMs")
+    assert "recoverAssistantResponse(Runtime, remainingMs" in response_patch
+    assert "\n+                const recovered = await recoverAssistantResponse(Runtime, timeoutMs" not in response_patch
+    assert index_contract["patched"] == "5f7bc607dae4667ad860d2aa125c138c053190e33f206237c24f5c6aab4bf14c"
+    assert "9168df2b3e8c4d1c962d05b198ceab1a9df9e50c7573453673212905e2bc5eba" in index_contract["legacy_patched"]
+    assert response_contract["patched"] == "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4"

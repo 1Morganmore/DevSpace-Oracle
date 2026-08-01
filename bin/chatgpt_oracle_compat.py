@@ -34,7 +34,15 @@ PATCHES = {
     "dist/src/browser/index.js": {
         "patch": "browserIndex.patch",
         "pristine": "ea7461262078363517ad16fe57ac8766f06f037782954987520375dcbfd1c7af",
-        "patched": "9168df2b3e8c4d1c962d05b198ceab1a9df9e50c7573453673212905e2bc5eba",
+        "patched": "5f7bc607dae4667ad860d2aa125c138c053190e33f206237c24f5c6aab4bf14c",
+        "legacy_patched": [
+            "9168df2b3e8c4d1c962d05b198ceab1a9df9e50c7573453673212905e2bc5eba",
+        ],
+    },
+    "dist/src/browser/actions/assistantResponse.js": {
+        "patch": "assistantResponse.patch",
+        "pristine": "0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d",
+        "patched": "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4",
     },
     "dist/src/browser/actions/promptComposer.js": {
         "patch": "promptComposer.patch",
