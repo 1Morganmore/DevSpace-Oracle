@@ -516,6 +516,50 @@ def test_launch_time_pre_submit_failures_also_retry_once(tmp_path: Path, marker:
     assert result["next_index"] == 0
 
 
+def test_version_resolution_prelaunch_failure_retries_same_stage_once_then_stops(tmp_path: Path) -> None:
+    module = load()
+    submissions = 0
+    recoveries = 0
+
+    def fake_execute(oracle_manifest: Path, *, dry_run: bool):
+        nonlocal submissions
+        submissions += 1
+        run_dir = _oracle_running_state(module, oracle_manifest)
+        state_path = run_dir / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["status"] = "attention_required"
+        state["session_authority"] = "pre_submit"
+        state["oracle"]["resolved_version"] = "unresolved"
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        (run_dir / "stdout.log").write_bytes(b"")
+        (run_dir / "stderr.log").write_text(
+            "version resolution failed: Command ['npx.cmd', '-y', '@steipete/oracle', '--version'] timed out after 30 seconds\n",
+            encoding="utf-8",
+        )
+        return {"ok": False, "run_dir": str(run_dir)}
+
+    def forbidden_recover(*args, **kwargs):
+        nonlocal recoveries
+        recoveries += 1
+        raise AssertionError("proven pre-submit failures must not invoke exact-session recovery")
+
+    workflow_manifest = manifest(tmp_path)
+    result = module.run_workflow(
+        workflow_manifest,
+        oracle_execute=fake_execute,
+        oracle_recover=forbidden_recover,
+    )
+    config = module.load_manifest(workflow_manifest)
+
+    assert submissions == 2
+    assert recoveries == 0
+    assert result["status"] == "attention_required"
+    assert result["current_stage"] == "plan"
+    assert result["next_index"] == 0
+    assert result["pre_submit_retries"] == 1
+    assert result["current_binding_source_sha256"] == module.sha(config["initial_mission_path"])
+
+
 def test_durable_output_prevents_pre_submit_retry_even_with_a_launch_marker(tmp_path: Path) -> None:
     module = load()
     submitted = 0

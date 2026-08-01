@@ -61,6 +61,10 @@ def version_runner(command, **kwargs):
     return subprocess.CompletedProcess(command, 0, stdout="oracle 0.13.0\n", stderr="")
 
 
+def version_timeout_runner(command, **kwargs):
+    raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 30))
+
+
 def execute_run(runner, *args, **kwargs):
     kwargs.setdefault("compat_factory", lambda version: {"ok": True, "version": version})
     kwargs.setdefault(
@@ -630,6 +634,121 @@ def test_recovery_settles_legacy_duplicate_prompt_lock_without_oracle_call(tmp_p
     assert recovered["safe_for_fresh_run"] is True
     assert settled["session_authority"] == "pre_submit"
     assert calls == []
+
+
+def test_version_resolution_timeout_is_proven_pre_submit_and_releases_project(tmp_path: Path) -> None:
+    runner = load_runner()
+    result = execute_run(
+        runner,
+        manifest(tmp_path, run_id="c" * 32),
+        run_factory=version_timeout_runner,
+        popen_factory=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("Oracle must not launch after version timeout")
+        ),
+    )
+    run_dir = Path(result["run_dir"])
+    state = runner.STATE.load_state(run_dir / "state.json")
+
+    assert result["status"] == "pre_submit_failed"
+    assert result["safe_for_fresh_run"] is True
+    assert state["session_authority"] == "pre_submit"
+    assert state["transport_status"] == "failed_pre_submit"
+    assert state["pre_submit_failure"]["code"] == "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED"
+    assert state["pre_submit_failure"]["conversation_url_absent"] is True
+    assert runner.STATE.unresolved_project_sessions(
+        runner.STATE.load_manifest(manifest(tmp_path)).run_root,
+        tmp_path,
+    ) == []
+
+
+def test_recovery_repairs_legacy_version_timeout_authority_without_oracle_call(tmp_path: Path) -> None:
+    runner = load_runner()
+    initial = execute_run(
+        runner,
+        manifest(tmp_path, run_id="d" * 32),
+        run_factory=version_timeout_runner,
+    )
+    run_dir = Path(initial["run_dir"])
+    state_path = run_dir / "state.json"
+    legacy = json.loads(state_path.read_text(encoding="utf-8"))
+    legacy["session_authority"] = "submitted_unknown"
+    legacy["transport_status"] = "incomplete"
+    legacy.pop("pre_submit_failure", None)
+    state_path.write_text(json.dumps(legacy), encoding="utf-8")
+    calls: list[bool] = []
+
+    recovered = runner.recover_run(
+        run_dir,
+        action="harvest",
+        oracle_command=["oracle"],
+        popen_factory=lambda *args, **kwargs: calls.append(True),
+    )
+    settled = runner.STATE.load_state(state_path)
+
+    assert recovered["status"] == "pre_submit_failed"
+    assert recovered["safe_for_fresh_run"] is True
+    assert settled["session_authority"] == "pre_submit"
+    assert calls == []
+
+
+def test_recovery_no_session_keeps_pre_submit_authority_and_allows_fresh_attempt(tmp_path: Path) -> None:
+    runner = load_runner()
+    config = runner.STATE.load_manifest(manifest(tmp_path, run_id="e" * 32))
+    layout = runner.STATE.create_layout(config, run_id=config.requested_run_id)
+    layout.run_dir.mkdir(parents=True)
+    runner.STATE.write_json_atomic(
+        layout.state_path,
+        runner.STATE.state_payload(config, layout, status="failed", resolved_version="oracle 0.16.1"),
+    )
+    for path in (layout.stdout_path, layout.stderr_path):
+        path.touch()
+
+    def no_session(command, **kwargs):
+        kwargs["stderr"].write(f"No session found with ID {layout.slug}.\n".encode())
+        kwargs["stderr"].flush()
+        return Process(1, [])
+
+    recovered = runner.recover_run(
+        layout.run_dir,
+        action="harvest",
+        oracle_command=["oracle"],
+        popen_factory=no_session,
+    )
+    settled = runner.STATE.load_state(layout.state_path)
+
+    assert recovered["status"] == "pre_submit_session_absent"
+    assert recovered["safe_for_fresh_run"] is True
+    assert settled["session_authority"] == "pre_submit"
+    assert settled["pre_submit_session_absence"]["oracle_locator"] == layout.slug
+
+
+def test_recovery_no_session_never_releases_submitted_unknown_run(tmp_path: Path) -> None:
+    runner = load_runner()
+    config = runner.STATE.load_manifest(manifest(tmp_path, run_id="f" * 32))
+    layout = runner.STATE.create_layout(config, run_id=config.requested_run_id)
+    layout.run_dir.mkdir(parents=True)
+    state = runner.STATE.state_payload(config, layout, status="attention_required", resolved_version="oracle 0.16.1")
+    state["session_authority"] = "submitted_unknown"
+    runner.STATE.write_json_atomic(layout.state_path, state)
+    for path in (layout.stdout_path, layout.stderr_path):
+        path.touch()
+
+    def no_session(command, **kwargs):
+        kwargs["stderr"].write(f"No session found with ID {layout.slug}.\n".encode())
+        kwargs["stderr"].flush()
+        return Process(1, [])
+
+    recovered = runner.recover_run(
+        layout.run_dir,
+        action="live",
+        oracle_command=["oracle"],
+        popen_factory=no_session,
+    )
+    settled = runner.STATE.load_state(layout.state_path)
+
+    assert recovered["status"] == "attention_required"
+    assert recovered.get("safe_for_fresh_run") is not True
+    assert settled["session_authority"] == "submitted_unknown"
 
 
 def test_recovery_captures_output_and_updates_state(tmp_path: Path) -> None:

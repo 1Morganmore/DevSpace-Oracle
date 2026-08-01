@@ -822,6 +822,13 @@ def _state_path(config: dict[str, Any], workflow_id: str) -> Path:
 
 
 def _is_unambiguous_pre_submit_failure(run_dir: Path) -> bool:
+    state_path = run_dir / "state.json"
+    if state_path.is_file():
+        try:
+            if RUNNER.STATE.proven_pre_submit_failure(state_path) is not None:
+                return True
+        except RUNNER.STATE.OracleStateError:
+            pass
     output = run_dir / "output.md"
     if output.is_file() and output.read_bytes().strip():
         return False

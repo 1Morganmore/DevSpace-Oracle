@@ -268,13 +268,28 @@ def execute_run(
                 )
         STATE.update_state(layout.state_path, status="prepared", resolved_version=version)
     except Exception as exc:
-        code = f"{exc.code}: " if isinstance(exc, OracleRunError) else ""
+        code = (
+            f"{exc.code}: "
+            if isinstance(exc, OracleRunError)
+            else "ORACLE_VERSION_TIMEOUT: " if isinstance(exc, subprocess.TimeoutExpired) else ""
+        )
         append_error(layout.stderr_path, f"version resolution failed: {code}{exc}")
         STATE.write_transcript(layout)
+        failed = STATE.update_state(layout.state_path, status="failed")
+        settled = STATE.settle_proven_pre_submit_failure(layout.state_path)
+        if settled is not None:
+            STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
+            return {
+                "ok": False,
+                "status": "pre_submit_failed",
+                "safe_for_fresh_run": True,
+                "run_dir": str(layout.run_dir),
+                "result": settled,
+            }
         return {
             "ok": False,
             "run_dir": str(layout.run_dir),
-            "result": STATE.update_state(layout.state_path, status="failed"),
+            "result": failed,
         }
 
     try:
@@ -346,15 +361,16 @@ def execute_run(
             STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
         return {"ok": False, "run_dir": str(layout.run_dir), "result": STATE.update_state(layout.state_path, status="failed")}
     STATE.write_transcript(layout)
-    pre_submit_rejection = STATE.settle_proven_pre_submit_rejection(layout.state_path)
-    if pre_submit_rejection is not None:
+    pre_submit_failure = STATE.settle_proven_pre_submit_failure(layout.state_path)
+    if pre_submit_failure is not None:
         STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
+        status = "pre_submit_rejected" if pre_submit_failure.get("pre_submit_rejection") else "pre_submit_failed"
         return {
             "ok": False,
-            "status": "pre_submit_rejected",
+            "status": status,
             "safe_for_fresh_run": True,
             "run_dir": str(layout.run_dir),
-            "result": pre_submit_rejection,
+            "result": pre_submit_failure,
         }
     # Once Oracle has been launched, a nonzero local exit (including the
     # browser response timeout) does not prove that the exact web session
@@ -428,16 +444,17 @@ def _recover_run_locked(
 ) -> dict[str, Any]:
     directory = run_dir.expanduser().resolve(strict=True)
     state = STATE.load_state(directory / "state.json")
-    pre_submit_rejection = STATE.settle_proven_pre_submit_rejection(directory / "state.json")
-    if pre_submit_rejection is not None:
-        STATE.cleanup_owned_browser_temp(Path(str(pre_submit_rejection["artifacts"]["browser_temp"])))
+    pre_submit_failure = STATE.settle_proven_pre_submit_failure(directory / "state.json")
+    if pre_submit_failure is not None:
+        STATE.cleanup_owned_browser_temp(Path(str(pre_submit_failure["artifacts"]["browser_temp"])))
+        status = "pre_submit_rejected" if pre_submit_failure.get("pre_submit_rejection") else "pre_submit_failed"
         return {
             "ok": False,
-            "status": "pre_submit_rejected",
+            "status": status,
             "safe_for_fresh_run": True,
             "run_dir": str(directory),
             "action": "none",
-            "result": pre_submit_rejection,
+            "result": pre_submit_failure,
         }
     historical_authority = historical_session_authority(directory, state)
     if (
@@ -499,6 +516,26 @@ def _recover_run_locked(
             exit_code = int(process.wait())
     finally:
         STATE.cleanup_owned_browser_temp(recovery_browser_temp)
+    pre_submit_absence = STATE.settle_pre_submit_session_absent(
+        directory / "state.json",
+        locator=locator,
+        recovery_stdout=stdout_path,
+        recovery_stderr=stderr_path,
+    )
+    if pre_submit_absence is not None:
+        if argv_output.exists():
+            argv_output.unlink()
+        return {
+            "ok": False,
+            "status": "pre_submit_session_absent",
+            "safe_for_fresh_run": True,
+            "run_dir": str(directory),
+            "action": action,
+            "exit_code": exit_code,
+            "result": pre_submit_absence,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+        }
     observed_session_state = exact_session_state(stdout_path)
     if exact_recovery_binding_unavailable(stdout_path):
         if argv_output.exists():

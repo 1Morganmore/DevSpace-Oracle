@@ -86,6 +86,10 @@ ORACLE_DUPLICATE_PROMPT_RE = re.compile(
     r'Reattach with "oracle session (?P=locator)" or rerun with --force to start another run\.',
     re.IGNORECASE,
 )
+ORACLE_NO_SESSION_RE = re.compile(
+    r"No session found with ID\s+(?P<locator>oracle-[a-z0-9-]+)\.?",
+    re.IGNORECASE,
+)
 # Upstream Oracle copies a signed-in browser profile with rsync.  On POSIX
 # hosts without rsync the copy fails after launch, so feasibility is decided
 # while loading the manifest instead of crashing mid-launch.  The pinned
@@ -691,6 +695,36 @@ def output_is_nonempty(path: Path) -> bool:
         return False
 
 
+def _state_has_conversation_url(state: dict[str, Any]) -> bool:
+    """Recognize only explicit persisted conversation URL fields."""
+    url_keys = {"conversation_url", "conversationUrl", "canonical_url", "canonicalUrl"}
+
+    def walk(value: Any) -> bool:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if key in url_keys and str(nested or "").strip():
+                    return True
+                if isinstance(nested, (dict, list)) and walk(nested):
+                    return True
+        elif isinstance(value, list):
+            return any(walk(item) for item in value)
+        return False
+
+    return walk(state)
+
+
+def _artifact_bytes(state: dict[str, Any], name: str) -> tuple[Path, bytes] | None:
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    raw = str(artifacts.get(name) or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    try:
+        return path, path.read_bytes()
+    except OSError:
+        return None
+
+
 def proven_pre_submit_rejection(state_path: Path) -> dict[str, Any] | None:
     """Return immutable evidence only for Oracle's own pre-submit prompt dedup rejection."""
     state = load_state(state_path)
@@ -716,6 +750,61 @@ def proven_pre_submit_rejection(state_path: Path) -> dict[str, Any] | None:
     }
 
 
+def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
+    """Prove a host failure happened before Oracle/browser launch.
+
+    `execute_run` emits the version-resolution prefix itself before the Oracle
+    process is created.  The additional immutable-state checks keep this from
+    reclassifying a real submitted or live session.
+    """
+    state = load_state(state_path)
+    authority = str(state.get("session_authority") or "")
+    if authority not in {"pre_submit", "submitted_unknown"}:
+        return None
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    if str(oracle.get("resolved_version") or "") != "unresolved":
+        return None
+    if _state_has_conversation_url(state):
+        return None
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    output = Path(str(artifacts.get("output") or ""))
+    if str(output) and output_is_nonempty(output):
+        return None
+    stdout_record = _artifact_bytes(state, "stdout")
+    stderr_record = _artifact_bytes(state, "stderr")
+    if stdout_record is None or stderr_record is None:
+        return None
+    _, stdout_bytes = stdout_record
+    _, stderr_bytes = stderr_record
+    if stdout_bytes.strip():
+        return None
+    try:
+        stderr_text = stderr_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    normalized_error = stderr_text.lstrip()
+    if not normalized_error.startswith("version resolution failed:"):
+        return None
+    if not (
+        "ORACLE_VERSION_TIMEOUT:" in normalized_error
+        or ("--version" in normalized_error and "timed out after 30 seconds" in normalized_error)
+    ):
+        return None
+    return {
+        "schema": "codex.chatgpt.oracle-pre-submit-host-failure/v1",
+        "code": "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED",
+        "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+        "output_absent": True,
+        "conversation_url_absent": True,
+        "resolved_version": "unresolved",
+    }
+
+
+def proven_pre_submit_failure(state_path: Path) -> dict[str, Any] | None:
+    return proven_pre_submit_rejection(state_path) or proven_pre_submit_host_failure(state_path)
+
+
 def settle_proven_pre_submit_rejection(state_path: Path) -> dict[str, Any] | None:
     """Correct submitted_unknown only when exact Oracle stdout proves no send occurred."""
     evidence = proven_pre_submit_rejection(state_path)
@@ -732,6 +821,84 @@ def settle_proven_pre_submit_rejection(state_path: Path) -> dict[str, Any] | Non
         "task_outcome": "pending",
         "task_outcome_reason": "oracle-global-prompt-duplicate",
         "pre_submit_rejection": evidence,
+    })
+    write_json_atomic(state_path, payload)
+    return payload
+
+
+def settle_proven_pre_submit_failure(state_path: Path) -> dict[str, Any] | None:
+    """Settle either supported immutable proof without preserving a false lock."""
+    rejection = proven_pre_submit_rejection(state_path)
+    if rejection is not None:
+        return settle_proven_pre_submit_rejection(state_path)
+    evidence = proven_pre_submit_host_failure(state_path)
+    if evidence is None:
+        return None
+    payload = load_state(state_path)
+    payload.update({
+        "status": "attention_required",
+        "exit_code": int(payload.get("exit_code") or 1),
+        "session_authority": "pre_submit",
+        "terminal_harvested": False,
+        "artifact_sha256": None,
+        "transport_status": "failed_pre_submit",
+        "task_outcome": "pending",
+        "task_outcome_reason": "prelaunch-host-failure",
+        "pre_submit_failure": evidence,
+    })
+    write_json_atomic(state_path, payload)
+    return payload
+
+
+def settle_pre_submit_session_absent(
+    state_path: Path,
+    *,
+    locator: str,
+    recovery_stdout: Path,
+    recovery_stderr: Path,
+) -> dict[str, Any] | None:
+    """Keep pre-submit authority when exact recovery proves no Oracle session exists."""
+    payload = load_state(state_path)
+    if str(payload.get("session_authority") or "") != "pre_submit":
+        return None
+    if _state_has_conversation_url(payload):
+        return None
+    artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}
+    output = Path(str(artifacts.get("output") or ""))
+    if str(output) and output_is_nonempty(output):
+        return None
+    chunks: list[bytes] = []
+    for path in (recovery_stdout, recovery_stderr):
+        try:
+            chunks.append(path.read_bytes())
+        except OSError:
+            chunks.append(b"")
+    combined = b"\n".join(chunks)
+    try:
+        text = combined.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    matches = [match.group("locator") for match in ORACLE_NO_SESSION_RE.finditer(text)]
+    if matches != [locator]:
+        return None
+    evidence = {
+        "schema": "codex.chatgpt.oracle-pre-submit-session-absence/v1",
+        "code": "ORACLE_EXACT_SESSION_NOT_FOUND",
+        "oracle_locator": locator,
+        "recovery_sha256": hashlib.sha256(combined).hexdigest(),
+        "output_absent": True,
+        "conversation_url_absent": True,
+    }
+    payload.update({
+        "status": "attention_required",
+        "exit_code": int(payload.get("exit_code") or 1),
+        "session_authority": "pre_submit",
+        "terminal_harvested": False,
+        "artifact_sha256": None,
+        "transport_status": "not_submitted",
+        "task_outcome": "pending",
+        "task_outcome_reason": "exact-session-absent-before-submit",
+        "pre_submit_session_absence": evidence,
     })
     write_json_atomic(state_path, payload)
     return payload
