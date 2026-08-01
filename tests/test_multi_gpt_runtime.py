@@ -29,14 +29,14 @@ def test_mcp_schema_exposes_only_the_fixed_execution_contract() -> None:
     tool = mcp_tools()["multi_gpt_start"]
     properties = tool["inputSchema"]["properties"]
     assert properties["model"]["enum"] == ["gpt-5.6-luna"]
-    assert properties["reasoning_effort"]["enum"] == ["xhigh"]
+    assert properties["reasoning_effort"]["enum"] == ["max"]
 
 
 def test_mcp_rejects_noncontract_overrides_before_a_job_or_child_starts() -> None:
     for arguments in (
         {"prompt": "contract test", "model": "gpt-5.6-sol"},
         {"prompt": "contract test", "reasoning_effort": "high"},
-        {"prompt": "contract test", "reasoning_effort": "max"},
+        {"prompt": "contract test", "reasoning_effort": "xhigh"},
     ):
         response = mcp_response(
             "tools/call", {"name": "multi_gpt_start", "arguments": arguments}
@@ -50,10 +50,10 @@ def test_runtime_defaults_reject_overrides_and_pin_every_stage_argv() -> None:
     source = SERVER.read_text(encoding="utf-8")
 
     assert "const DEFAULT_MODEL = 'gpt-5.6-luna';" in source
-    assert "const DEFAULT_REASONING_EFFORT = 'xhigh';" in source
+    assert "const DEFAULT_REASONING_EFFORT = 'max';" in source
     assert "const EXECUTION_CONTRACT = Object.freeze({" in source
     assert "model: 'gpt-5.6-luna'" in source
-    assert "reasoning_effort: 'xhigh'" in source
+    assert "reasoning_effort: 'max'" in source
     assert "const model = requestedContract.model || DEFAULT_MODEL;" in source
     assert "const reasoningEffort = requestedContract.reasoning_effort || DEFAULT_REASONING_EFFORT;" in source
     assert "assertExecutionContract(model, reasoningEffort);" in source
@@ -67,7 +67,13 @@ def test_runtime_defaults_reject_overrides_and_pin_every_stage_argv() -> None:
     assert "assertExecutionContract(model, reasoningEffort);" in launcher
     assert "'--model', EXECUTION_CONTRACT.model," in launcher
     assert "`model_reasoning_effort=\"${reasoningEffort}\"`" in launcher
+    assert "'--ignore-user-config'" not in launcher
+    assert "'-c', 'responses_websockets=false'" in launcher
     assert "args.splice" not in launcher
+
+    assert "function resolveCodexCommand()" in source
+    assert "codex.opencodex-real.cmd" in source
+    assert "existsSync(openCodexReal) ? openCodexReal : 'codex.cmd'" in source
 
 
 def test_job_and_result_surfaces_preserve_contract_evidence() -> None:

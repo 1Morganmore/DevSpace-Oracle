@@ -39,7 +39,7 @@ Call `multi_gpt_start` with:
   768 KB total. Oversized input fails at intake with `file too large` or
   `total file context too large`; pass an excerpt instead of a whole large document.
 - `model`: omit it or specify exactly `gpt-5.6-luna`; every other value is rejected before any child starts
-- `reasoning_effort`: omit it or specify exactly `xhigh`; every other value is rejected before any child starts
+- `reasoning_effort`: omit it or specify exactly `max`; every other value is rejected before any child starts
 - `max_iterations`: `1` for prompt shaping, `2` for broad critique, `3` for architecture comparison, and `5` only for explicit heavy use
 
 The tool returns a `job_id`. Runs commonly take 5-20 minutes. Poll `multi_gpt_status` sparingly until `completed`, `failed`, or `canceled`.
@@ -61,7 +61,7 @@ Prefer skipping when context is small, selected files are few, the question is a
 
 Compression may cover logs, CI output, search results, long documents, issue threads, and duplicate summaries. Keep patch-target source, diffs, schemas, validators, exact errors, security evidence, and migration contracts raw.
 
-Record the job id, `requested_contract`, `enforced_launch_contract`, iteration budget, status, evidence paths, and advisory boundary when the result materially changes the task. The enforced launch contract is `gpt-5.6-luna` with `xhigh` reasoning. It records the server argv and Codex client contract, not an independent provider readback. This deliberately avoids the host's `max` compatibility path, which was observed as `medium` in OpenCodex request logs despite `max` appearing in argv and Codex turn context.
+Record the job id, `requested_contract`, `enforced_launch_contract`, iteration budget, status, evidence paths, and advisory boundary when the result materially changes the task. The enforced launch contract is `gpt-5.6-luna` with `max` reasoning. Multi-GPT keeps the normal Codex user configuration enabled so an installed OpenCodex base URL and model catalog reach the provider boundary, while explicit stage arguments continue to pin the model, effort, read-only sandbox, approval policy, and HTTP transport. Verify a representative run by matching its exact Codex session id to the hashed OpenCodex `conversationId`; nearby rows from another Codex task are not Multi-GPT evidence.
 
 ## Completion
 

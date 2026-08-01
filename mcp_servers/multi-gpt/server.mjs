@@ -13,14 +13,14 @@ const SERVER_VERSION = '0.1.0';
 // through to whatever the Codex CLI picks, which is how this pipeline kept running on an
 // older economy tier even after the documented default moved to GPT-5.6.
 const DEFAULT_MODEL = 'gpt-5.6-luna';
-const DEFAULT_REASONING_EFFORT = 'xhigh';
+const DEFAULT_REASONING_EFFORT = 'max';
 const DEFAULT_MAX_ITERATIONS = 5;
 // This is an execution contract, rather than a caller preference.  The pipeline
 // fan-outs can create many Codex children, so accepting a lower-cost override
 // would silently make one advisory run heterogeneous and non-reproducible.
 const EXECUTION_CONTRACT = Object.freeze({
   model: 'gpt-5.6-luna',
-  reasoning_effort: 'xhigh',
+  reasoning_effort: 'max',
 });
 // Evidence files are inlined verbatim into EVERY stage prompt (Planner, Solver, Refiner,
 // Merger, Organizer), so these caps are a context budget, not an I/O limit. They are sized
@@ -40,7 +40,18 @@ const SOLVER_CONCURRENCY = SUB_GPT_CONCURRENCY;
 const REFINER_CONCURRENCY = SUB_GPT_CONCURRENCY;
 const MERGER_CONCURRENCY = SUB_GPT_CONCURRENCY;
 const CODEX_TIMEOUT_MS = 30 * 60 * 1000;
-const CODEX_COMMAND = process.platform === 'win32' ? 'codex.cmd' : 'codex';
+function resolveCodexCommand() {
+  if (process.platform !== 'win32') return 'codex';
+  // OpenCodex installs codex.cmd as an autostart shim. Running that shim once per
+  // parallel stage launches concurrent `ensure` processes and can serialize or stall
+  // the fan-out. Its preserved real CLI still reads the normal Codex config, including
+  // OpenCodex's base URL and generated model catalog, without repeating setup work.
+  const appData = process.env.APPDATA;
+  const openCodexReal = appData ? path.join(appData, 'npm', 'codex.opencodex-real.cmd') : '';
+  return openCodexReal && existsSync(openCodexReal) ? openCodexReal : 'codex.cmd';
+}
+
+const CODEX_COMMAND = resolveCodexCommand();
 const MAX_ERROR_TEXT = 4000;
 const JOBS_DIR = path.join(process.env.CODEX_HOME || path.join(homedir(), '.codex'), 'mcp_servers', 'multi-gpt', 'jobs');
 const JOBS = new Map();
@@ -58,7 +69,7 @@ const TOOLS = [
         prompt: { type: 'string', description: 'Original user request.' },
         files: { type: 'array', items: { type: 'string' }, description: 'Optional local file paths to read and attach as context. Each file is read-only and size-limited.' },
         model: { type: 'string', enum: ['gpt-5.6-luna'], description: 'Optional execution-contract model. Omitted values are fixed to gpt-5.6-luna.' },
-        reasoning_effort: { type: 'string', enum: ['xhigh'], description: 'Optional execution-contract reasoning effort. Omitted values are fixed to xhigh.' },
+        reasoning_effort: { type: 'string', enum: ['max'], description: 'Optional execution-contract reasoning effort. Omitted values are fixed to max.' },
         max_iterations: { type: 'number', description: 'Maximum Merger -> Refiner -> Judge loop iterations. Default 5.' },
       },
       required: ['prompt'],
@@ -366,19 +377,16 @@ async function runCodexStage({ stageName, systemPrompt, userMessage, outputMode,
   const args = [
     '--ask-for-approval', 'never',
     'exec',
-    '--ignore-user-config',
     '--json',
     '--sandbox', 'read-only',
     '--skip-git-repo-check',
     '--model', EXECUTION_CONTRACT.model,
     '-c', `model_reasoning_effort="${reasoningEffort}"`,
-    // Stages run with --ignore-user-config, so the host's existing proxy-side choice
-    // ("websockets": false in .opencodex/config.json) never reaches them and the native
-    // Responses WebSocket transport stays active for every stage child. That transport is
-    // exactly what broke the 2026-07-28 run: five "idle timeout waiting for websocket"
-    // reconnects in the Planner stage, then `codex exec exited with 1`, discarding the whole
-    // job. Pin the same HTTP/SSE transport the host already selected globally so one stalled
-    // socket cannot destroy a multi-stage run.
+    // Keep user config enabled so an installed OpenCodex base URL and model catalog remain
+    // authoritative at the provider boundary. Model, effort, approval, sandbox, and transport
+    // are still pinned explicitly here, so user defaults cannot weaken this execution contract.
+    // Pin HTTP/SSE as well: native Responses WebSockets previously produced repeated idle
+    // timeouts and discarded an otherwise healthy multi-stage run.
     '-c', 'responses_websockets=false',
     '--output-last-message', outputPath,
     '-',

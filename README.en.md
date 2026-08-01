@@ -57,7 +57,7 @@ Host state and ChatGPT output are stored outside DevSpace projects under
 | Orchestrator | `orchestrator` / orchestrator | One GPT completes an already-scoped task | Oracle + DevSpace |
 | Deep Research | `deep-research` / deep research | Public research plus project evidence | Oracle Deep Research + DevSpace |
 | Web Multi-GPT | Web Multi-GPT | Independent parallel perspectives and merger | 2-25 Oracle sessions |
-| Local Multi-GPT | Local Multi-GPT | Local advisory synthesis and counterexample search | Fixed `gpt-5.6-luna` + `xhigh`, read-only |
+| Local Multi-GPT | Local Multi-GPT | Local advisory synthesis and counterexample search | Fixed `gpt-5.6-luna` + `max`, read-only |
 | Comprehensive | comprehensive mode | Plan, optional Pro/Multi, review, implementation, gate | Staged Oracle workflow |
 | Pro | `pro` / Pro | Independent final judgment or design review; result only | Oracle attachments only |
 
@@ -73,7 +73,7 @@ implementation and gates.
 
 Local Multi-GPT and Web Multi-GPT are separate paths. Local Multi-GPT is an
 optional advisory tool that runs Codex child lanes on the PC. Every stage is
-fixed to `gpt-5.6-luna` with `xhigh` reasoning; any other model or effort is
+fixed to `gpt-5.6-luna` with `max` reasoning; any other model or effort is
 rejected before a child process starts. Web Multi-GPT instead runs independent
 ChatGPT web sessions through Oracle and merges their results.
 
