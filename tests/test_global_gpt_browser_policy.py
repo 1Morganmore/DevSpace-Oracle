@@ -69,6 +69,11 @@ def test_pro_requires_maximum_useful_project_specific_judgment_context() -> None
     assert "credentials, secrets, cookies, browser/profile state" in flat
     assert "volatile logs, caches, and unrelated bulk" in flat
     assert "Preflight fails closed" in flat
+    assert "build_project_context_packet.py build" in flat
+    assert "build_project_context_packet.py validate" in flat
+    assert "explicit evidence allowlist" in flat
+    assert "local proven/configured transport envelope" in flat
+    assert "not vendor or model limits" in flat
 
 
 def test_deep_research_uses_oracle_deep_without_silent_fallback() -> None:

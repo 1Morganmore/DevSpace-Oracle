@@ -66,6 +66,7 @@
     "skills/chatgpt-thinking-browser/scripts/run_thinking_browser.py",
     "skills/chatgpt-pro-browser/SKILL.md",
     "skills/chatgpt-pro-browser/agents/openai.yaml",
+    "skills/chatgpt-pro-browser/scripts/build_project_context_packet.py",
     "skills/chatgpt-pro-browser/scripts/run_chatgpt_pro.py",
     "skills/chatgpt-pro-browser/scripts/run_pro_browser.py",
     "skills/chatgpt-deep-research-browser/SKILL.md",

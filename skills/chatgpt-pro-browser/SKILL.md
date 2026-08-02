@@ -85,6 +85,31 @@ leaving it out.
 - the arithmetic connecting the proposed decision to the user's real target,
   including capacity, cost, risk, and time-to-evidence where applicable.
 
+Use the executable universal builder before every submission; policy prose is
+not a substitute for its validator. It takes an explicit evidence allowlist
+only and never recursively scans a project:
+
+```powershell
+python <skill-root>\scripts\build_project_context_packet.py build --manifest C:\project\.ai-bridge\pro-context-manifest.json
+python <skill-root>\scripts\build_project_context_packet.py validate --manifest C:\project\.ai-bridge\pro-context-manifest.json
+```
+
+The UTF-8 JSON manifest uses schema
+`codex.chatgpt.pro-project-context/v1` and must declare the exact absolute
+`project_root`, non-empty `question`, non-empty project-specific
+`required_categories`, `local_transport_envelope_bytes`,
+`answer_headroom_bytes`, `metadata_reserve_bytes`, root-contained
+`packet_path`, and an `evidence` allowlist. Each evidence entry has exactly
+`path`, `category`, `priority`, and frozen `sha256`. The declared envelope is a
+fixed tested local profile `oracle-pro-local-envelope-2026-08-03/v1`: total
+uncompressed envelope 64 MiB, answer headroom 8 MiB, metadata reserve 1 MiB,
+evidence budget 55 MiB, and a 32 MiB cap for each evidence file and packet ZIP.
+These are a local proven/configured transport envelope, not vendor or model
+limits; callers must use the exact values or preflight fails closed. The
+builder writes the ZIP and its adjacent immutable-hash receipt; validation
+fails closed on root escape, symlinks, stale hashes, unsafe evidence, duplicate
+paths/archive collisions, absent required categories, and budget overflow.
+
 Prefer one deterministic, path-preserved ZIP plus the short UTF-8 mission. The
 ZIP must contain a root mission/packet, an evidence index, original absolute and
 project-relative paths, per-entry SHA-256 and size, source qualification,
@@ -109,8 +134,9 @@ packet cannot be tied to the exact project root and question.
 
 1. Do not run the resource guard as a routine or pressure gate.
 2. Resolve and hash-validate the tested Oracle compatibility contract.
-3. Validate the short UTF-8 mission and the judgment-complete maximum-useful-
-   context packet, including its effective budget/use/headroom record,
+3. Build then validate the short UTF-8 mission and the judgment-complete
+   maximum-useful-context packet with
+   `build_project_context_packet.py`, including its effective budget/use/headroom record,
    deterministic priority order, evidence index, frozen hashes, and omissions.
 4. Claim the same normalized-project mutex used by regular Oracle work.
 5. Use a fresh Oracle slug; do not reuse an unrelated tab or conversation.
