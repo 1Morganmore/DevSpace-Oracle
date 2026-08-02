@@ -43,13 +43,31 @@ def test_pro_requires_maximum_useful_project_specific_judgment_context() -> None
     flat = " ".join(value.split())
     assert "project-specific, judgment-complete" in flat
     assert "maximum-useful-context packet" in flat
-    assert "all non-duplicative, decision-relevant project evidence" in flat
+    assert "universal default for every project and every Pro consultation" in flat
+    assert "requires no project-specific opt-in" in flat
+    assert "Fill the verified effective Oracle/Pro attachment and model-context budget" in flat
+    assert "up to the practical maximum" in flat
+    assert "effective attachment/context budget used for the run" in flat
+    assert "included bytes or tokens when measurable" in flat
+    assert "remaining capacity could not improve the decision" in flat
+    assert "Do not silently stop at a customary file count or convenience bundle size" in flat
+    assert "using the domain-appropriate equivalent" in flat
+    assert "all non-duplicative, project-specific, decision-relevant project evidence" in flat
+    assert "governing rules and exact question" in flat
+    assert "canonical current state and measured primary evidence" in flat
+    assert "conflicts, failures, controls, and prior decisions" in flat
+    assert "source or implementation feasibility" in flat
+    assert "compact supporting detail" in flat
+    assert "excluded or truncated artifact" in flat
+    assert "coverage boundary, priority, and expected decision impact" in flat
     assert "complete applicable `AGENTS.md`/project-rule chain" in flat
     assert "killed, rejected, blocked, or near-duplicate routes" in flat
     assert "exact prior answer" in flat
     assert "evidence index" in flat
     assert "known omissions" in flat
     assert "databases/WAL files" in flat
+    assert "credentials, secrets, cookies, browser/profile state" in flat
+    assert "volatile logs, caches, and unrelated bulk" in flat
     assert "Preflight fails closed" in flat
 
 

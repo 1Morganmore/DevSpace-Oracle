@@ -30,22 +30,43 @@ CDP/Playwright, or `@chrome` fallback.
 - Local context is attachment-only through Oracle `--file` arguments.
 - Every attachment is an exact regular non-symlink file with a frozen SHA-256.
 - Every new Pro consultation carries a project-specific, judgment-complete,
-  maximum-useful-context packet. A thin prompt or a convenience subset is not
-  sufficient when more decision-relevant project evidence exists.
+  maximum-useful-context packet. This is the universal default for every
+  project and every Pro consultation; it requires no project-specific opt-in.
+  A thin prompt or a convenience subset is not sufficient when more
+  decision-relevant project evidence exists.
 - Search or research is enabled only when explicitly requested and supported by
   the selected Pro route.
 
 ## Maximum project-context packet
 
-Build the largest safe packet that improves the requested judgment. Include all
-non-duplicative, decision-relevant project evidence until that evidence is
-exhausted or the current Oracle/Pro attachment or context boundary is reached.
-Reserve deterministic headroom for the mission, evidence index, and final Pro
-answer; never pad with irrelevant files merely to increase byte count.
+Build the largest safe packet that improves the requested judgment. For every
+project type, adapt the evidence mix to that project's domain, artifacts,
+authority chain, lifecycle, and immediate decision. Fill the verified effective
+Oracle/Pro attachment and model-context budget up to the practical maximum with
+all non-duplicative, project-specific, decision-relevant project evidence. A
+smaller packet
+is valid only when useful project evidence is exhausted or a recorded safety,
+transport, or format boundary prevents inclusion. Reserve deterministic
+headroom for the mission, evidence index, and final Pro answer; never pad with
+irrelevant files merely to increase byte count.
+
+The evidence index must record the effective attachment/context budget used for
+the run, included bytes or tokens when measurable, reserved answer headroom,
+and why any remaining capacity could not improve the decision. When evidence
+exceeds the boundary, allocate space deterministically in this order: governing
+rules and exact question; canonical current state and measured primary evidence;
+conflicts, failures, controls, and prior decisions; source or implementation
+feasibility; then compact supporting detail. Record every excluded or truncated
+artifact with its path, hash when safe, coverage boundary, priority, and expected
+decision impact. Do not silently stop at a customary file count or convenience
+bundle size when the verified route permits more useful context.
 
 The packet must be specific to the resolved project and represent each category
-below. If a category has no evidence, record that exact omission and its effect
-on the decision instead of silently leaving it out.
+below using the domain-appropriate equivalent. These categories apply across
+software, research, finance, operations, creative, and other projects rather
+than only to any one repository or domain. If a category has no evidence,
+record that exact omission and its effect on the decision instead of silently
+leaving it out.
 
 - the user's durable objective, immediate question, deadlines, capital or other
   quantitative target, and acceptance/stop conditions;
@@ -89,7 +110,8 @@ packet cannot be tied to the exact project root and question.
 1. Do not run the resource guard as a routine or pressure gate.
 2. Resolve and hash-validate the tested Oracle compatibility contract.
 3. Validate the short UTF-8 mission and the judgment-complete maximum-useful-
-   context packet, including its evidence index, frozen hashes, and omissions.
+   context packet, including its effective budget/use/headroom record,
+   deterministic priority order, evidence index, frozen hashes, and omissions.
 4. Claim the same normalized-project mutex used by regular Oracle work.
 5. Use a fresh Oracle slug; do not reuse an unrelated tab or conversation.
 6. Require Oracle model-selection and attachment evidence before accepting a
