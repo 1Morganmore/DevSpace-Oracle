@@ -658,6 +658,8 @@ def update_state(
     task_outcome: str | None = None,
     task_outcome_reason: str | None = None,
     host_watchdog: dict[str, Any] | None = None,
+    conversation_url: str | None = None,
+    conversation_url_conflict: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if status not in STATUSES:
         raise OracleStateError("STATUS_INVALID", "invalid Oracle run status")
@@ -691,6 +693,18 @@ def update_state(
         payload["task_outcome_reason"] = task_outcome_reason
     if host_watchdog is not None:
         payload["host_watchdog"] = host_watchdog
+    if conversation_url is not None:
+        oracle = payload.get("oracle") if isinstance(payload.get("oracle"), dict) else {}
+        existing_url = str(oracle.get("conversation_url") or "").strip()
+        if existing_url and existing_url != conversation_url:
+            payload["conversation_url_conflict"] = {
+                "persisted": existing_url,
+                "observed": conversation_url,
+            }
+        else:
+            payload["oracle"] = {**oracle, "conversation_url": conversation_url}
+    if conversation_url_conflict is not None:
+        payload["conversation_url_conflict"] = dict(conversation_url_conflict)
     write_json_atomic(state_path, payload)
     return payload
 

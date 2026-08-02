@@ -184,14 +184,22 @@ def wait_for_oracle_process(process: Any, watchdog_timeout_seconds: float | None
         return None, True
 
 
+ORACLE_VERSION_RESOLUTION_TIMEOUT_SECONDS = 90
+
+
 def resolve_oracle_version(command: Sequence[str], *, run_factory=subprocess.run, platform_name: str | None = None) -> str:
+    """Resolve Oracle before launch with a bounded cold-cache allowance.
+
+    The returned value is still passed immediately to the exact 0.16.1
+    compatibility/hash contract before a browser can be launched.
+    """
     completed = run_factory(
         [*command, "--version"],
         cwd=None,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=ORACLE_VERSION_RESOLUTION_TIMEOUT_SECONDS,
         check=False,
         **STATE.windows_subprocess_kwargs(platform_name=platform_name),
     )
@@ -234,6 +242,7 @@ def append_error(path: Path, message: str) -> None:
 
 
 SESSION_STATE_RE = re.compile(r"(?im)^\s*State:\s*([a-z][a-z0-9_-]*)\s*$")
+SESSION_URL_RE = re.compile(r"(?im)^\s*URL:\s*(https://chatgpt\.com/c/[^\s?#]+)\s*$")
 LIVE_SESSION_STATES = {"running", "streaming", "thinking", "active"}
 TERMINAL_SESSION_STATES = {
     "complete", "completed", "done", "finished", "failed", "error", "cancelled", "canceled",
@@ -251,6 +260,36 @@ def exact_session_state(path: Path) -> str | None:
         return None
     matches = SESSION_STATE_RE.findall(text)
     return matches[-1].casefold() if matches else None
+
+
+def exact_session_url(path: Path) -> str | None:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    matches = SESSION_URL_RE.findall(text)
+    return matches[-1] if matches else None
+
+
+def historical_conversation_url(run_dir: Path, state: dict[str, Any]) -> str | None:
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    persisted = str(oracle.get("conversation_url") or "").strip()
+    if persisted:
+        return persisted
+    for path in sorted(run_dir.glob("recovery-*-stdout.log"), key=lambda item: item.name, reverse=True):
+        observed = exact_session_url(path)
+        if observed:
+            return observed
+    return None
+
+
+def conversation_url_conflict(state: dict[str, Any], observed: str | None) -> dict[str, str] | None:
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    persisted = str(oracle.get("conversation_url") or "").strip()
+    candidate = str(observed or "").strip()
+    if persisted and candidate and persisted != candidate:
+        return {"persisted": persisted, "observed": candidate}
+    return None
 
 
 def exact_recovery_binding_unavailable(*paths: Path) -> bool:
@@ -594,15 +633,26 @@ def _recover_run_locked(
             "result": pre_submit_failure,
         }
     historical_authority = historical_session_authority(directory, state)
+    historical_url = historical_conversation_url(directory, state)
     if (
         STATE.SESSION_AUTHORITY_RANK.get(historical_authority, -1)
         > STATE.SESSION_AUTHORITY_RANK.get(str(state.get("session_authority") or ""), -1)
+        or (historical_url and not str((state.get("oracle") or {}).get("conversation_url") or "").strip())
     ):
+        reconciled_status = (
+            "complete"
+            if state.get("status") == "complete"
+            and state.get("session_authority") == "terminal"
+            and state.get("terminal_harvested") is True
+            and STATE.output_is_nonempty(Path(str(state.get("artifacts", {}).get("output") or "")))
+            else "attention_required"
+        )
         state = STATE.update_state(
             directory / "state.json",
-            status="attention_required",
+            status=reconciled_status,
             exit_code=state.get("exit_code"),
             session_authority=historical_authority,
+            conversation_url=historical_url,
         )
     if (
         state.get("status") == "complete"
@@ -674,6 +724,31 @@ def _recover_run_locked(
             "stderr_path": str(stderr_path),
         }
     observed_session_state = exact_session_state(stdout_path)
+    observed_conversation_url = exact_session_url(stdout_path)
+    url_conflict = conversation_url_conflict(state, observed_conversation_url)
+    if url_conflict is not None:
+        if argv_output.exists():
+            argv_output.unlink()
+        updated = STATE.update_state(
+            directory / "state.json",
+            status="attention_required",
+            exit_code=exit_code,
+            session_authority=str(state.get("session_authority") or "submitted_unknown"),
+            conversation_url_conflict=url_conflict,
+        )
+        return {
+            "ok": False,
+            "status": "recovery_identity_conflict",
+            "run_dir": str(directory),
+            "action": action,
+            "exit_code": exit_code,
+            "exact_session_state": observed_session_state,
+            "conversation_url_conflict": url_conflict,
+            "result": updated,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "next_action": "preserve the persisted exact conversation binding; never replace or resubmit",
+        }
     if exact_recovery_binding_unavailable(stdout_path, stderr_path):
         if argv_output.exists():
             argv_output.unlink()
@@ -682,6 +757,7 @@ def _recover_run_locked(
             status="attention_required",
             exit_code=exit_code,
             session_authority="submitted_unknown",
+            conversation_url=observed_conversation_url,
         )
         return {
             "ok": False,
@@ -707,6 +783,7 @@ def _recover_run_locked(
             status="running",
             exit_code=exit_code,
             session_authority="live",
+            conversation_url=observed_conversation_url,
         )
         settle_disagreement = str(updated.get("session_authority") or "") in {
             "terminal_observed", "terminal",
@@ -733,6 +810,7 @@ def _recover_run_locked(
             status="attention_required",
             exit_code=exit_code,
             session_authority=authority,
+            conversation_url=observed_conversation_url,
         )
         return {
             "ok": False,
@@ -812,6 +890,7 @@ def _recover_run_locked(
             if task_outcome in {"executed", "not_executed", "blocked"}
             else task_outcome
         ),
+        conversation_url=observed_conversation_url,
     )
     if harvested:
         STATE.cleanup_owned_browser_temp(layout.browser_temp_path)

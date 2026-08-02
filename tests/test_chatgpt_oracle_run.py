@@ -68,6 +68,40 @@ def version_timeout_runner(command, **kwargs):
     raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 30))
 
 
+def test_version_resolution_allows_a_bounded_slow_valid_oracle_0161() -> None:
+    runner = load_runner()
+    captured = {}
+
+    def slow_valid(command, **kwargs):
+        captured["command"] = command
+        captured["timeout"] = kwargs["timeout"]
+        return subprocess.CompletedProcess(command, 0, stdout="oracle 0.16.1\n", stderr="")
+
+    assert runner.resolve_oracle_version(["npx.cmd", "-y", "@steipete/oracle"], run_factory=slow_valid) == "oracle 0.16.1"
+    assert captured == {
+        "command": ["npx.cmd", "-y", "@steipete/oracle", "--version"],
+        "timeout": runner.ORACLE_VERSION_RESOLUTION_TIMEOUT_SECONDS,
+    }
+    assert runner.ORACLE_VERSION_RESOLUTION_TIMEOUT_SECONDS == 90
+
+
+def test_conversation_url_helpers_preserve_exact_binding_and_detect_conflicts(tmp_path: Path) -> None:
+    runner = load_runner()
+    observer = tmp_path / "recovery-live-stdout.log"
+    observer.write_text(
+        "URL: https://chatgpt.com/c/oracle-old\nURL: https://chatgpt.com/c/oracle-current\n",
+        encoding="utf-8",
+    )
+    state = {"oracle": {"conversation_url": "https://chatgpt.com/c/oracle-current"}}
+
+    assert runner.exact_session_url(observer) == "https://chatgpt.com/c/oracle-current"
+    assert runner.historical_conversation_url(tmp_path, state) == "https://chatgpt.com/c/oracle-current"
+    assert runner.conversation_url_conflict(state, "https://chatgpt.com/c/oracle-other") == {
+        "persisted": "https://chatgpt.com/c/oracle-current",
+        "observed": "https://chatgpt.com/c/oracle-other",
+    }
+
+
 def execute_run(runner, *args, **kwargs):
     kwargs.setdefault("compat_factory", lambda version: {"ok": True, "version": version})
     kwargs.setdefault(

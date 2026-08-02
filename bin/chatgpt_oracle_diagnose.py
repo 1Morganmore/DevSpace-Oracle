@@ -135,6 +135,17 @@ def classify_run(
         return {"bucket": ACTIVE, "signature": "explicitly-abandoned"}
     if outcome == "not_executed" and has_output:
         return {"bucket": TASK_NOT_EXECUTED, "signature": "durable-output-reports-no-execution"}
+    pre_submit_failure = state.get("pre_submit_failure")
+    if (
+        isinstance(pre_submit_failure, dict)
+        and pre_submit_failure.get("code") == "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED"
+        and pre_submit_failure.get("output_absent") is True
+        and pre_submit_failure.get("conversation_url_absent") is True
+    ):
+        return {
+            "bucket": PRE_SUBMIT_HOST,
+            "signature": "oracle-version-resolution-prelaunch-timeout",
+        }
     if user_confirmed_no_submission:
         return {
             "bucket": PRE_SUBMIT_UI,

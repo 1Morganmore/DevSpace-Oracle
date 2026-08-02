@@ -72,6 +72,25 @@ def test_packet_carries_exact_run_bucket_and_evidence(tmp_path: Path) -> None:
     assert str(run_dir / "state.json") in packet["evidence_paths"]
 
 
+def test_version_resolution_prelaunch_incident_is_safe_to_retry(tmp_path: Path) -> None:
+    module = load()
+    run_dir = write_run(tmp_path, "v" * 8, status="attention_required")
+    state_path = run_dir / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["pre_submit_failure"] = {
+        "code": "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED",
+        "output_absent": True,
+        "conversation_url_absent": True,
+    }
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    packet = module.build_packet(run_dir)
+
+    assert packet["bucket"] == "pre-submit-host-environment"
+    assert packet["signature"] == "oracle-version-resolution-prelaunch-timeout"
+    assert packet["safe_for_fresh_run"] is True
+
+
 def test_packet_never_marks_fresh_run_safe_while_another_session_owns_project(tmp_path: Path) -> None:
     module = load()
     failed = write_run(
