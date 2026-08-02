@@ -29,14 +29,67 @@ CDP/Playwright, or `@chrome` fallback.
   ChatGPT app.
 - Local context is attachment-only through Oracle `--file` arguments.
 - Every attachment is an exact regular non-symlink file with a frozen SHA-256.
+- Every new Pro consultation carries a project-specific, judgment-complete,
+  maximum-useful-context packet. A thin prompt or a convenience subset is not
+  sufficient when more decision-relevant project evidence exists.
 - Search or research is enabled only when explicitly requested and supported by
   the selected Pro route.
+
+## Maximum project-context packet
+
+Build the largest safe packet that improves the requested judgment. Include all
+non-duplicative, decision-relevant project evidence until that evidence is
+exhausted or the current Oracle/Pro attachment or context boundary is reached.
+Reserve deterministic headroom for the mission, evidence index, and final Pro
+answer; never pad with irrelevant files merely to increase byte count.
+
+The packet must be specific to the resolved project and represent each category
+below. If a category has no evidence, record that exact omission and its effect
+on the decision instead of silently leaving it out.
+
+- the user's durable objective, immediate question, deadlines, capital or other
+  quantitative target, and acceptance/stop conditions;
+- the complete applicable `AGENTS.md`/project-rule chain and any governing
+  specifications, contracts, schemas, or plans;
+- canonical current state, active work, frozen decisions, open candidates, and
+  exact paths to authoritative artifacts;
+- measured results with sample periods, costs, controls, nulls, concentration,
+  failure modes, and data-coverage or lifecycle limitations;
+- killed, rejected, blocked, or near-duplicate routes so Pro cannot recommend a
+  renamed historical failure without explicitly adjudicating the conflict;
+- prior Pro, regular GPT, Multi-GPT, external-review, or human decisions that
+  materially affect the question, preferably as exact durable outputs;
+- source feasibility, timestamps, hashes, provenance, unresolved contradictions,
+  resource constraints, and current execution or collection boundaries;
+- the arithmetic connecting the proposed decision to the user's real target,
+  including capacity, cost, risk, and time-to-evidence where applicable.
+
+Prefer one deterministic, path-preserved ZIP plus the short UTF-8 mission. The
+ZIP must contain a root mission/packet, an evidence index, original absolute and
+project-relative paths, per-entry SHA-256 and size, source qualification,
+known omissions, and the exact prior answer when the new request challenges or
+revises that answer. Preserve compact exact artifacts before prose summaries;
+when raw evidence is too large, include a deterministic compact derivative and
+the raw artifact's path/hash/coverage boundary.
+
+Exclude credentials, secrets, cookies, browser/profile state, account or live
+trading state, databases/WAL files, volatile logs, caches, and unrelated bulk.
+Do not scan or hash a live database merely to enlarge a packet. Maximum context
+means maximum useful and safe judgment context, not maximum filesystem volume.
+
+The mission must tell Pro to read every attachment and the evidence index,
+resolve contradictions against the stated authority order, distinguish observed
+evidence from inference, and return exact decisions, gates, stop rules, target
+arithmetic, and next actions. Preflight fails closed if a required category is
+missing without an explicit omission record, if hashes are stale, or if the
+packet cannot be tied to the exact project root and question.
 
 ## Preflight
 
 1. Do not run the resource guard as a routine or pressure gate.
 2. Resolve and hash-validate the tested Oracle compatibility contract.
-3. Validate the short UTF-8 mission and at least one exact attachment.
+3. Validate the short UTF-8 mission and the judgment-complete maximum-useful-
+   context packet, including its evidence index, frozen hashes, and omissions.
 4. Claim the same normalized-project mutex used by regular Oracle work.
 5. Use a fresh Oracle slug; do not reuse an unrelated tab or conversation.
 6. Require Oracle model-selection and attachment evidence before accepting a

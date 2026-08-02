@@ -38,6 +38,21 @@ def test_pro_is_oracle_attachment_only_and_never_uses_devspace_or_codexpro() -> 
     assert "never uses\nDevSpace or CodexPro" in handoff
 
 
+def test_pro_requires_maximum_useful_project_specific_judgment_context() -> None:
+    value = text(PRO)
+    flat = " ".join(value.split())
+    assert "project-specific, judgment-complete" in flat
+    assert "maximum-useful-context packet" in flat
+    assert "all non-duplicative, decision-relevant project evidence" in flat
+    assert "complete applicable `AGENTS.md`/project-rule chain" in flat
+    assert "killed, rejected, blocked, or near-duplicate routes" in flat
+    assert "exact prior answer" in flat
+    assert "evidence index" in flat
+    assert "known omissions" in flat
+    assert "databases/WAL files" in flat
+    assert "Preflight fails closed" in flat
+
+
 def test_deep_research_uses_oracle_deep_without_silent_fallback() -> None:
     value = text(RESEARCH)
     assert "chatgpt_oracle_dispatch.py" in value
