@@ -199,5 +199,8 @@ def test_builder_rejects_symlink_without_following_it(tmp_path: Path) -> None:
     except OSError:
         pytest.skip("symlink creation is unavailable on this Windows test host")
     manifest = write_manifest(project, [("AGENTS.md", "rules", 0), ("link.md", "state", 1)])
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value["evidence"][1]["path"] = str(link.absolute())
+    manifest.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(packet.PacketError, match="SYMLINK_FORBIDDEN"):
         packet.build(manifest)
