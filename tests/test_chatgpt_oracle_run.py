@@ -77,12 +77,22 @@ def test_version_resolution_allows_a_bounded_slow_valid_oracle_0161() -> None:
         captured["timeout"] = kwargs["timeout"]
         return subprocess.CompletedProcess(command, 0, stdout="oracle 0.16.1\n", stderr="")
 
-    assert runner.resolve_oracle_version(["npx.cmd", "-y", "@steipete/oracle"], run_factory=slow_valid) == "oracle 0.16.1"
+    assert runner.resolve_oracle_version(["npx.cmd", "-y", "@steipete/oracle@0.16.1"], run_factory=slow_valid) == "oracle 0.16.1"
     assert captured == {
-        "command": ["npx.cmd", "-y", "@steipete/oracle", "--version"],
+        "command": ["npx.cmd", "-y", "@steipete/oracle@0.16.1", "--version"],
         "timeout": runner.ORACLE_VERSION_RESOLUTION_TIMEOUT_SECONDS,
     }
     assert runner.ORACLE_VERSION_RESOLUTION_TIMEOUT_SECONDS == 90
+
+
+def test_default_oracle_command_is_pinned_to_the_hash_validated_version() -> None:
+    runner = load_runner()
+
+    assert runner.STATE.default_oracle_command(platform_name="nt") == (
+        "npx.cmd", "-y", "@steipete/oracle@0.16.1",
+    )
+    with pytest.raises(runner.STATE.OracleStateError, match="0.16.1"):
+        runner.STATE.validate_oracle_command(["npx.cmd", "-y", "@steipete/oracle@0.17.0"])
 
 
 def test_conversation_url_helpers_preserve_exact_binding_and_detect_conflicts(tmp_path: Path) -> None:

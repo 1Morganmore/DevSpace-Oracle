@@ -34,7 +34,10 @@ def write_run(
     output_path = run_dir / "output.md"
     if output is not None:
         output_path.write_text(output, encoding="utf-8")
-    (run_dir / "stdout.log").write_text(stdout, encoding="utf-8")
+    stdout_path = run_dir / "stdout.log"
+    stderr_path = run_dir / "stderr.log"
+    stdout_path.write_text(stdout, encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
     (run_dir / "state.json").write_text(json.dumps({
         "schema": "codex.chatgpt.oracle-run-state/v1",
         "status": status,
@@ -43,7 +46,7 @@ def write_run(
         "session_authority": session_authority,
         "terminal_harvested": terminal_harvested,
         "task_outcome": task_outcome,
-        "artifacts": {"output": str(output_path)},
+        "artifacts": {"output": str(output_path), "stdout": str(stdout_path), "stderr": str(stderr_path)},
     }), encoding="utf-8")
     return run_dir
 
@@ -272,6 +275,27 @@ def test_version_resolution_prelaunch_failure_is_host_safe_only_with_absence_pro
         "bucket": "pre-submit-host-environment",
         "signature": "oracle-version-resolution-prelaunch-timeout",
     }
+
+
+def test_version_compatibility_drift_is_a_retry_safe_pre_submit_host_failure(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    write_run(state_root, "d" * 8, status="failed")
+    run_dir = state_root / "projects" / "projectkey" / "runs" / ("d" * 8)
+    state_path = run_dir / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["oracle"] = {"resolved_version": "unresolved"}
+    state["session_authority"] = "pre_submit"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    (run_dir / "stderr.log").write_text(
+        "version resolution failed: Oracle compatibility is validated only for the tested version\n",
+        encoding="utf-8",
+    )
+
+    verdict = module.diagnose(state_root)["unresolved_runs"][0]
+
+    assert verdict["bucket"] == "pre-submit-host-environment"
+    assert verdict["signature"] == "oracle-version-resolution-prelaunch-compatibility-drift"
 
 
 def test_user_confirmed_no_submission_overrides_prompt_timeout_only_with_validated_proof() -> None:

@@ -113,6 +113,7 @@ def classify_run(
     has_output: bool,
     transcript_text: str = "",
     user_confirmed_no_submission: bool = False,
+    pre_submit_host_failure: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Return the bucket and signature for one persisted run.
 
@@ -136,15 +137,20 @@ def classify_run(
     if outcome == "not_executed" and has_output:
         return {"bucket": TASK_NOT_EXECUTED, "signature": "durable-output-reports-no-execution"}
     pre_submit_failure = state.get("pre_submit_failure")
+    host_failure = pre_submit_failure if isinstance(pre_submit_failure, dict) else pre_submit_host_failure
     if (
-        isinstance(pre_submit_failure, dict)
-        and pre_submit_failure.get("code") == "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED"
-        and pre_submit_failure.get("output_absent") is True
-        and pre_submit_failure.get("conversation_url_absent") is True
+        isinstance(host_failure, dict)
+        and host_failure.get("code") == "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED"
+        and host_failure.get("output_absent") is True
+        and host_failure.get("conversation_url_absent") is True
     ):
         return {
             "bucket": PRE_SUBMIT_HOST,
-            "signature": "oracle-version-resolution-prelaunch-timeout",
+            "signature": (
+                "oracle-version-resolution-prelaunch-compatibility-drift"
+                if host_failure.get("failure_reason") == "compatibility-version-drift"
+                else "oracle-version-resolution-prelaunch-timeout"
+            ),
         }
     if user_confirmed_no_submission:
         return {
@@ -206,6 +212,7 @@ def diagnose(state_root: Path | None = None) -> dict[str, Any]:
             user_confirmed_no_submission=(
                 STATE.proven_user_confirmed_no_submission(run_dir / "state.json") is not None
             ),
+            pre_submit_host_failure=STATE.proven_pre_submit_host_failure(run_dir / "state.json"),
         )
         runs.append({
             "run_dir": str(run_dir),

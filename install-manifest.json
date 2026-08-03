@@ -106,7 +106,7 @@
       "tested_version": "0.16.1",
       "license": "MIT",
       "integrity": "sha512-oJEAcWLvLihtSOGqznN4ErGIE7GEpVWpx02a5JUwoqeQql/lgWyc7ASnEegov3MGpGROF13CkgcISPgtw2INqg==",
-      "installation": "resolved by the invoking agent through npx; tested_version is not a permanent pin"
+      "installation": "resolved by the invoking agent through explicit npx @steipete/oracle@0.16.1; unknown versions and hash mismatches fail closed"
     },
     "devspace": {
       "package": "@waishnav/devspace",

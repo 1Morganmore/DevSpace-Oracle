@@ -222,7 +222,7 @@ def oracle_state_root() -> Path:
 
 def default_oracle_command(platform_name: str | None = None) -> tuple[str, ...]:
     platform = os.name if platform_name is None else platform_name
-    return ("npx.cmd" if platform == "nt" else "npx", "-y", "@steipete/oracle")
+    return ("npx.cmd" if platform == "nt" else "npx", "-y", "@steipete/oracle@0.16.1")
 
 
 def validate_oracle_command(values: Any) -> tuple[str, ...]:
@@ -233,14 +233,14 @@ def validate_oracle_command(values: Any) -> tuple[str, ...]:
     if executable in {"oracle", "oracle.cmd", "oracle.exe"} and len(command) == 1:
         return command
     if executable in {"npx", "npx.cmd", "npx.exe"} and command[1:] in {
-        ("-y", "@steipete/oracle"),
-        ("--yes", "@steipete/oracle"),
-        ("@steipete/oracle",),
+        ("-y", "@steipete/oracle@0.16.1"),
+        ("--yes", "@steipete/oracle@0.16.1"),
+        ("@steipete/oracle@0.16.1",),
     }:
         return command
     raise OracleStateError(
         "ORACLE_COMMAND_FORBIDDEN",
-        "oracle_command must resolve directly to Oracle or npx @steipete/oracle",
+        "oracle_command must resolve directly to Oracle or npx @steipete/oracle@0.16.1",
         {"command": command_for_display(command)},
     )
 
@@ -1105,10 +1105,14 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
     normalized_error = stderr_text.lstrip()
     if not normalized_error.startswith("version resolution failed:"):
         return None
-    if not (
+    if "Oracle compatibility is validated only for the tested version" in normalized_error:
+        failure_reason = "compatibility-version-drift"
+    elif (
         "ORACLE_VERSION_TIMEOUT:" in normalized_error
         or ("--version" in normalized_error and "timed out after 30 seconds" in normalized_error)
     ):
+        failure_reason = "version-resolution-timeout"
+    else:
         return None
     return {
         "schema": "codex.chatgpt.oracle-pre-submit-host-failure/v1",
@@ -1118,6 +1122,7 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
         "output_absent": True,
         "conversation_url_absent": True,
         "resolved_version": "unresolved",
+        "failure_reason": failure_reason,
     }
 
 
