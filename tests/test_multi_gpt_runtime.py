@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "mcp_servers" / "multi-gpt" / "server.mjs"
+MCP_PROCESS_TIMEOUT_SECONDS = 30
 
 
 def mcp_response(method: str, params: dict) -> dict:
@@ -15,7 +16,9 @@ def mcp_response(method: str, params: dict) -> dict:
         text=True,
         capture_output=True,
         check=True,
-        timeout=10,
+        # CI can take longer than a local shell to cold-start Node and load the
+        # MCP server. Keep this bounded so a genuinely hung server still fails.
+        timeout=MCP_PROCESS_TIMEOUT_SECONDS,
     )
     return json.loads(completed.stdout.strip())
 
