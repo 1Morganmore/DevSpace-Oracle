@@ -128,22 +128,18 @@ def classify_run(
     lifecycle = str(verdict["lifecycle"])
     source = str(verdict["authority_source"])
 
-    if lifecycle == "complete":
-        if source == "exact-terminal-evidence":
-            return {"bucket": COMPLETE, "signature": "terminal-harvested-output"}
-        return {"bucket": LEGACY_COMPLETE, "signature": "legacy-ledger-durable-output"}
-    if lifecycle == "abandoned":
-        return {"bucket": ACTIVE, "signature": "explicitly-abandoned"}
-    if outcome == "not_executed" and has_output:
-        return {"bucket": TASK_NOT_EXECUTED, "signature": "durable-output-reports-no-execution"}
     pre_submit_failure = state.get("pre_submit_failure")
     host_failure = pre_submit_failure if isinstance(pre_submit_failure, dict) else pre_submit_host_failure
     if (
         isinstance(host_failure, dict)
-        and host_failure.get("code") == "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED"
         and host_failure.get("output_absent") is True
         and host_failure.get("conversation_url_absent") is True
     ):
+        code = str(host_failure.get("code") or "")
+        if code == "ORACLE_ATTACHMENT_SIZE_PRELAUNCH_FAILED":
+            return {"bucket": PRE_SUBMIT_HOST, "signature": "oracle-attachment-size-prelaunch-limit"}
+        if code != "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED":
+            return {"bucket": UNCLASSIFIED, "signature": "unrecognized-pre-submit-host-failure"}
         return {
             "bucket": PRE_SUBMIT_HOST,
             "signature": (
@@ -152,6 +148,14 @@ def classify_run(
                 else "oracle-version-resolution-prelaunch-timeout"
             ),
         }
+    if lifecycle == "complete":
+        if source == "exact-terminal-evidence":
+            return {"bucket": COMPLETE, "signature": "terminal-harvested-output"}
+        return {"bucket": LEGACY_COMPLETE, "signature": "legacy-ledger-durable-output"}
+    if lifecycle == "abandoned":
+        return {"bucket": ACTIVE, "signature": "explicitly-abandoned"}
+    if outcome == "not_executed" and has_output:
+        return {"bucket": TASK_NOT_EXECUTED, "signature": "durable-output-reports-no-execution"}
     if user_confirmed_no_submission:
         return {
             "bucket": PRE_SUBMIT_UI,

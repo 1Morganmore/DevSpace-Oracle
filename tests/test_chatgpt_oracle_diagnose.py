@@ -277,6 +277,30 @@ def test_version_resolution_prelaunch_failure_is_host_safe_only_with_absence_pro
     }
 
 
+def test_oracle_attachment_size_preflight_is_host_safe_with_no_conversation() -> None:
+    module = load()
+    verdict = module.classify_run(
+        {
+            "status": "attention_required",
+            "session_authority": "submitted_unknown",
+            "terminal_harvested": False,
+            "task_outcome": "pending",
+            "pre_submit_failure": {
+                "code": "ORACLE_ATTACHMENT_SIZE_PRELAUNCH_FAILED",
+                "output_absent": True,
+                "conversation_url_absent": True,
+            },
+        },
+        stdout_text="",
+        has_output=False,
+    )
+
+    assert verdict == {
+        "bucket": "pre-submit-host-environment",
+        "signature": "oracle-attachment-size-prelaunch-limit",
+    }
+
+
 def test_version_compatibility_drift_is_a_retry_safe_pre_submit_host_failure(tmp_path: Path) -> None:
     module = load()
     state_root = tmp_path / "oracle-state"

@@ -118,6 +118,27 @@ def build_oracle_argv(config, layout, prompt: str) -> list[str]:
 
 _BROWSER_TIMEOUT_RE = re.compile(r"^(?P<value>[0-9]+(?:\.[0-9]+)?)(?P<unit>ms|s|m|h)?$", re.IGNORECASE)
 MAX_HOST_WATCHDOG_SECONDS = 7 * 24 * 60 * 60
+# Oracle 0.16.1 rejects an individual browser attachment above this upstream
+# input limit before it can create a ChatGPT conversation.  Keep this narrow:
+# context-packet construction may retain its broader configured envelope.
+ORACLE_0161_ATTACHMENT_MAX_BYTES = 1024 * 1024
+
+
+def validate_oracle_attachment_sizes(config) -> None:
+    """Reject Pro attachments Oracle 0.16.1 cannot submit before any launch."""
+    if config.transport != "pro-attachment-only":
+        return
+    oversized = [
+        {"path": str(path), "size_bytes": path.stat().st_size, "limit_bytes": ORACLE_0161_ATTACHMENT_MAX_BYTES}
+        for path in config.attachments
+        if path.stat().st_size > ORACLE_0161_ATTACHMENT_MAX_BYTES
+    ]
+    if oversized:
+        raise OracleRunError(
+            "ORACLE_ATTACHMENT_SIZE_PRELAUNCH_FAILED",
+            "Oracle 0.16.1 Pro attachments must not exceed 1 MiB each",
+            {"limit_bytes": ORACLE_0161_ATTACHMENT_MAX_BYTES, "attachments": oversized},
+        )
 
 
 def host_watchdog_timeout_seconds(config, argv: Sequence[str]) -> float | None:
@@ -339,6 +360,7 @@ def execute_run(
     ),
 ) -> dict[str, Any]:
     config = STATE.load_manifest(manifest_path, platform_name=platform_name)
+    validate_oracle_attachment_sizes(config)
     layout = STATE.create_layout(config, run_id=config.requested_run_id)
     transport_mission_path = layout.run_dir / "mission.md"
     # The app reads the project mission. The copied bytes below are host-only

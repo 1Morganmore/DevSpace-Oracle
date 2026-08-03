@@ -1082,8 +1082,6 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
     if authority not in {"pre_submit", "submitted_unknown"}:
         return None
     oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
-    if str(oracle.get("resolved_version") or "") != "unresolved":
-        return None
     if _state_has_conversation_url(state):
         return None
     artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
@@ -1096,27 +1094,48 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
         return None
     _, stdout_bytes = stdout_record
     _, stderr_bytes = stderr_record
-    if stdout_bytes.strip():
+    # Oracle prints this version banner before validating local attachments;
+    # it is not browser/session evidence.  Any other stdout remains fail-closed.
+    stdout_text = stdout_bytes.decode("utf-8", errors="replace").strip()
+    attachment_limit_banner_only = stdout_text == "🧿 oracle 0.16.1 — Questions in, clarity out."
+    if stdout_text and not attachment_limit_banner_only:
         return None
     try:
         stderr_text = stderr_bytes.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
         return None
     normalized_error = stderr_text.lstrip()
-    if not normalized_error.startswith("version resolution failed:"):
+    if (
+        str(state.get("transport") or "") == "pro-attachment-only"
+        and "The following files exceed the 1 MB limit:" in normalized_error
+        and attachment_limit_banner_only
+    ):
+        attachments = state.get("attachments")
+        if not isinstance(attachments, list) or not any(
+            isinstance(item, dict) and int(item.get("size_bytes") or 0) > 1024 * 1024
+            for item in attachments
+        ):
+            return None
+        failure_reason = "oracle-attachment-size-limit"
+        code = "ORACLE_ATTACHMENT_SIZE_PRELAUNCH_FAILED"
+    elif str(oracle.get("resolved_version") or "") != "unresolved":
         return None
-    if "Oracle compatibility is validated only for the tested version" in normalized_error:
+    elif not normalized_error.startswith("version resolution failed:"):
+        return None
+    elif "Oracle compatibility is validated only for the tested version" in normalized_error:
         failure_reason = "compatibility-version-drift"
+        code = "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED"
     elif (
         "ORACLE_VERSION_TIMEOUT:" in normalized_error
         or ("--version" in normalized_error and "timed out after 30 seconds" in normalized_error)
     ):
         failure_reason = "version-resolution-timeout"
+        code = "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED"
     else:
         return None
     return {
         "schema": "codex.chatgpt.oracle-pre-submit-host-failure/v1",
-        "code": "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED",
+        "code": code,
         "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
         "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
         "output_absent": True,

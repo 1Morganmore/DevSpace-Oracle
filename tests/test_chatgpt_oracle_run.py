@@ -344,6 +344,29 @@ def test_pro_dry_run_uses_oracle_attachments_and_no_app_mention(tmp_path: Path) 
     assert all(item["sha256"] for item in result["attachments"])
 
 
+def test_pro_attachment_limit_is_exactly_one_mib_and_blocks_before_oracle_launch(tmp_path: Path) -> None:
+    runner = load_runner()
+    packet = tmp_path / "packet.zip"
+    exact_manifest = pro_manifest(tmp_path)
+    packet.write_bytes(b"x" * runner.ORACLE_0161_ATTACHMENT_MAX_BYTES)
+    assert execute_run(runner, exact_manifest, dry_run=True)["ok"] is True
+
+    packet.write_bytes(b"x" * (runner.ORACLE_0161_ATTACHMENT_MAX_BYTES + 1))
+    calls: list[bool] = []
+    with pytest.raises(runner.OracleRunError) as exc:
+        execute_run(
+            runner,
+            exact_manifest,
+            dry_run=True,
+            run_factory=lambda *args, **kwargs: calls.append(True),
+            popen_factory=lambda *args, **kwargs: calls.append(True),
+        )
+    assert exc.value.code == "ORACLE_ATTACHMENT_SIZE_PRELAUNCH_FAILED"
+    assert exc.value.evidence["limit_bytes"] == 1024 * 1024
+    assert calls == []
+    assert not (tmp_path / "runs").exists()
+
+
 def test_complete_requires_zero_exit_and_nonempty_output(tmp_path: Path) -> None:
     runner = load_runner()
     cases = [
