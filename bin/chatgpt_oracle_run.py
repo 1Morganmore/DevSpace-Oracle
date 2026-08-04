@@ -724,6 +724,7 @@ def _recover_run_locked(
     oracle_command: Sequence[str] | None = None,
     popen_factory: Callable[..., Any] = subprocess.Popen,
     platform_name: str | None = None,
+    live_settle_timeout_seconds: float = 0,
 ) -> dict[str, Any]:
     directory = run_dir.expanduser().resolve(strict=True)
     state = STATE.load_state(directory / "state.json")
@@ -795,6 +796,13 @@ def _recover_run_locked(
     stderr_path = directory / f"recovery-{action}-stderr.log"
     recovery_browser_temp = directory / f"recovery-{action}-browser-temp"
     recovery_env = STATE.browser_temp_environment(recovery_browser_temp, platform_name=platform_name)
+    if action == "live" and live_settle_timeout_seconds > 0:
+        # The compatibility-patched Oracle live tail owns one recovered browser
+        # connection until this deadline.  Do not turn a live recovery into a
+        # sequence of short probes that each reopen the exact conversation.
+        recovery_env["ORACLE_LIVE_TERMINAL_TIMEOUT_MS"] = str(
+            max(1, round(live_settle_timeout_seconds * 1000))
+        )
     try:
         with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
             process = popen_factory(
@@ -909,7 +917,13 @@ def _recover_run_locked(
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
         }
-    if action == "live":
+    candidate_satisfies_schema = pro_output_satisfies_required_schema(state, argv_output)
+    if action == "live" and not (
+        exit_code == 0
+        and observed_session_state in TERMINAL_SESSION_STATES
+        and STATE.output_is_nonempty(argv_output)
+        and candidate_satisfies_schema
+    ):
         if argv_output.exists():
             argv_output.unlink()
         authority = "terminal_observed" if observed_session_state in TERMINAL_SESSION_STATES else "submitted_unknown"
@@ -931,7 +945,6 @@ def _recover_run_locked(
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
         }
-    candidate_satisfies_schema = pro_output_satisfies_required_schema(state, argv_output)
     if (
         exit_code == 0
         and observed_session_state in TERMINAL_SESSION_STATES
@@ -1163,55 +1176,23 @@ def recover_run(
             oracle_command=oracle_command,
             popen_factory=popen_factory,
             platform_name=platform_name,
+            live_settle_timeout_seconds=settle_timeout_seconds if action == "live" else 0,
         )
-        if dry_run or action != "live" or settle_timeout_seconds <= 0:
-            return result
-        deadline = time.monotonic() + settle_timeout_seconds
-        while True:
-            if result.get("ok"):
-                return result
-            if result.get("status") == "recovery_binding_unavailable":
-                return result
-            if result.get("status") == "terminal_observed":
-                return _recover_run_locked(
-                    directory,
-                    action="harvest",
-                    dry_run=False,
-                    oracle_command=oracle_command,
-                    popen_factory=popen_factory,
-                    platform_name=platform_name,
-                )
-            current = result.get("result") if isinstance(result.get("result"), dict) else {}
-            authority = str(current.get("session_authority") or "")
-            exact_state = str(result.get("exact_session_state") or "").casefold()
-            still_live_or_unsettled = (
-                result.get("status") in {"session_live", "terminal_settle_disagreement"}
-                or authority in {"live", "submitted_unknown"}
-                and exact_state in {"", *LIVE_SESSION_STATES}
-            )
-            if not still_live_or_unsettled:
-                return result
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return {
-                    **result,
-                    "ok": False,
-                    "status": "live_settle_timeout",
-                    "settle_timeout_seconds": settle_timeout_seconds,
-                    "next_action": (
-                        "keep the existing exact-slug recovery ownership attached until a later terminal "
-                        "harvest; do not relaunch, replace, or resubmit the conversation"
-                    ),
-                }
-            sleep(min(settle_interval_seconds, remaining))
-            result = _recover_run_locked(
-                directory,
-                action="live",
-                dry_run=False,
-                oracle_command=oracle_command,
-                popen_factory=popen_factory,
-                platform_name=platform_name,
-            )
+        if (
+            action == "live"
+            and settle_timeout_seconds > 0
+            and result.get("status") in {"session_live", "terminal_settle_disagreement"}
+        ):
+            return {
+                **result,
+                "status": "live_settle_timeout",
+                "settle_timeout_seconds": settle_timeout_seconds,
+                "next_action": (
+                    "the one exact-slug live recovery connection reached its bounded deadline; "
+                    "preserve this session and do not relaunch, replace, or resubmit"
+                ),
+            }
+        return result
 
 
 def build_parser() -> argparse.ArgumentParser:

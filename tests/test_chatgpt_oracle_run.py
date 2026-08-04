@@ -1398,7 +1398,7 @@ def test_pro_structured_mission_rejects_short_terminal_preamble(tmp_path: Path) 
     assert restored["result"]["session_authority"] == "live"
 
 
-def test_live_recovery_settles_stalled_inside_one_exact_slug_process(
+def test_live_recovery_holds_one_exact_slug_connection_until_terminal(
     tmp_path: Path,
 ) -> None:
     runner = load_runner()
@@ -1416,18 +1416,17 @@ def test_live_recovery_settles_stalled_inside_one_exact_slug_process(
         session_authority="submitted_unknown",
     )
     calls: list[str] = []
+    live_timeout_ms: list[str] = []
 
     def recovery(command, **kwargs):
-        action = "harvest" if "--harvest" in command else "live"
-        calls.append(action)
-        if calls == ["live"]:
-            kwargs["stdout"].write(b"State: stalled\n")
-        elif action == "live":
-            kwargs["stdout"].write(b"State: completed\n")
-        else:
-            candidate = Path(command[command.index("--write-output") + 1])
-            candidate.write_text("durable exact answer", encoding="utf-8")
-            kwargs["stdout"].write(b"State: completed\n")
+        assert "--live" in command
+        calls.append("live")
+        live_timeout_ms.append(kwargs["env"]["ORACLE_LIVE_TERMINAL_TIMEOUT_MS"])
+        candidate = Path(command[command.index("--write-output") + 1])
+        candidate.write_text("durable exact answer", encoding="utf-8")
+        # The compatibility-patched live tail keeps one recovered browser and
+        # observes both states before it returns a terminal harvest.
+        kwargs["stdout"].write(b"State: running\nState: completed\n")
         kwargs["stdout"].flush()
         return Process(0, [])
 
@@ -1438,10 +1437,10 @@ def test_live_recovery_settles_stalled_inside_one_exact_slug_process(
         popen_factory=recovery,
         settle_timeout_seconds=5,
         settle_interval_seconds=0,
-        sleep=lambda _: None,
     )
 
-    assert calls == ["live", "live", "harvest"]
+    assert calls == ["live"]
+    assert live_timeout_ms == ["5000"]
     assert settled["ok"] is True
     assert settled["status"] == "complete"
     assert settled["result"]["session_authority"] == "terminal"

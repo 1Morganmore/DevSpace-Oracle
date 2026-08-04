@@ -244,6 +244,22 @@ def test_copy_profile_recovery_patch_reuses_only_the_persisted_profile_seed() ->
     assert "650ffe9bdbbaf799510e8cacaa8ba8407322bbbb175e790a3cf7777fa14772fe" in contract["legacy_patched"]
 
 
+def test_live_tail_patch_keeps_one_recovered_browser_connection_until_its_deadline() -> None:
+    compat = load_compat()
+    contract = compat.PATCHES["dist/src/cli/browserTabs.js"]
+    patch = (
+        MODULE_PATH.parent
+        / "oracle-compat"
+        / "0.16.1"
+        / contract["patch"]
+    ).read_text(encoding="utf-8")
+
+    assert "ORACLE_LIVE_TERMINAL_TIMEOUT_MS" in patch
+    assert "const terminalDeadlineMs" in patch
+    assert "Date.now() < terminalDeadlineMs" in patch
+    assert contract["pristine"] == "05256692ffa9b35415346963adde5ff42aeacd78ce46dd6f484496678f5d0281"
+
+
 def test_hidden_window_patch_supports_windows_without_headless_mode() -> None:
     compat = load_compat()
     contract = compat.PATCHES["dist/src/browser/chromeLifecycle.js"]

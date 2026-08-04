@@ -11,6 +11,11 @@ from typing import Any, Sequence
 SUPPORTED_VERSION = "0.16.1"
 CREATE_NO_WINDOW = 0x08000000
 PATCHES = {
+    "dist/src/cli/browserTabs.js": {
+        "patch": "browserTabs.patch",
+        "pristine": "05256692ffa9b35415346963adde5ff42aeacd78ce46dd6f484496678f5d0281",
+        "patched": "1a6d3b9d7044d84300f630fe669b16d9cfec3925c427cfb4c3d1291205406dab",
+    },
     "dist/src/browser/chromeLifecycle.js": {
         "patch": "chromeLifecycle.patch",
         "pristine": "9eaffd8264051266581548ea9dbee1152bd94b7a6032ed0441b1ba3c11c5b5e9",
