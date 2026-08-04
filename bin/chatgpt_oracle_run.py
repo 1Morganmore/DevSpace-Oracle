@@ -373,6 +373,21 @@ def provider_delivery_timed_out(*paths: Path) -> bool:
     return False
 
 
+def provider_delivery_timeout_evidence(run_dir: Path, state: dict[str, Any]) -> bool:
+    """Find exact-run timeout evidence despite later recovery log rotation."""
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    durable_paths = [
+        run_dir / "transcript.md",
+        Path(str(artifacts.get("output") or "")),
+    ]
+    recovery_streams = [
+        stream
+        for pattern in ("recovery-*-stdout.log", "recovery-*-stderr.log")
+        for stream in run_dir.glob(pattern)
+    ]
+    return provider_delivery_timed_out(*recovery_streams, *durable_paths)
+
+
 def run_owned_process_ids(run_dir: Path, state: dict[str, Any]) -> tuple[int, ...]:
     """Return only PIDs durably attributed to this exact Oracle run."""
     pids: set[int] = set()
@@ -405,15 +420,10 @@ def process_is_alive(pid: int) -> bool:
 def historical_session_authority(run_dir: Path, state: dict[str, Any]) -> str:
     """Recover the strongest exact-session authority from durable observer logs."""
     current = str(state.get("session_authority") or "submitted_unknown")
-    recovery_streams = [
-        stream
-        for prefix in ("recovery-*-stdout.log", "recovery-*-stderr.log")
-        for stream in run_dir.glob(prefix)
-    ]
     # A previously persisted false terminal must be repairable from its exact
     # recovery evidence.  Do this before honoring terminal_harvested so the
     # state cannot become permanently monotonic on provider error text.
-    if provider_delivery_timed_out(*recovery_streams):
+    if provider_delivery_timeout_evidence(run_dir, state):
         return "live"
     if (
         current == "terminal"
@@ -1334,20 +1344,26 @@ def settle_user_confirmed_delivery_timeout_execution(
     directory = run_dir.expanduser().resolve(strict=True)
     state_path = directory / "state.json"
     state = STATE.load_state(state_path)
-    if (
-        str(state.get("transport_status") or "") != "post_submit_provider_delivery_timeout"
-        or str(state.get("session_authority") or "") != "live"
-        or state.get("terminal_harvested") is True
-    ):
+    timeout_evidence = provider_delivery_timeout_evidence(directory, state)
+    direct_timeout_state = (
+        str(state.get("transport_status") or "") == "post_submit_provider_delivery_timeout"
+        and str(state.get("session_authority") or "") == "live"
+    )
+    stale_timeout_ledger = (
+        timeout_evidence
+        and str(state.get("transport_status") or "") == "incomplete"
+        and str(state.get("session_authority") or "") in {"terminal_observed", "terminal"}
+        and state.get("terminal_harvested") is False
+    )
+    if not (direct_timeout_state or stale_timeout_ledger) or state.get("terminal_harvested") is True:
         raise OracleRunError(
             "EXECUTION_ENDED_TIMEOUT_STATE_REQUIRED",
-            "settlement is limited to a live post-submit provider-delivery-timeout run",
+            "settlement requires a live provider-timeout state or its exact stale incomplete ledger",
         )
-    streams = [stream for pattern in ("recovery-*-stdout.log", "recovery-*-stderr.log") for stream in directory.glob(pattern)]
-    if not provider_delivery_timed_out(*streams):
+    if not timeout_evidence:
         raise OracleRunError(
             "EXECUTION_ENDED_TIMEOUT_EVIDENCE_REQUIRED",
-            "exact recovery streams do not contain provider delivery-timeout evidence",
+            "exact run does not retain provider delivery-timeout evidence",
         )
     active_pids = [pid for pid in run_owned_process_ids(directory, state) if process_alive(pid)]
     if active_pids:

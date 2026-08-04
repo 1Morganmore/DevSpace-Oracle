@@ -154,6 +154,20 @@ def test_secret_scan_rejects_json_and_nul_containing_payloads(payload: bytes) ->
         packet._safe_bytes_check(payload, "evidence.json")
 
 
+def test_secret_scan_allows_policy_prose_but_rejects_authorization_secret_forms() -> None:
+    packet._safe_bytes_check(
+        b"No external account authorization is required for this policy evidence.",
+        "AGENTS.md",
+    )
+    for payload in (
+        b"Authorization: Bearer actual-secret-value",
+        b'{"authorization":"Bearer actual-secret-value"}',
+        b"authorization = actual-secret-value",
+    ):
+        with pytest.raises(packet.PacketError, match="UNSAFE_SECRET_CONTENT"):
+            packet._safe_bytes_check(payload, "evidence.md")
+
+
 def test_validate_rejects_extra_member_and_replaced_evidence_even_with_updated_receipt(tmp_path: Path) -> None:
     project = fixture_project(tmp_path)
     manifest = write_manifest(project, [("AGENTS.md", "rules", 0), ("state.json", "state", 1)])

@@ -123,7 +123,7 @@ def _safe_text_check(path: Path) -> None:
 
 
 def _safe_bytes_check(raw: bytes, label: str) -> None:
-    if b"PRIVATE KEY" in raw or b"authorization" in raw.lower():
+    if b"PRIVATE KEY" in raw:
         raise _error("UNSAFE_SECRET_CONTENT", label)
     for encoding in ("utf-8", "utf-16", "utf-16-le", "utf-16-be"):
         try:

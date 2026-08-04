@@ -1369,6 +1369,44 @@ def test_user_confirmed_delivery_timeout_execution_settlement_releases_exact_run
     assert runner.STATE.unresolved_project_sessions(run_dir.parent, tmp_path) == []
 
 
+def test_delivery_timeout_execution_settlement_reconstructs_stale_incomplete_terminal_ledger(tmp_path: Path) -> None:
+    runner, run_dir, output, evidence = provider_delivery_timeout_settlement_fixture(tmp_path)
+    # Timeline: an initial false terminal was repaired to the timeout state, then
+    # a later harvest replaced the top-level ledger and rotated its stream logs.
+    state = runner.STATE.load_state(run_dir / "state.json")
+    state.update({"status": "attention_required", "session_authority": "terminal", "transport_status": "incomplete"})
+    runner.STATE.write_json_atomic(run_dir / "state.json", state)
+    state.update({"status": "running", "session_authority": "live", "transport_status": "post_submit_provider_delivery_timeout"})
+    runner.STATE.write_json_atomic(run_dir / "state.json", state)
+    (run_dir / "transcript.md").write_text(
+        "State: running\nState: completed\nMessage delivery timed out. Please try again.\n",
+        encoding="utf-8",
+    )
+    for name in ("recovery-live-stdout.log", "recovery-harvest-stdout.log"):
+        (run_dir / name).write_text("No live ChatGPT tab matched session\n", encoding="utf-8")
+    state = runner.STATE.load_state(run_dir / "state.json")
+    state.update({
+        "status": "attention_required",
+        "session_authority": "terminal",
+        "terminal_harvested": False,
+        "transport_status": "incomplete",
+        "task_outcome": "pending",
+    })
+    runner.STATE.write_json_atomic(run_dir / "state.json", state)
+
+    settled = runner.settle_user_confirmed_delivery_timeout_execution(
+        run_dir,
+        expected_output_sha256=runner.STATE.sha256_file(output),
+        confirmation=runner.STATE.USER_CONFIRMED_EXECUTION_ENDED,
+        reason="user confirmed the exact task ended after its execution evidence was produced",
+        execution_evidence=[(evidence, runner.STATE.sha256_file(evidence))],
+        process_alive=lambda _: False,
+    )
+
+    assert settled["ok"] is True
+    assert settled["result"]["session_authority"] == "settled_executed"
+
+
 def test_delivery_timeout_execution_settlement_rejects_active_owned_process(tmp_path: Path) -> None:
     runner, run_dir, output, evidence = provider_delivery_timeout_settlement_fixture(tmp_path)
     state = runner.STATE.load_state(run_dir / "state.json")
