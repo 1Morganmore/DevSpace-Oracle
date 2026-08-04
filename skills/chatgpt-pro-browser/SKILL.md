@@ -200,7 +200,9 @@ python "$env:USERPROFILE\.codex\skills\chatgpt-oracle-runtime\scripts\run_chatgp
 
 Completion requires exact Oracle Pro model evidence, attachment evidence, exit
 zero, a fresh nonempty host-only `output.md`, immutable hashes, and a refreshed
-transcript. Oracle archives only after the durable one-shot output is saved.
+transcript. Oracle waits on the original submitted session for its bounded
+90-minute answer budget. Oracle archives only after the durable one-shot output
+is saved.
 
 ## Recovery
 
@@ -213,6 +215,11 @@ python "$env:USERPROFILE\.codex\skills\chatgpt-oracle-runtime\scripts\run_chatgp
 Use `live` only to continue following that same stored session. Recovery never
 restarts, resubmits, changes the model, changes attachments, or creates a
 replacement. A zero exit without nonempty output remains `attention_required`.
+If the initial run reports `post_submit_response_timeout`, the submitted Pro
+response was still pending at Oracle's deadline: retain the exact lock and
+wait passively. Do not launch repeated `live`/`harvest` recovery while the
+conversation is visibly working; use exact recovery only after the original
+observer/browser is no longer available.
 
 For an already persisted agbrowse Pro run only, the former exact
 `chatgpt_agbrowse_run.py --observe-run|--recover-run <run-dir>` commands remain

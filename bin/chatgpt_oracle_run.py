@@ -74,12 +74,12 @@ def build_oracle_argv(config, layout, prompt: str) -> list[str]:
     lifecycle_args = [] if "--browser-hide-window" in config.oracle_args else ["--browser-hide-window"]
     # Upstream waits `--browser-timeout` for the answer and then gives its
     # recovery pass the same budget, so the effective ceiling is twice this
-    # value.  Oracle's 20m default cut heavy Extra High DevSpace lanes at
-    # exactly 40m while they were still streaming.  Pro keeps upstream timing.
+    # value.  Oracle's upstream default can cut a submitted Pro response while
+    # ChatGPT is still visibly working, so every new Oracle lane gets the same
+    # explicit, bounded original-session budget.
     answer_timeout_args = (
         []
-        if config.transport == "pro-attachment-only"
-        or any(
+        if any(
             item == "--browser-timeout" or item.startswith("--browser-timeout=")
             for item in config.oracle_args
         )
@@ -142,14 +142,12 @@ def validate_oracle_attachment_sizes(config) -> None:
 
 
 def host_watchdog_timeout_seconds(config, argv: Sequence[str]) -> float | None:
-    """Return one host wall-clock ceiling without changing Pro timing.
+    """Return one host wall-clock ceiling without changing Oracle's process.
 
     Oracle 0.16.1 can remain inside a blocked CDP evaluation after its own
     browser deadline.  The host deadline is therefore independent and only
     releases the caller; it never terminates the submitted Oracle process.
     """
-    if config.transport == "pro-attachment-only":
-        return None
     values: list[str] = []
     for index, item in enumerate(argv):
         if item == "--browser-timeout":
@@ -161,7 +159,7 @@ def host_watchdog_timeout_seconds(config, argv: Sequence[str]) -> float | None:
     if len(values) != 1:
         raise OracleRunError(
             "BROWSER_TIMEOUT_INVALID",
-            "regular Oracle runs require exactly one browser timeout",
+            "Oracle runs require exactly one browser timeout",
             {"values": values},
         )
     match = _BROWSER_TIMEOUT_RE.fullmatch(values[0].strip())
@@ -268,6 +266,7 @@ SESSION_URL_RE = re.compile(r"(?im)^\s*URL:\s*(https://chatgpt\.com/c/[^\s?#]+)\
 # ChatGPT is still visibly working in the exact conversation.  It is therefore
 # not terminal evidence and must retain the exact-slug lock and live authority.
 LIVE_SESSION_STATES = {"running", "streaming", "thinking", "active", "stalled"}
+POST_SUBMIT_RESPONSE_TIMEOUT_MARKER = "assistant response timed out before completion"
 TERMINAL_SESSION_STATES = {
     "complete", "completed", "done", "finished", "failed", "error", "cancelled", "canceled",
 }
@@ -330,6 +329,24 @@ def exact_recovery_binding_unavailable(*paths: Path) -> bool:
             chunks.append("")
     value = "\n".join(chunks)
     return all(marker in value for marker in RECOVERY_BINDING_UNAVAILABLE_MARKERS)
+
+
+def post_submit_response_timed_out(*paths: Path) -> bool:
+    """Return true only for Oracle's explicit post-send assistant timeout.
+
+    This is live evidence, not terminal evidence: ChatGPT can keep working
+    after Oracle's observer exhausts its deadline.  The caller must preserve
+    the exact session and wait passively instead of launching recovery loops.
+    """
+    for path in paths:
+        try:
+            if POST_SUBMIT_RESPONSE_TIMEOUT_MARKER in path.read_text(
+                encoding="utf-8", errors="replace"
+            ).casefold():
+                return True
+        except OSError:
+            pass
+    return False
 
 
 def historical_session_authority(run_dir: Path, state: dict[str, Any]) -> str:
@@ -561,10 +578,11 @@ def execute_run(
             "run_dir": str(layout.run_dir),
             "result": pre_submit_failure,
         }
-    # Once Oracle has been launched, a nonzero local exit (including the
-    # browser response timeout) does not prove that the exact web session
-    # failed or stopped. Preserve same-project ownership and require exact-slug
-    # recovery instead of presenting a terminal local failure.
+    # Once Oracle has been launched, a nonzero local exit does not prove that
+    # the exact web session failed or stopped.  In particular, Oracle's
+    # explicit assistant-response timeout is evidence that the response was
+    # still pending at the observer deadline. Preserve live authority and
+    # wait passively; do not prompt a harvest/live relaunch while it works.
     transport_complete = exit_code == 0 and STATE.output_is_nonempty(layout.output_path)
     task_outcome = (
         STATE.classify_task_outcome(
@@ -605,13 +623,25 @@ def execute_run(
         )
         STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
     else:
+        response_timeout = post_submit_response_timed_out(
+            layout.stdout_path, layout.stderr_path
+        )
         state = STATE.update_state(
             layout.state_path,
-            status=status,
+            status="running" if response_timeout else status,
             exit_code=exit_code,
-            session_authority="submitted_unknown",
-            transport_status="failed" if exit_code else "incomplete",
+            session_authority="live" if response_timeout else "submitted_unknown",
+            transport_status=(
+                "post_submit_response_timeout"
+                if response_timeout
+                else "failed" if exit_code else "incomplete"
+            ),
             task_outcome=task_outcome,
+            task_outcome_reason=(
+                "assistant-response-timeout-passive-wait"
+                if response_timeout
+                else None
+            ),
             host_watchdog={
                 "status": "process-exited",
                 "timeout_seconds": watchdog_timeout_seconds,
@@ -619,6 +649,20 @@ def execute_run(
                 "process_action": "none",
             },
         )
+    if not transport_complete and post_submit_response_timed_out(
+        layout.stdout_path, layout.stderr_path
+    ):
+        return {
+            "ok": False,
+            "status": "post_submit_response_timeout",
+            "safe_for_fresh_run": False,
+            "run_dir": str(layout.run_dir),
+            "next_action": (
+                "keep passive ownership of the original exact session until terminal output is "
+                "available; do not relaunch recovery, replace, or resubmit while ChatGPT is working"
+            ),
+            "result": state,
+        }
     return {"ok": status == "complete", "run_dir": str(layout.run_dir), "result": state}
 
 

@@ -312,13 +312,14 @@ def test_answer_timeout_must_produce_a_finite_bounded_host_deadline(
     assert exc.value.code in {"BROWSER_TIMEOUT_INVALID", "BROWSER_TIMEOUT_OUT_OF_RANGE"}
 
 
-def test_pro_keeps_upstream_answer_timing(tmp_path: Path) -> None:
+def test_pro_uses_the_bounded_original_session_answer_wait(tmp_path: Path) -> None:
     runner = load_runner()
 
     result = execute_run(runner, pro_manifest(tmp_path), dry_run=True)
 
-    assert "--browser-timeout" not in result["argv"]
-    assert result["host_watchdog_timeout_seconds"] is None
+    assert result["argv"].count("--browser-timeout") == 1
+    assert result["argv"][result["argv"].index("--browser-timeout") + 1] == "90m"
+    assert result["host_watchdog_timeout_seconds"] == 5430
 
 
 def test_pro_dry_run_uses_oracle_attachments_and_no_app_mention(tmp_path: Path) -> None:
@@ -554,6 +555,40 @@ def test_post_submit_nonzero_requires_exact_recovery_and_never_restarts(tmp_path
         assert "--no-recover" not in recovery["argv"]
         assert "restart" not in recovery["argv"]
         assert "--prompt" not in recovery["argv"]
+
+
+def test_post_submit_response_timeout_retains_passive_live_authority(tmp_path: Path) -> None:
+    runner = load_runner()
+    launches: list[list[str]] = []
+
+    def response_timeout_popen(command, **kwargs):
+        launches.append(list(command))
+        kwargs["stdout"].write(b"Session: exact\nprompt submitted; response streaming\n")
+        kwargs["stderr"].write(
+            b"ERROR: Assistant response timed out before completion; reattach later to capture the answer.\n"
+        )
+        kwargs["stdout"].flush()
+        kwargs["stderr"].flush()
+        return Process(1, [])
+
+    result = execute_run(
+        runner,
+        pro_manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=response_timeout_popen,
+    )
+
+    state = result["result"]
+    assert result["ok"] is False
+    assert result["status"] == "post_submit_response_timeout"
+    assert result["safe_for_fresh_run"] is False
+    assert "do not relaunch recovery" in result["next_action"]
+    assert len(launches) == 1
+    assert state["status"] == "running"
+    assert state["session_authority"] == "live"
+    assert state["terminal_harvested"] is False
+    assert state["transport_status"] == "post_submit_response_timeout"
+    assert state["task_outcome_reason"] == "assistant-response-timeout-passive-wait"
 
 
 @pytest.mark.parametrize("parallel_parent_id", [None, "d" * 64])
