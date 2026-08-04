@@ -257,6 +257,10 @@ def test_live_tail_patch_keeps_one_recovered_browser_connection_until_its_deadli
     assert "ORACLE_LIVE_TERMINAL_TIMEOUT_MS" in patch
     assert "const terminalDeadlineMs" in patch
     assert "Date.now() < terminalDeadlineMs" in patch
+    assert "recoveredContentDeadlineMs = holdRecoveredConnection" in patch
+    assert "? terminalDeadlineMs" in patch
+    assert contract["legacy_patched"] == ["1a6d3b9d7044d84300f630fe669b16d9cfec3925c427cfb4c3d1291205406dab"]
+    assert contract["legacy_patch"] == "browserTabs.pre-readiness.patch"
     assert contract["pristine"] == "05256692ffa9b35415346963adde5ff42aeacd78ce46dd6f484496678f5d0281"
 
 

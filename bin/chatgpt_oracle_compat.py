@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -14,7 +15,9 @@ PATCHES = {
     "dist/src/cli/browserTabs.js": {
         "patch": "browserTabs.patch",
         "pristine": "05256692ffa9b35415346963adde5ff42aeacd78ce46dd6f484496678f5d0281",
-        "patched": "1a6d3b9d7044d84300f630fe669b16d9cfec3925c427cfb4c3d1291205406dab",
+        "patched": "9329e259f030ecb4a935fb9e368bf55074bf0afe7ed5e5a0c6206a5f2bbacee4",
+        "legacy_patched": ["1a6d3b9d7044d84300f630fe669b16d9cfec3925c427cfb4c3d1291205406dab"],
+        "legacy_patch": "browserTabs.pre-readiness.patch",
     },
     "dist/src/browser/chromeLifecycle.js": {
         "patch": "chromeLifecycle.patch",
@@ -135,14 +138,14 @@ def _git_kwargs() -> dict[str, Any]:
     return {"creationflags": CREATE_NO_WINDOW, "startupinfo": startup}
 
 
-def _apply_patch(package_root: Path, patch_path: Path) -> None:
+def _apply_patch(package_root: Path, patch_path: Path, *, reverse: bool = False) -> None:
     isolated_env = os.environ.copy()
     # `git apply` also works outside a repository. Prevent a package root used
     # inside a test/worktree from being silently rebound to that parent repo.
     isolated_env["GIT_CEILING_DIRECTORIES"] = str(package_root.parent)
     patch_bytes = patch_path.read_bytes().replace(b"\r\n", b"\n")
     check = subprocess.run(
-        ["git", "-c", "core.autocrlf=false", "apply", "--ignore-space-change", "--check", "-"],
+        ["git", "-c", "core.autocrlf=false", "apply", "--ignore-space-change", *( ["-R"] if reverse else [] ), "--check", "-"],
         cwd=str(package_root),
         input=patch_bytes,
         capture_output=True,
@@ -157,7 +160,7 @@ def _apply_patch(package_root: Path, patch_path: Path) -> None:
             {"patch": str(patch_path), "stderr": (check.stderr or b"").decode("utf-8", errors="replace").strip()[-1200:]},
         )
     applied = subprocess.run(
-        ["git", "-c", "core.autocrlf=false", "apply", "--ignore-space-change", "-"],
+        ["git", "-c", "core.autocrlf=false", "apply", "--ignore-space-change", *( ["-R"] if reverse else [] ), "-"],
         cwd=str(package_root),
         input=patch_bytes,
         capture_output=True,
@@ -171,6 +174,29 @@ def _apply_patch(package_root: Path, patch_path: Path) -> None:
             "Oracle compatibility patch could not be applied",
             {"patch": str(patch_path), "stderr": (applied.stderr or b"").decode("utf-8", errors="replace").strip()[-1200:]},
         )
+
+
+def _migrate_known_legacy_patch(
+    package_root: Path,
+    target: Path,
+    relative: str,
+    patch_path: Path,
+    pristine_hash: str,
+) -> None:
+    """Restore one known former patch level to its verified pristine bytes."""
+    with tempfile.TemporaryDirectory(prefix="oracle-compat-migrate-") as temporary:
+        staged_root = Path(temporary)
+        staged_target = staged_root / Path(relative)
+        staged_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(target, staged_target)
+        _apply_patch(staged_root, patch_path, reverse=True)
+        if sha256_file(staged_target) != pristine_hash:
+            raise OracleCompatError(
+                "ORACLE_LEGACY_PATCH_RESTORE_INVALID",
+                "Known legacy Oracle patch did not restore the exact pristine bytes",
+                {"path": str(target), "patch": str(patch_path)},
+            )
+        shutil.copy2(staged_target, target)
 
 
 def ensure_oracle_compatibility(
@@ -204,12 +230,20 @@ def ensure_oracle_compatibility(
             backup_path = backup / Path(relative)
             if current in contract.get("legacy_patched", []):
                 if not backup_path.exists() or sha256_file(backup_path) != contract["pristine"]:
-                    raise OracleCompatError(
-                        "ORACLE_LEGACY_PATCH_BACKUP_INVALID",
-                        "A legacy Oracle patch cannot be migrated without the exact pristine backup",
-                        {"path": str(target), "backup": str(backup_path), "actual": current},
+                    legacy_patch = contract.get("legacy_patch")
+                    if not isinstance(legacy_patch, str) or not legacy_patch:
+                        raise OracleCompatError(
+                            "ORACLE_LEGACY_PATCH_BACKUP_INVALID",
+                            "A legacy Oracle patch cannot be migrated without the exact pristine backup",
+                            {"path": str(target), "backup": str(backup_path), "actual": current},
+                        )
+                    _migrate_known_legacy_patch(
+                        root, target, relative, patches / legacy_patch, str(contract["pristine"])
                     )
-                shutil.copy2(backup_path, target)
+                    backup_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(target, backup_path)
+                else:
+                    shutil.copy2(backup_path, target)
                 current = sha256_file(target)
             if current != contract["pristine"]:
                 raise OracleCompatError(

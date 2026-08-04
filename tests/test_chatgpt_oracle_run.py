@@ -1448,6 +1448,57 @@ def test_live_recovery_holds_one_exact_slug_connection_until_terminal(
     assert Path(settled["output_path"]).read_text(encoding="utf-8") == "durable exact answer"
 
 
+def test_live_recovery_slow_working_page_keeps_one_recovered_tab_until_terminal(
+    tmp_path: Path,
+) -> None:
+    """E2E-like recovery fixture: a recovered Pro page works before it is ready."""
+    runner = load_runner()
+    initial = execute_run(
+        runner,
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(7, None, {}, []),
+    )
+    run_dir = Path(initial["run_dir"])
+    runner.STATE.update_state(
+        run_dir / "state.json",
+        status="running",
+        exit_code=7,
+        session_authority="live",
+    )
+    calls: list[list[str]] = []
+    live_timeout_ms: list[str] = []
+
+    def slow_working_recovery(command, **kwargs):
+        calls.append(list(command))
+        live_timeout_ms.append(kwargs["env"]["ORACLE_LIVE_TERMINAL_TIMEOUT_MS"])
+        candidate = Path(command[command.index("--write-output") + 1])
+        candidate.write_text("durable exact answer after slow readiness", encoding="utf-8")
+        kwargs["stdout"].write(
+            b"[browser] Recovery: Chrome listening on 127.0.0.1:53582; tab loaded.\n"
+            b"[2026-08-04T12:55:00.000Z] state=working stop=yes send=no model=Pro snippet=\n"
+            b"State: running\n"
+            b"State: completed\n"
+        )
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    settled = runner.recover_run(
+        run_dir,
+        action="live",
+        oracle_command=["oracle"],
+        popen_factory=slow_working_recovery,
+        settle_timeout_seconds=3600,
+    )
+
+    assert len(calls) == 1
+    assert "--live" in calls[0]
+    assert live_timeout_ms == ["3600000"]
+    assert settled["ok"] is True
+    assert settled["status"] == "complete"
+    assert settled["result"]["session_authority"] == "terminal"
+
+
 def test_stalled_exact_observation_retains_live_authority_and_project_lock(
     tmp_path: Path,
 ) -> None:

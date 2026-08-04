@@ -21,25 +21,10 @@ diff --git a/dist/src/cli/browserTabs.js b/dist/src/cli/browserTabs.js
 +    const holdRecoveredConnection = terminalDeadlineMs > 0;
      let lastHash = null;
      let unchangedSince = Date.now();
-@@ -264,6 +275,13 @@ export async function liveTailSessionBrowserOutput(sessionId, options = {}) {
-            endpoint = { host: recovered.host, port: recovered.port };
-            browserTabRef = recovered.ref;
-            requireRecoveredContent = true;
--            recoveredContentDeadlineMs = Date.now() + stallThresholdMs;
-+            // `--live` intentionally skips recoverConversation's one-shot
-+            // readiness check so this same tab can be tailed. A slow Pro page
-+            // can show the working UI before its historical assistant turn is
-+            // harvestable. Keep that one recovered tab alive for the caller's
-+            // overall live deadline, not the unrelated 60-second stall limit.
-+            recoveredContentDeadlineMs = holdRecoveredConnection
-+                ? terminalDeadlineMs
-+                : Date.now() + stallThresholdMs;
-        }
-        while (true) {
-@@ -293,5 +312,9 @@ export async function liveTailSessionBrowserOutput(sessionId, options = {}) {
-                 : harvested.authenticated
-                     ? "completed"
-                     : "detached";
+@@ -293,5 +304,9 @@ export async function liveTailSessionBrowserOutput(sessionId, options = {}) {
+                : harvested.authenticated
+                    ? "completed"
+                    : "detached";
 +            if (derivedState === "stalled" && holdRecoveredConnection && Date.now() < terminalDeadlineMs) {
 +                await new Promise((resolve) => setTimeout(resolve, LIVE_POLL_MS));
 +                continue;
