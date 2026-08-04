@@ -61,25 +61,27 @@ def pro_manifest(tmp_path: Path, **extra) -> Path:
 
 
 def version_runner(command, **kwargs):
-    return subprocess.CompletedProcess(command, 0, stdout="oracle 0.13.0\n", stderr="")
+    return subprocess.CompletedProcess(command, 0, stdout="oracle 0.17.0\n", stderr="")
 
 
 def version_timeout_runner(command, **kwargs):
     raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 30))
 
 
-def test_version_resolution_allows_a_bounded_slow_valid_oracle_0161() -> None:
+def test_version_resolution_allows_a_bounded_slow_valid_oracle_0170() -> None:
     runner = load_runner()
     captured = {}
 
     def slow_valid(command, **kwargs):
         captured["command"] = command
         captured["timeout"] = kwargs["timeout"]
-        return subprocess.CompletedProcess(command, 0, stdout="oracle 0.16.1\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="oracle 0.17.0\n", stderr="")
 
-    assert runner.resolve_oracle_version(["npx.cmd", "-y", "@steipete/oracle"], run_factory=slow_valid) == "oracle 0.16.1"
+    assert runner.resolve_oracle_version(
+        ["npx.cmd", "-y", "@steipete/oracle@0.17.0"], run_factory=slow_valid
+    ) == "oracle 0.17.0"
     assert captured == {
-        "command": ["npx.cmd", "-y", "@steipete/oracle", "--version"],
+        "command": ["npx.cmd", "-y", "@steipete/oracle@0.17.0", "--version"],
         "timeout": runner.ORACLE_VERSION_RESOLUTION_TIMEOUT_SECONDS,
     }
     assert runner.ORACLE_VERSION_RESOLUTION_TIMEOUT_SECONDS == 90
@@ -164,6 +166,7 @@ def test_dry_run_never_executes_and_has_no_file_flag(tmp_path: Path) -> None:
     assert "--file" not in result["argv"]
     assert result["argv"][result["argv"].index("--browser-model-strategy") + 1] == "select"
     assert result["argv"][result["argv"].index("--browser-thinking-time") + 1] == "heavy"
+    assert result["argv"].count("--wait") == 1
     assert result["argv"].count("--browser-hide-window") == 1
     assert calls == []
     assert not (tmp_path / "runs").exists()
@@ -321,6 +324,7 @@ def test_pro_dry_run_uses_oracle_attachments_and_no_app_mention(tmp_path: Path) 
     assert result["contains_file_flag"] is True
     assert argv[argv.index("--model") + 1] == "gpt-5.5-pro"
     assert argv[argv.index("--browser-attachments") + 1] == "always"
+    assert argv.count("--wait") == 1
     assert attachments == [
         str((tmp_path / "prompt.txt").resolve()),
         str((tmp_path / "packet.zip").resolve()),
@@ -332,6 +336,29 @@ def test_pro_dry_run_uses_oracle_attachments_and_no_app_mention(tmp_path: Path) 
     assert prompt.endswith(".")
     assert "@DevSpace" not in prompt
     assert all(item["sha256"] for item in result["attachments"])
+
+
+def test_pro_attachment_preflight_accepts_one_mib_and_rejects_one_byte_more(tmp_path: Path) -> None:
+    runner = load_runner()
+    job = pro_manifest(tmp_path)
+    packet = tmp_path / "packet.zip"
+    packet.write_bytes(b"x" * runner.ORACLE_PRO_ATTACHMENT_MAX_BYTES)
+
+    assert execute_run(runner, job, dry_run=True)["ok"] is True
+
+    packet.write_bytes(b"x" * (runner.ORACLE_PRO_ATTACHMENT_MAX_BYTES + 1))
+    with pytest.raises(runner.OracleRunError) as exc:
+        execute_run(runner, job, dry_run=True)
+
+    assert exc.value.code == "ORACLE_ATTACHMENT_SIZE_PRELAUNCH_FAILED"
+    assert exc.value.evidence == {
+        "limit_bytes": 1024 * 1024,
+        "attachments": [{
+            "path": str(packet.resolve()),
+            "size_bytes": 1024 * 1024 + 1,
+            "limit_bytes": 1024 * 1024,
+        }],
+    }
 
 
 def test_complete_requires_zero_exit_and_nonempty_output(tmp_path: Path) -> None:
@@ -348,7 +375,7 @@ def test_complete_requires_zero_exit_and_nonempty_output(tmp_path: Path) -> None
         result = execute_run(runner, manifest(root), run_factory=version_runner, popen_factory=popen_for(code, output, captured, events))
         assert result["ok"] is ok
         assert result["result"]["status"] == status
-        assert result["result"]["oracle"]["resolved_version"] == "oracle 0.13.0"
+        assert result["result"]["oracle"]["resolved_version"] == "oracle 0.17.0"
         assert "--file" not in captured["command"]
         assert events == ["popen", "wait"]
         assert Path(result["result"]["artifacts"]["transcript"]).is_file()
@@ -657,6 +684,31 @@ def test_pro_recovery_uses_exact_slug_without_attachments_or_resubmit(tmp_path: 
     assert "--no-recover" not in argv
 
 
+def test_historical_0161_recovery_replaces_the_unpinned_stored_command(tmp_path: Path) -> None:
+    runner = load_runner()
+    result = execute_run(
+        runner,
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(4, None, {}, []),
+    )
+    run_dir = Path(result["run_dir"])
+    state_path = run_dir / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["oracle"]["resolved_version"] = "oracle 0.16.1"
+    state["oracle"]["command"] = ["npx.cmd", "-y", "@steipete/oracle"]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    recovery = runner.recover_run(
+        run_dir,
+        action="harvest",
+        dry_run=True,
+        platform_name="nt",
+    )
+
+    assert recovery["argv"][:3] == ["npx.cmd", "-y", "@steipete/oracle@0.16.1"]
+
+
 def test_windows_launch_uses_no_window_and_waits(tmp_path: Path) -> None:
     runner = load_runner()
     captured, events = {}, []
@@ -674,6 +726,7 @@ def test_windows_launch_uses_no_window_and_waits(tmp_path: Path) -> None:
         platform_name="nt",
     )
     assert result["ok"] is True
+    assert captured["command"].count("--wait") == 1
     assert captured["kwargs"]["creationflags"] & runner.STATE.CREATE_NO_WINDOW
     assert Path(captured["kwargs"]["env"]["TEMP"]).name == "browser-temp"
     assert captured["kwargs"]["env"]["TMP"] == captured["kwargs"]["env"]["TEMP"]
@@ -1295,6 +1348,7 @@ def test_live_recovery_settles_stalled_inside_one_exact_slug_process(
         session_authority="submitted_unknown",
     )
     calls: list[str] = []
+    authority_during_wait: list[tuple[str, str]] = []
 
     def recovery(command, **kwargs):
         action = "harvest" if "--harvest" in command else "live"
@@ -1310,6 +1364,10 @@ def test_live_recovery_settles_stalled_inside_one_exact_slug_process(
         kwargs["stdout"].flush()
         return Process(0, [])
 
+    def no_sleep(_seconds: float) -> None:
+        state = runner.STATE.load_state(run_dir / "state.json")
+        authority_during_wait.append((state["status"], state["session_authority"]))
+
     settled = runner.recover_run(
         run_dir,
         action="live",
@@ -1317,10 +1375,11 @@ def test_live_recovery_settles_stalled_inside_one_exact_slug_process(
         popen_factory=recovery,
         settle_timeout_seconds=5,
         settle_interval_seconds=0,
-        sleep=lambda _: None,
+        sleep=no_sleep,
     )
 
     assert calls == ["live", "live", "harvest"]
+    assert authority_during_wait == [("running", "live")]
     assert settled["ok"] is True
     assert settled["status"] == "complete"
     assert settled["result"]["session_authority"] == "terminal"

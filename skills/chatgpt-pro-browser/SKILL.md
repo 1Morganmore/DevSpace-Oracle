@@ -85,6 +85,22 @@ leaving it out.
 - the arithmetic connecting the proposed decision to the user's real target,
   including capacity, cost, risk, and time-to-evidence where applicable.
 
+Build and validate the attachment packet with the bundled allowlist-only
+builder before every submission:
+
+```powershell
+python <skill-root>\scripts\build_project_context_packet.py build --manifest C:\project\.ai-bridge\pro-context-manifest.json
+python <skill-root>\scripts\build_project_context_packet.py validate --manifest C:\project\.ai-bridge\pro-context-manifest.json
+```
+
+The manifest schema is `codex.chatgpt.pro-project-context/v1`. It declares the
+absolute project root and packet path, question, required evidence categories,
+the tested one-MiB local attachment profile, and an explicit evidence allowlist
+with category, priority, and frozen SHA-256. The builder never scans the project
+tree. It rejects root escape, symlinks, stale hashes, credentials and volatile
+state, duplicate paths, missing categories, and a packet larger than Oracle's
+tested one-MiB per-file attachment limit.
+
 Prefer one deterministic, path-preserved ZIP plus the short UTF-8 mission. The
 ZIP must contain a root mission/packet, an evidence index, original absolute and
 project-relative paths, per-entry SHA-256 and size, source qualification,
@@ -109,8 +125,8 @@ packet cannot be tied to the exact project root and question.
 
 1. Do not run the resource guard as a routine or pressure gate.
 2. Resolve and hash-validate the tested Oracle compatibility contract.
-3. Validate the short UTF-8 mission and the judgment-complete maximum-useful-
-   context packet, including its effective budget/use/headroom record,
+3. Build and validate the short UTF-8 mission and the judgment-complete
+   maximum-useful-context packet with `build_project_context_packet.py`, including its effective budget/use/headroom record,
    deterministic priority order, evidence index, frozen hashes, and omissions.
 4. Claim the same normalized-project mutex used by regular Oracle work.
 5. Use a fresh Oracle slug; do not reuse an unrelated tab or conversation.

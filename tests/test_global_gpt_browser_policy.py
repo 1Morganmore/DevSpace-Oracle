@@ -69,6 +69,18 @@ def test_pro_requires_maximum_useful_project_specific_judgment_context() -> None
     assert "credentials, secrets, cookies, browser/profile state" in flat
     assert "volatile logs, caches, and unrelated bulk" in flat
     assert "Preflight fails closed" in flat
+    assert "Build and validate the attachment packet" in flat
+    assert "before every submission" in flat
+    assert "build_project_context_packet.py build" in flat
+    assert "build_project_context_packet.py validate" in flat
+
+
+def test_pro_packet_builder_matches_oracle_one_mib_attachment_contract() -> None:
+    builder = text(PRO.parent / "scripts" / "build_project_context_packet.py")
+    runner = text(ROOT / "bin" / "chatgpt_oracle_run.py")
+    assert "TOTAL_ENVELOPE_BYTES = 1 * 1024 * 1024" in builder
+    assert "MAX_PACKET_ZIP_BYTES = TOTAL_ENVELOPE_BYTES" in builder
+    assert "ORACLE_PRO_ATTACHMENT_MAX_BYTES = 1024 * 1024" in runner
 
 
 def test_deep_research_uses_oracle_deep_without_silent_fallback() -> None:

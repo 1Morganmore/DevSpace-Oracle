@@ -6,6 +6,8 @@ A Windows automation toolkit that delegates planning, research, review, code
 changes, and testing to web ChatGPT while keeping local Codex work focused on
 transport, recovery, identity, hashes, and the final deterministic gate.
 
+The current release is `1.8.0`.
+
 It connects two upstream tools:
 
 - [Oracle](https://github.com/steipete/oracle) creates signed-in ChatGPT browser
@@ -13,9 +15,9 @@ It connects two upstream tools:
 - [DevSpace](https://github.com/Waishnav/devspace) lets ChatGPT read, edit, and
   run commands only inside project roots approved by the user.
 
-Regular GPT runs send one line containing `@DevSpace` and the absolute UTF-8
-mission-file path. Pro runs do not use DevSpace; they use exact, hash-frozen
-attachments through Oracle.
+Regular GPT runs verify `GPT-5.6 Sol` at the visible `Extra High` tier, then
+send one line containing `@DevSpace` and the absolute UTF-8 mission-file path.
+Pro runs use `gpt-5.5-pro` with exact, hash-frozen attachments and no DevSpace.
 
 ## What it provides
 
@@ -58,12 +60,13 @@ Host state and ChatGPT output are stored outside DevSpace projects under
 | Deep Research | `deep-research` / deep research | Public research plus project evidence | Oracle Deep Research + DevSpace |
 | Web Multi-GPT | Web Multi-GPT | Independent parallel perspectives and merger | 2-25 Oracle sessions |
 | Local Multi-GPT | Local Multi-GPT | Local advisory synthesis and counterexample search | Fixed `gpt-5.6-luna` + `max`, read-only |
-| Comprehensive | comprehensive mode | Plan, optional Pro/Multi, review, implementation, gate | Staged Oracle workflow |
-| Pro | `pro` / Pro | Independent final judgment or design review; result only | Oracle attachments only |
+| Comprehensive | comprehensive mode | Plan, explicitly selected Pro/Web Multi, review, implementation, gate | Staged Oracle workflow |
+| Pro | `pro` / Pro | Independent final judgment or design review; result only | Oracle attachments only; `gpt-5.5-pro` |
 
 Orchestrator mode is a single web submission. Comprehensive mode contains an
 orchestrator-equivalent implementation stage plus planning, independent review,
-optional Pro or Web Multi-GPT, and final gates.
+optional Pro or Web Multi-GPT, and final gates. Web Multi runs only when it is
+explicitly selected; regular work and failures never transition to it automatically.
 
 Standalone Pro is a one-shot review route, separate from comprehensive mode. It
 reviews the attached plan, code, or document, returns the durable result, and
@@ -94,15 +97,16 @@ backpressure queue: four by default, configurable from 1 through 20 with
 
 - Windows 11
 - Python
-- Node.js 22.19 or later and earlier than 27
+- Node.js 24 or later and earlier than 27
 - Git for Windows / Git Bash
 - Tailscale
 - An Oracle browser profile signed in to ChatGPT
 - One manually registered DevSpace app in ChatGPT Developer Mode
 
-The validated combination is Oracle `0.16.1` and DevSpace `1.0.4`. The installer
+The validated combination is Oracle `0.17.0` and DevSpace `1.0.5`. The installer
 applies Windows compatibility patches only when exact upstream file hashes
-match.
+match. Oracle `0.16.1` is available only for exact recovery of runs already
+persisted with that version.
 
 ## Install
 

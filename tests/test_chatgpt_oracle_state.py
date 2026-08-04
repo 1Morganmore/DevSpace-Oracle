@@ -98,7 +98,7 @@ def test_pro_manifest_is_attachment_only_and_hashes_exact_files(tmp_path: Path) 
     assert str(tmp_path.resolve()) not in composer
     assert "@DevSpace" not in composer
     layout = state.create_layout(config, run_id="20260725T151414Z-a3aeba967d99")
-    payload = state.state_payload(config, layout, status="prepared", resolved_version="oracle 0.16.1")
+    payload = state.state_payload(config, layout, status="prepared", resolved_version="oracle 0.17.0")
     assert payload["transport"] == "pro-attachment-only"
     assert payload["attachments"][1]["sha256"] == state.sha256_file(packet.resolve())
 
@@ -171,6 +171,28 @@ def test_regular_manifest_requires_exact_devspace_app(tmp_path: Path) -> None:
         state.load_manifest(manifest(tmp_path, mission.resolve(), app_name="OtherWorkspace"))
 
     assert exc.value.code == "DEVSPACE_APP_REQUIRED"
+
+
+def test_oracle_commands_pin_the_active_and_recoverable_versions() -> None:
+    state = load_state()
+
+    assert state.ORACLE_ACTIVE_VERSION == "0.17.0"
+    assert state.ORACLE_RECOVERABLE_VERSIONS == ("0.16.1", "0.17.0")
+    assert state.default_oracle_command(platform_name="nt") == (
+        "npx.cmd", "-y", "@steipete/oracle@0.17.0",
+    )
+    assert state.pinned_oracle_command("oracle 0.16.1", platform_name="posix") == (
+        "npx", "-y", "@steipete/oracle@0.16.1",
+    )
+    assert state.validate_oracle_command(["npx", "--yes", "@steipete/oracle@0.17.0"])
+
+    for command in (
+        ["npx", "-y", "@steipete/oracle"],
+        ["npx", "-y", "@steipete/oracle@0.18.0"],
+    ):
+        with pytest.raises(state.OracleStateError) as exc:
+            state.validate_oracle_command(command)
+        assert exc.value.code == "ORACLE_COMMAND_FORBIDDEN"
 
 
 def test_layout_uses_oracle_exact_ten_character_session_suffix(tmp_path: Path) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -32,7 +33,7 @@ def test_exact_devspace_patch_is_hash_gated_idempotent_and_backed_up(
     compat = load_compat()
     package = tmp_path / "package"
     package.mkdir()
-    (package / "package.json").write_text(json.dumps({"version": "1.0.4"}), encoding="utf-8")
+    (package / "package.json").write_text(json.dumps({"version": "1.0.5"}), encoding="utf-8")
     target = package / "sample.txt"
     target.write_bytes(b"before\n")
     patches = tmp_path / "patches"
@@ -88,7 +89,7 @@ def test_restart_confirmation_rejects_old_or_foreign_listener(
     compat = load_compat()
     package = tmp_path / "package"
     package.mkdir()
-    (package / "package.json").write_text(json.dumps({"version": "1.0.4"}), encoding="utf-8")
+    (package / "package.json").write_text(json.dumps({"version": "1.0.5"}), encoding="utf-8")
     (package / "sample.txt").write_bytes(b"after\n")
     compat.PATCHES = {
         "sample.txt": {
@@ -167,7 +168,7 @@ def test_unknown_devspace_version_or_file_hash_fails_closed(tmp_path: Path) -> N
         compat.ensure_devspace_compatibility(package_root=package)
     assert version.value.code == "DEVSPACE_VERSION_UNVALIDATED"
 
-    (package / "package.json").write_text(json.dumps({"version": "1.0.4"}), encoding="utf-8")
+    (package / "package.json").write_text(json.dumps({"version": "1.0.5"}), encoding="utf-8")
     (package / "sample.txt").write_bytes(b"unknown\n")
     compat.PATCHES = {
         "sample.txt": {
@@ -183,13 +184,28 @@ def test_unknown_devspace_version_or_file_hash_fails_closed(tmp_path: Path) -> N
 
 def test_bounded_workspace_patch_skips_transient_trees_and_batches_discovery() -> None:
     compat = load_compat()
-    patch = (
+    patch_path = (
         MODULE_PATH.parent
         / "devspace-compat"
         / compat.SUPPORTED_VERSION
         / "workspaces.patch"
-    ).read_text(encoding="utf-8")
+    )
+    patch = patch_path.read_text(encoding="utf-8")
+    parsed = subprocess.run(
+        ["git", "apply", "--numstat", "--", str(patch_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
+    assert parsed.returncode == 0, parsed.stderr
+    assert compat.SUPPORTED_VERSION == "1.0.5"
+    assert compat.PATCHES["dist/workspaces.js"]["pristine"] == (
+        "1c0556b8acc77d5811488212eaf3029eb2f622833dc69c18cf9db9eb6bafc761"
+    )
+    assert compat.PATCHES["dist/workspaces.js"]["patched"] == (
+        "72866ba652bb0a5846128b4f5cd5c69d9de0985eb26b88c137d8f734c2aa2fb1"
+    )
     assert 'entry.name.startsWith(".pytest-")' in patch
     assert '".tmp"' in patch
     assert '".venv"' in patch

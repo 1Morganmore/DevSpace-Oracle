@@ -1,0 +1,15 @@
+diff --git a/dist/src/browser/actions/assistantResponse.js b/dist/src/browser/actions/assistantResponse.js
+index a7644be..8cc5cdb 100644
+--- a/dist/src/browser/actions/assistantResponse.js
++++ b/dist/src/browser/actions/assistantResponse.js
+@@ -170,8 +170,9 @@ export async function waitForAssistantResponse(Runtime, timeoutMs, logger, minTu
+             else if (source === "poll") {
+                 throw error;
+             }
+             else if (source === "evaluation") {
+-                const recovered = await recoverAssistantResponse(Runtime, timeoutMs, logger, minTurnIndex, expectedConversationId);
++                const remainingMs = Math.max(0, timeoutMs - (Date.now() - start));
++                const recovered = await recoverAssistantResponse(Runtime, remainingMs, logger, minTurnIndex, expectedConversationId);
+                 if (recovered) {
+                     return recovered;
+                 }

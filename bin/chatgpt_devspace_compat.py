@@ -10,13 +10,13 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
-SUPPORTED_VERSION = "1.0.4"
+SUPPORTED_VERSION = "1.0.5"
 CREATE_NO_WINDOW = 0x08000000
 PATCHES = {
     "dist/workspaces.js": {
         "patch": "workspaces.patch",
-        "pristine": "b4438d551f5ecccfa7942f8ec92f16fda1b0ab7b3256014c8983404acb0b9dcb",
-        "patched": "d5014ef0bcbab51750e3eea74f58fa131d258aa98f60bf65ed30cd8b732e42bf",
+        "pristine": "1c0556b8acc77d5811488212eaf3029eb2f622833dc69c18cf9db9eb6bafc761",
+        "patched": "72866ba652bb0a5846128b4f5cd5c69d9de0985eb26b88c137d8f734c2aa2fb1",
     },
 }
 
@@ -408,7 +408,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Apply the exact DevSpace 1.0.4 bounded workspace discovery patch."
+        description="Apply the exact DevSpace 1.0.5 bounded workspace discovery patch."
     )
     parser.add_argument("--package-root", type=Path)
     parser.add_argument("--confirm-service-restarted", action="store_true")

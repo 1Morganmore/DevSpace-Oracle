@@ -8,9 +8,10 @@ import subprocess
 from pathlib import Path
 from typing import Any, Sequence
 
-SUPPORTED_VERSION = "0.16.1"
+SUPPORTED_VERSION = "0.17.0"
+RECOVERABLE_VERSIONS = ("0.16.1", SUPPORTED_VERSION)
 CREATE_NO_WINDOW = 0x08000000
-PATCHES = {
+PATCHES_0161 = {
     "dist/src/browser/chromeLifecycle.js": {
         "patch": "chromeLifecycle.patch",
         "pristine": "9eaffd8264051266581548ea9dbee1152bd94b7a6032ed0441b1ba3c11c5b5e9",
@@ -62,6 +63,53 @@ PATCHES = {
         "patched": "7e19a5bfd10668929d24961259c4ddedfdd8c26bc85b3ac4672c29f1f40f74fc",
     },
 }
+
+PATCHES_0170 = {
+    "dist/src/browser/chromeLifecycle.js": {
+        "patch": "chromeLifecycle.patch",
+        "pristine": "55e9858f54fb625dbe349b64837be511694ec018074db66e1cca161f5d47182d",
+        "patched": "d2d4842f11aff03ffe6f19840443ccf4cd02167334eb0cf9f67a5f78ef4e780c",
+    },
+    "dist/src/browser/recoverConversation.js": {
+        "patch": "recoverConversation.patch",
+        "pristine": "d7e39d21acf07e6d227e761944519e11cd8d93930629cc87555d7de75a42d1ca",
+        "patched": "cc2a036f6e2409ae7edceee1f381a5062cd6cc5cd1618af465a1b384081ed69e",
+    },
+    "dist/src/browser/profileCopy.js": {
+        "patch": "profileCopy.patch",
+        "pristine": "06c692861f8a4c1a8769f957b9c582426a13bf4972262c47c1f24a87b239064f",
+        "patched": "71459a25b7c46f57bae6f23a5498301f6f6a1d39addf0c1cd4eee1d99b03372c",
+    },
+    "dist/src/cli/browserConfig.js": {
+        "patch": "browserConfig.patch",
+        "pristine": "989f14399c8aa51913752306135e11d97e4f1c55b2baf984907f1b54959cc340",
+        "patched": "bd18d11e4770fa5335c889b7856622f2da4199351ec65bc17a5ec1f472e2506f",
+    },
+    "dist/src/browser/index.js": {
+        "patch": "browserIndex.patch",
+        "pristine": "335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11",
+        "patched": "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895",
+    },
+    "dist/src/browser/actions/assistantResponse.js": {
+        "patch": "assistantResponse.patch",
+        "pristine": "0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d",
+        "patched": "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4",
+    },
+    "dist/src/browser/actions/promptComposer.js": {
+        "patch": "promptComposer.patch",
+        "pristine": "db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000",
+        "patched": "02874d0f2fcd0f45c2c50385893a210e2be5822e1831fa81b99944728ed1cb79",
+    },
+    "dist/src/browser/actions/thinkingTime.js": {
+        "patch": "thinkingTime.patch",
+        "pristine": "9d0c8ae34d72c6ab5ca4176ba2ac2b8431fbb93d6d4e73c0cc02f5d2eb8863b7",
+        "patched": "7d475ed81ccee29a5b4107ed166584bcd3b0266bfd25e02ca7743bf24301e7f0",
+    },
+}
+
+VERSION_PATCHES = {"0.16.1": PATCHES_0161, "0.17.0": PATCHES_0170}
+# Active-version alias retained for existing callers and tests.
+PATCHES = VERSION_PATCHES[SUPPORTED_VERSION]
 
 
 class OracleCompatError(RuntimeError):
@@ -116,8 +164,8 @@ def resolve_package_roots(version: str = SUPPORTED_VERSION) -> list[Path]:
     return matching
 
 
-def patch_root() -> Path:
-    return Path(__file__).resolve().parent / "oracle-compat" / SUPPORTED_VERSION
+def patch_root(version: str = SUPPORTED_VERSION) -> Path:
+    return Path(__file__).resolve().parent / "oracle-compat" / version
 
 
 def _git_kwargs() -> dict[str, Any]:
@@ -174,21 +222,22 @@ def ensure_oracle_compatibility(
     backup_root: Path | None = None,
 ) -> dict[str, Any]:
     version = resolved_version.strip().removeprefix("oracle ").strip()
-    if version != SUPPORTED_VERSION:
+    contracts = VERSION_PATCHES.get(version)
+    if contracts is None:
         raise OracleCompatError(
             "ORACLE_VERSION_UNVALIDATED",
-            "Oracle compatibility is validated only for the tested version",
-            {"resolved": resolved_version, "supported": SUPPORTED_VERSION},
+            "Oracle compatibility is validated only for tested versions",
+            {"resolved": resolved_version, "supported": list(RECOVERABLE_VERSIONS)},
         )
     roots = resolve_package_roots(version) if package_root is None else [package_root.expanduser().resolve(strict=True)]
-    patches = patch_root()
+    patches = patch_root(version)
     backup = backup_root or (Path.home() / ".codex" / "state" / "oracle-compat-backups" / version)
     changed: list[str] = []
     already: list[str] = []
     for root in roots:
         if package_version(root) != version:
             raise OracleCompatError("ORACLE_VERSION_MISMATCH", "Oracle package version does not match the resolved CLI version")
-        for relative, contract in PATCHES.items():
+        for relative, contract in contracts.items():
             target = root / Path(relative)
             current = sha256_file(target)
             item = relative if len(roots) == 1 else f"{root}:{relative}"
@@ -236,7 +285,7 @@ def ensure_oracle_compatibility(
 def main(argv: Sequence[str] | None = None) -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Apply the exact Oracle 0.16.1 ChatGPT compatibility patch.")
+    parser = argparse.ArgumentParser(description=f"Apply the exact Oracle {SUPPORTED_VERSION} ChatGPT compatibility patch.")
     parser.add_argument("--resolved-version", default=f"oracle {SUPPORTED_VERSION}")
     parser.add_argument("--package-root", type=Path)
     args = parser.parse_args(argv)

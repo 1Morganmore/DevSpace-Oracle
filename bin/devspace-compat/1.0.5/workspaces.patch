@@ -1,0 +1,70 @@
+diff --git a/dist/workspaces.js b/dist/workspaces.js
+--- a/dist/workspaces.js
++++ b/dist/workspaces.js
+@@ -219,7 +219,13 @@
+     "build",
+     ".next",
+     ".turbo",
+     ".cache",
++    ".tmp",
++    ".tox",
++    ".venv",
++    "__pycache__",
++    ".mypy_cache",
++    ".ruff_cache",
+ ]);
+ export function formatAgentsPath(path, workspaceRoot) {
+     if (!workspaceRoot)
+@@ -257,24 +263,37 @@
+         return undefined;
+     }
+ }
+ async function walkWorkspace(directory, visit) {
+-    let entries;
+-    try {
+-        entries = await opendir(directory);
+-    }
+-    catch {
+-        return;
+-    }
+-    for await (const entry of entries) {
+-        const path = join(directory, entry.name);
+-        if (entry.isDirectory()) {
+-            if (!SKIPPED_CONTEXT_DIRS.has(entry.name)) {
+-                await walkWorkspace(path, visit);
++    const pending = [directory];
++    const batchSize = 24;
++    while (pending.length > 0) {
++        const batch = pending.splice(0, batchSize);
++        const discovered = await Promise.all(batch.map(async (current) => {
++            let entries;
++            try {
++                entries = await opendir(current);
+             }
+-            continue;
+-        }
+-        await visit(path, entry);
++            catch {
++                return [];
++            }
++            const childDirectories = [];
++            for await (const entry of entries) {
++                const path = join(current, entry.name);
++                if (entry.isDirectory()) {
++                    if (!SKIPPED_CONTEXT_DIRS.has(entry.name) &&
++                        !entry.name.startsWith(".pytest-")) {
++                        childDirectories.push(path);
++                    }
++                    continue;
++                }
++                await visit(path, entry);
++            }
++            return childDirectories;
++        }));
++        for (const children of discovered) {
++            pending.push(...children);
++        }
+     }
+ }
+ function isErrnoException(error) {
+     return error instanceof Error && "code" in error;

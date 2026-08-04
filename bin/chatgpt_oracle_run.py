@@ -70,12 +70,33 @@ class OracleRunError(RuntimeError):
         return {"ok": False, "error": {"code": self.code, "message": str(self), "evidence": self.evidence}}
 
 
-def build_oracle_argv(config, layout, prompt: str) -> list[str]:
+ORACLE_PRO_ATTACHMENT_MAX_BYTES = 1024 * 1024
+
+
+def validate_oracle_attachment_sizes(config) -> None:
+    if config.transport != "pro-attachment-only":
+        return
+    oversized = [
+        {"path": str(path), "size_bytes": path.stat().st_size, "limit_bytes": ORACLE_PRO_ATTACHMENT_MAX_BYTES}
+        for path in config.attachments
+        if path.stat().st_size > ORACLE_PRO_ATTACHMENT_MAX_BYTES
+    ]
+    if oversized:
+        raise OracleRunError(
+            "ORACLE_ATTACHMENT_SIZE_PRELAUNCH_FAILED",
+            "Oracle Pro attachments must not exceed the tested 1 MiB per-file limit",
+            {"limit_bytes": ORACLE_PRO_ATTACHMENT_MAX_BYTES, "attachments": oversized},
+        )
+
+
+def build_oracle_argv(config, layout, prompt: str, *, resolved_version: str | None = None) -> list[str]:
     lifecycle_args = [] if "--browser-hide-window" in config.oracle_args else ["--browser-hide-window"]
-    # Upstream waits `--browser-timeout` for the answer and then gives its
-    # recovery pass the same budget, so the effective ceiling is twice this
-    # value.  Oracle's 20m default cut heavy Extra High DevSpace lanes at
-    # exactly 40m while they were still streaming.  Pro keeps upstream timing.
+    wait_args = ["--wait"] if STATE.normalize_oracle_version(
+        resolved_version or STATE.ORACLE_ACTIVE_VERSION
+    ) == "0.17.0" else []
+    # The compatibility patch makes `--browser-timeout` one overall answer
+    # budget, including recovery.  The old 20m upstream default was too short
+    # for heavy Extra High DevSpace lanes.  Pro keeps upstream timing.
     answer_timeout_args = (
         []
         if config.transport == "pro-attachment-only"
@@ -93,6 +114,7 @@ def build_oracle_argv(config, layout, prompt: str) -> list[str]:
         "--browser-thinking-time", config.thinking_time,
         "--browser-research", config.research,
         "--browser-archive", config.archive,
+        *wait_args,
         *lifecycle_args,
         *answer_timeout_args,
         *config.oracle_args,
@@ -123,7 +145,7 @@ MAX_HOST_WATCHDOG_SECONDS = 7 * 24 * 60 * 60
 def host_watchdog_timeout_seconds(config, argv: Sequence[str]) -> float | None:
     """Return one host wall-clock ceiling without changing Pro timing.
 
-    Oracle 0.16.1 can remain inside a blocked CDP evaluation after its own
+    A tested Oracle browser run can remain inside a blocked CDP evaluation after its own
     browser deadline.  The host deadline is therefore independent and only
     releases the caller; it never terminates the submitted Oracle process.
     """
@@ -190,8 +212,8 @@ ORACLE_VERSION_RESOLUTION_TIMEOUT_SECONDS = 90
 def resolve_oracle_version(command: Sequence[str], *, run_factory=subprocess.run, platform_name: str | None = None) -> str:
     """Resolve Oracle before launch with a bounded cold-cache allowance.
 
-    The returned value is still passed immediately to the exact 0.16.1
-    compatibility/hash contract before a browser can be launched.
+    The returned value is still passed immediately to the exact active or
+    recovery compatibility/hash contract before a browser can be launched.
     """
     completed = run_factory(
         [*command, "--version"],
@@ -243,7 +265,7 @@ def append_error(path: Path, message: str) -> None:
 
 SESSION_STATE_RE = re.compile(r"(?im)^\s*State:\s*([a-z][a-z0-9_-]*)\s*$")
 SESSION_URL_RE = re.compile(r"(?im)^\s*URL:\s*(https://chatgpt\.com/c/[^\s?#]+)\s*$")
-LIVE_SESSION_STATES = {"running", "streaming", "thinking", "active"}
+LIVE_SESSION_STATES = {"running", "streaming", "thinking", "active", "stalled"}
 TERMINAL_SESSION_STATES = {
     "complete", "completed", "done", "finished", "failed", "error", "cancelled", "canceled",
 }
@@ -295,7 +317,7 @@ def conversation_url_conflict(state: dict[str, Any], observed: str | None) -> di
 def exact_recovery_binding_unavailable(*paths: Path) -> bool:
     """Return true only for Oracle's exact no-live-tab plus no-saved-URL proof.
 
-    Oracle 0.16.1 writes the no-live-tab line to stdout and the missing-URL
+    The tested Oracle versions write the no-live-tab line to stdout and the missing-URL
     detail to stderr.  Both streams belong to one exact recovery attempt.
     """
     chunks: list[str] = []
@@ -339,6 +361,7 @@ def execute_run(
     ),
 ) -> dict[str, Any]:
     config = STATE.load_manifest(manifest_path, platform_name=platform_name)
+    validate_oracle_attachment_sizes(config)
     layout = STATE.create_layout(config, run_id=config.requested_run_id)
     transport_mission_path = layout.run_dir / "mission.md"
     # The app reads the project mission. The copied bytes below are host-only
@@ -349,7 +372,7 @@ def execute_run(
         return dry_run_payload(config, layout, argv, prompt)
 
     STATE.cleanup_prior_boot_browser_temps(config.run_root, platform_name=platform_name)
-    watchdog_timeout_seconds = host_watchdog_timeout_seconds(config, argv)
+    watchdog_timeout_seconds: float | None = None
     mission_bytes = config.mission_path.read_bytes()
     actual_mission_sha256 = hashlib.sha256(mission_bytes).hexdigest()
     if actual_mission_sha256 != config.mission_sha256:
@@ -378,6 +401,8 @@ def execute_run(
     try:
         version = resolve_oracle_version(config.oracle_command, run_factory=run_factory, platform_name=platform_name)
         compat_factory(version)
+        argv = build_oracle_argv(config, layout, prompt, resolved_version=version)
+        watchdog_timeout_seconds = host_watchdog_timeout_seconds(config, argv)
         if config.transport == "devspace":
             devspace_compat = devspace_compat_factory()
             if devspace_compat.get("service_restart_required"):
@@ -679,7 +704,14 @@ def _recover_run_locked(
     if not STATE.is_within(STATE.oracle_state_root(), output_path):
         raise OracleRunError("RECOVERY_OUTPUT_OUTSIDE_HOST_STATE", "recovery output must remain inside host-only Oracle state")
     stored_command = oracle.get("command")
-    command = STATE.validate_oracle_command(list(oracle_command) if oracle_command is not None else stored_command)
+    stored_version = STATE.normalize_oracle_version(oracle.get("resolved_version"))
+    command = (
+        STATE.validate_oracle_command(list(oracle_command))
+        if oracle_command is not None
+        else STATE.pinned_oracle_command(stored_version, platform_name=platform_name)
+        if stored_version in STATE.ORACLE_RECOVERABLE_VERSIONS
+        else STATE.validate_oracle_command(stored_command)
+    )
     argv_output = directory / f"recovery-{action}-candidate.md"
     argv = recovery_argv(command, locator, action, argv_output)
     if dry_run:
@@ -1072,7 +1104,7 @@ def recover_run(
             still_live_or_unsettled = (
                 result.get("status") in {"session_live", "terminal_settle_disagreement"}
                 or authority in {"live", "submitted_unknown"}
-                and exact_state in {"", "active", "running", "streaming", "thinking", "stalled"}
+                and exact_state in {"", *LIVE_SESSION_STATES}
             )
             if not still_live_or_unsettled:
                 return result
@@ -1083,7 +1115,10 @@ def recover_run(
                     "ok": False,
                     "status": "live_settle_timeout",
                     "settle_timeout_seconds": settle_timeout_seconds,
-                    "next_action": "resume the same exact-slug live recovery; never replace or resubmit",
+                    "next_action": (
+                        "keep the existing exact-slug recovery ownership attached until a later terminal "
+                        "harvest; do not relaunch, replace, or resubmit the conversation"
+                    ),
                 }
             sleep(min(settle_interval_seconds, remaining))
             result = _recover_run_locked(

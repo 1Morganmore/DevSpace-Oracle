@@ -1,0 +1,288 @@
+diff --git a/dist/src/browser/actions/promptComposer.js b/dist/src/browser/actions/promptComposer.js
+index c643386..df28522 100644
+--- a/dist/src/browser/actions/promptComposer.js
++++ b/dist/src/browser/actions/promptComposer.js
+@@ -14,6 +14,10 @@ const ENTER_KEY_TEXT = "\r";
+ export async function submitPrompt(deps, prompt, logger) {
+     const { runtime, input } = deps;
+     await waitForDomReady(runtime, logger, deps.inputTimeoutMs ?? undefined);
++    // Failed app-mention attempts can leave a server-persisted draft in the
++    // root composer. Always begin this one-shot submission from an empty
++    // composer so the next run cannot duplicate the mention.
++    await clearPromptComposer(runtime, logger);
+     const encodedPrompt = JSON.stringify(prompt);
+     const focusResult = await runtime.evaluate({
+         expression: `(() => {
+@@ -67,7 +71,271 @@ export async function submitPrompt(deps, prompt, logger) {
+         await logDomFailure(runtime, logger, "focus-textarea");
+         throw new Error("Failed to focus prompt textarea");
+     }
+-    await input.insertText({ text: prompt });
++    // Use trusted editing keys as well as DOM clearing. ChatGPT can restore a
++    // stale Lexical draft after direct textContent mutation.
++    await input.dispatchKeyEvent({
++        type: "keyDown",
++        key: "a",
++        code: "KeyA",
++        windowsVirtualKeyCode: 65,
++        nativeVirtualKeyCode: 65,
++        modifiers: 2,
++    });
++    await input.dispatchKeyEvent({
++        type: "keyUp",
++        key: "a",
++        code: "KeyA",
++        windowsVirtualKeyCode: 65,
++        nativeVirtualKeyCode: 65,
++        modifiers: 2,
++    });
++    await input.dispatchKeyEvent({
++        type: "keyDown",
++        key: "Backspace",
++        code: "Backspace",
++        windowsVirtualKeyCode: 8,
++        nativeVirtualKeyCode: 8,
++    });
++    await input.dispatchKeyEvent({
++        type: "keyUp",
++        key: "Backspace",
++        code: "Backspace",
++        windowsVirtualKeyCode: 8,
++        nativeVirtualKeyCode: 8,
++    });
++    await delay(250);
++    // ChatGPT custom apps require the leading @name suggestion to be
++    // confirmed before the remainder of the prompt is entered. Inserting the
++    // whole string at once leaves the suggestion overlay open and the send
++    // button inert. Keep this generic for any single leading app mention.
++    const mentionMatch = prompt.match(/^(@[^\s]+)(\s+[\s\S]+)$/u);
++    if (mentionMatch) {
++        const appName = mentionMatch[1].slice(1);
++        // Tracks whether the mention overlay/pill was observable.  The run
++        // proceeds either way because the literal @name text is what
++        // actually routes the prompt to the app.
++        let mentionUiConfirmed = true;
++        await input.insertText({ text: mentionMatch[1] });
++        const suggestionDeadline = Date.now() + 5_000;
++        let suggestionVisible = false;
++        while (Date.now() < suggestionDeadline) {
++            const probe = await runtime.evaluate({
++                expression: `(() => {
++                  const wanted = ${JSON.stringify(appName.toLowerCase())};
++                  const visible = (node) => {
++                    const rect = node?.getBoundingClientRect?.();
++                    return Boolean(rect && rect.width > 0 && rect.height > 0);
++                  };
++                  return Array.from(document.querySelectorAll(
++                    '[role="option"],[role="menuitem"],[role="group"],[data-radix-collection-item]'
++                  )).some((node) => {
++                    if (!visible(node)) return false;
++                    const text = String(node.innerText || node.textContent || '').trim().toLowerCase();
++                    return text === wanted || text.includes(wanted);
++                  });
++                })()`,
++                returnByValue: true,
++            });
++            if (probe.result?.value === true) {
++                suggestionVisible = true;
++                break;
++            }
++            await delay(100);
++        }
++        if (!suggestionVisible) {
++            const diagnostic = await runtime.evaluate({
++                expression: `(() => {
++                  const wanted = ${JSON.stringify(appName.toLowerCase())};
++                  const visible = (node) => {
++                    const rect = node?.getBoundingClientRect?.();
++                    return Boolean(rect && rect.width > 0 && rect.height > 0);
++                  };
++                  return Array.from(document.querySelectorAll('[role],[data-testid],button'))
++                    .filter((node) => visible(node) &&
++                      String(node.innerText || node.textContent || '').trim().toLowerCase().includes(wanted))
++                    .slice(0, 12)
++                    .map((node) => ({
++                      tag: node.tagName,
++                      role: node.getAttribute('role'),
++                      testid: node.getAttribute('data-testid'),
++                      text: String(node.innerText || node.textContent || '').trim().slice(0, 160),
++                    }));
++                })()`,
++                returnByValue: true,
++            });
++            // Downgraded from a hard block: the app is resolved from the
++            // literal @name text in the submitted prompt, so a missing
++            // suggestion overlay is a UI observation, not a failed run.
++            logger(`App mention suggestion not observed for @${appName}; continuing with the literal mention. Candidates: ${JSON.stringify(diagnostic.result?.value ?? null)}`);
++            mentionUiConfirmed = false;
++        }
++        const clickResult = await runtime.evaluate({
++            expression: `(() => {
++              const wanted = ${JSON.stringify(appName.toLowerCase())};
++              const visible = (node) => {
++                const rect = node?.getBoundingClientRect?.();
++                return Boolean(rect && rect.width > 0 && rect.height > 0);
++              };
++              const candidates = Array.from(document.querySelectorAll(
++                '[role="option"],[role="menuitem"],[data-radix-collection-item],button'
++              )).filter(visible);
++              const text = (node) =>
++                String(node.innerText || node.textContent || '').trim().toLowerCase();
++              let target = candidates.find((node) => text(node) === wanted) ||
++                candidates.find((node) => text(node).includes(wanted));
++              if (!target) {
++                const group = Array.from(document.querySelectorAll('[role="group"]'))
++                  .filter(visible)
++                  .find((node) => text(node).includes(wanted));
++                const label = group && Array.from(group.querySelectorAll('*'))
++                  .filter(visible)
++                  .find((node) => text(node) === wanted);
++                target = label?.closest?.(
++                  'button,[role="option"],[role="menuitem"],[data-radix-collection-item]'
++                ) || label;
++              }
++              if (!target || typeof target.click !== 'function') return false;
++              target.click();
++              return true;
++            })()`,
++            returnByValue: true,
++        });
++        if (clickResult.result?.value !== true) {
++            logger(`Exact ChatGPT app suggestion could not be clicked for @${appName}; continuing with the literal mention.`);
++            mentionUiConfirmed = false;
++        }
++        const pillDeadline = Date.now() + 5_000;
++        let pillConfirmed = false;
++        while (Date.now() < pillDeadline) {
++            const probe = await runtime.evaluate({
++                expression: `(() => {
++                  const wanted = ${JSON.stringify(appName.toLowerCase())};
++                  const roots = Array.from(document.querySelectorAll(
++                    ${JSON.stringify(INPUT_SELECTORS.join(","))}
++                  ));
++                  const pill = roots.some((root) => {
++                    const scope = root.closest('form') || root.parentElement || root;
++                    return Array.from(scope.querySelectorAll(
++                    '[contenteditable="false"],[data-lexical-decorator="true"],[data-testid*="mention"],button'
++                  )).some((node) =>
++                    String(node.innerText || node.textContent || '').trim().toLowerCase().includes(wanted)
++                    );
++                  });
++                  if (pill) return true;
++                  const visible = (node) => {
++                    const rect = node?.getBoundingClientRect?.();
++                    return Boolean(rect && rect.width > 0 && rect.height > 0);
++                  };
++                  return !Array.from(document.querySelectorAll(
++                    '[role="option"],[role="menuitem"],[role="group"],[data-radix-collection-item]'
++                  )).some((node) => visible(node) &&
++                    String(node.innerText || node.textContent || '').trim().toLowerCase().includes(wanted));
++                })()`,
++                returnByValue: true,
++            });
++            if (probe.result?.value === true) {
++                pillConfirmed = true;
++                break;
++            }
++            await delay(100);
++        }
++        if (!pillConfirmed) {
++            const diagnostic = await runtime.evaluate({
++                expression: `(() => {
++                  const wanted = ${JSON.stringify(appName.toLowerCase())};
++                  const visible = (node) => {
++                    const rect = node?.getBoundingClientRect?.();
++                    return Boolean(rect && rect.width > 0 && rect.height > 0);
++                  };
++                  const describe = (node) => ({
++                    tag: node?.tagName || null,
++                    role: node?.getAttribute?.('role') || null,
++                    testid: node?.getAttribute?.('data-testid') || null,
++                    ariaLabel: node?.getAttribute?.('aria-label') || null,
++                    text: String(node?.innerText || node?.textContent || '').trim().slice(0, 240),
++                    html: String(node?.outerHTML || '').slice(0, 500),
++                  });
++                  const matches = Array.from(document.querySelectorAll('*'))
++                    .filter((node) => visible(node) &&
++                      String(node.innerText || node.textContent || '').trim().toLowerCase().includes(wanted))
++                    .slice(-12)
++                    .map(describe);
++                  const editors = Array.from(document.querySelectorAll(
++                    ${JSON.stringify(INPUT_SELECTORS.join(","))}
++                  )).map(describe);
++                  return { matches, editors, active: describe(document.activeElement) };
++                })()`,
++                returnByValue: true,
++            });
++            logger(`App mention confirmation diagnostic: ${JSON.stringify(diagnostic.result?.value ?? null)}`);
++            await logDomFailure(runtime, logger, "app-mention-pill-missing");
++            logger(`ChatGPT app mention pill was not confirmed for @${appName}; continuing with the literal mention.`);
++            mentionUiConfirmed = false;
++        }
++        await runtime.evaluate({
++            expression: `(() => {
++              const wanted = ${JSON.stringify(appName.toLowerCase())};
++              const watcherKey = '__oracleAppApprovalWatcher';
++              const existing = window[watcherKey];
++              if (existing?.wanted === wanted && existing?.timer) return true;
++              if (existing?.timer) clearInterval(existing.timer);
++              const normalize = (value) =>
++                String(value || '').toLowerCase().replace(/\\s+/g, ' ').trim();
++              const visible = (node) => {
++                const rect = node?.getBoundingClientRect?.();
++                if (!rect || rect.width <= 0 || rect.height <= 0) return false;
++                const style = window.getComputedStyle(node);
++                return style.display !== 'none' && style.visibility !== 'hidden';
++              };
++              const tick = () => {
++                const allowLabels = new Set(['allow', '허용하기']);
++                const button = Array.from(document.querySelectorAll('button'))
++                  .filter(visible)
++                  .find((node) => allowLabels.has(normalize(node.innerText || node.textContent)));
++                if (!button) return;
++                let scope = button;
++                for (let i = 0; i < 10 && scope; i += 1, scope = scope.parentElement) {
++                  if (!normalize(scope.innerText || scope.textContent).includes(wanted)) continue;
++                  const rememberLabels = ['이 대화에 기억', 'remember for this chat', 'remember in this chat'];
++                  const checkbox = Array.from(scope.querySelectorAll(
++                    'input[type="checkbox"],[role="checkbox"]'
++                  )).find(visible);
++                  const rememberLabel = Array.from(scope.querySelectorAll('label'))
++                    .filter(visible)
++                    .find((node) => rememberLabels.some((label) =>
++                      normalize(node.innerText || node.textContent).includes(label)
++                    ));
++                  const control = checkbox || rememberLabel?.querySelector(
++                    'input[type="checkbox"],[role="checkbox"]'
++                  ) || rememberLabel;
++                  const checked = checkbox instanceof HTMLInputElement
++                    ? checkbox.checked
++                    : checkbox?.getAttribute?.('aria-checked') === 'true';
++                  if (control && !checked) {
++                    control.click();
++                    return;
++                  }
++                  button.click();
++                  return;
++                }
++              };
++              const timer = setInterval(tick, 250);
++              window[watcherKey] = { wanted, timer };
++              tick();
++              return true;
++            })()`,
++            returnByValue: true,
++        });
++        await input.insertText({ text: mentionMatch[2] });
++        logger(
++            mentionUiConfirmed
++                ? `App mention @${appName} confirmed in the composer.`
++                : `App mention @${appName} was sent as literal text without UI confirmation.`
++        );
++    }
++    else {
++        await input.insertText({ text: prompt });
++    }
+     // Some pages (notably ChatGPT when subscriptions/widgets load) need a brief settle
+     // before the send button becomes enabled; give it a short breather to avoid races.
+     await delay(500);

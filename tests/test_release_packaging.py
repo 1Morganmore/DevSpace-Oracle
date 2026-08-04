@@ -1,4 +1,5 @@
 import json
+import runpy
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -55,6 +56,7 @@ def test_manifest_covers_runtime_and_schemas() -> None:
         'bin/codexpro_project_cloudflare_bootstrap.ps1',
         'skills/chatgpt-pro-browser/SKILL.md',
         'skills/chatgpt-pro-browser/agents/openai.yaml',
+        'skills/chatgpt-pro-browser/scripts/build_project_context_packet.py',
         'skills/chatgpt-pro-browser/scripts/run_chatgpt_pro.py',
         'skills/chatgpt-pro-plan-handoff/scripts/run_pro_plan_handoff.py',
         'skills/chatgpt-pro-plan-handoff/schemas/*.json',
@@ -72,9 +74,53 @@ def test_manifest_covers_runtime_and_schemas() -> None:
     assert {
         'skills/chatgpt-pro-browser/SKILL.md',
         'skills/chatgpt-pro-browser/agents/openai.yaml',
+        'skills/chatgpt-pro-browser/scripts/build_project_context_packet.py',
         'skills/chatgpt-pro-browser/scripts/run_chatgpt_pro.py',
         'skills/chatgpt-pro-browser/scripts/run_pro_browser.py',
     } <= package_files
+
+
+def test_compatibility_patch_assets_are_packaged() -> None:
+    manifest = json.loads((ROOT / 'install-manifest.json').read_text(encoding='utf-8'))
+    includes = set(manifest['include'])
+    oracle = runpy.run_path(str(ROOT / 'bin/chatgpt_oracle_compat.py'))
+    oracle_assets = {
+        f'bin/oracle-compat/{version}/{contract["patch"]}'
+        for version, patches in oracle['VERSION_PATCHES'].items()
+        for contract in patches.values()
+    }
+    devspace = runpy.run_path(str(ROOT / 'bin/chatgpt_devspace_compat.py'))
+    devspace_assets = {
+        f'bin/devspace-compat/{devspace["SUPPORTED_VERSION"]}/{contract["patch"]}'
+        for contract in devspace['PATCHES'].values()
+    }
+    required = oracle_assets | devspace_assets | {
+        'bin/devspace-compat/1.0.4/workspaces.patch',
+    }
+    assert required <= includes
+    assert not [path for path in required if not (ROOT / path).is_file()]
+    package_files = set(json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))['files'])
+    assert {'bin/devspace-compat/', 'bin/oracle-compat/'} <= package_files
+    assert {path.name for path in (ROOT / 'bin/oracle-compat/0.16.1').glob('*.patch')} == {
+        'assistantResponse.patch',
+        'browserConfig.patch',
+        'browserIndex.patch',
+        'chromeLifecycle.patch',
+        'modelSelection.patch',
+        'profileCopy.patch',
+        'promptComposer.patch',
+        'recoverConversation.patch',
+    }
+    assert {path.name for path in (ROOT / 'bin/oracle-compat/0.17.0').glob('*.patch')} == {
+        'assistantResponse.patch',
+        'browserConfig.patch',
+        'browserIndex.patch',
+        'chromeLifecycle.patch',
+        'profileCopy.patch',
+        'promptComposer.patch',
+        'recoverConversation.patch',
+        'thinkingTime.patch',
+    }
 
 
 def test_quiescent_app_trace_fixtures_never_authorize_replacement_work() -> None:
@@ -116,7 +162,8 @@ def test_package_is_publishable_and_lockfile_matches() -> None:
     lock = json.loads((ROOT / 'package-lock.json').read_text(encoding='utf-8'))
     assert package['private'] is False
     assert package['name'] == lock['name'] == lock['packages']['']['name']
-    assert package['version'] == lock['version'] == lock['packages']['']['version']
+    assert package['version'] == lock['version'] == lock['packages']['']['version'] == '1.8.0'
+    assert package['engines']['node'] == lock['packages']['']['engines']['node'] == '>=24 <27'
     assert package['license'] == lock['packages']['']['license'] == 'MIT'
     assert package['repository']['url'] == 'git+https://github.com/1Morganmore/DevSpace-Oracle.git'
     assert package['homepage'].startswith('https://github.com/1Morganmore/DevSpace-Oracle')
@@ -130,6 +177,19 @@ def test_package_is_publishable_and_lockfile_matches() -> None:
         'contracts/multi-gpt/',
         'requirements-dev.txt',
     } <= set(package['files'])
+
+
+def test_release_external_versions_and_integrities_are_exact() -> None:
+    external = json.loads((ROOT / 'install-manifest.json').read_text(encoding='utf-8'))['external']
+    assert external['oracle'] == {
+        'package': '@steipete/oracle',
+        'tested_version': '0.17.0',
+        'license': 'MIT',
+        'integrity': 'sha512-GOViubhL+fKaEGuyrmc9mDnDFPoKYoleYw85iiITFZu1QgcjDZzxKDycnFYSg+f2cAJ6h8RHEZqXSjSXuGJSxw==',
+        'installation': 'npx -y @steipete/oracle@0.17.0',
+    }
+    assert external['devspace']['tested_version'] == '1.0.5'
+    assert external['devspace']['integrity'] == 'sha512-eloUu+bZoJsBFxaaSNK2/hegNApT+HAfu/vjYYhm/Etu3gwx+Z7tnboZfM9KAU/hvX44P40kzEHS6JBNRPGOlg=='
 
 
 def test_release_workflow_installs_pytest_before_running_contract_runner() -> None:

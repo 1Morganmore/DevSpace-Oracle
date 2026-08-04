@@ -19,6 +19,9 @@ sends plain `@DevSpace` plus the absolute mission path. It never attaches files,
 opens ChatGPT settings, inspects/selects/deletes an app, or falls back to
 agbrowse, Playwright, in-app Browser, or Chrome.
 
+New runs pin Oracle `0.17.0`. Oracle `0.16.1` is available only for exact
+recovery of a run already persisted with that version.
+
 `orchestrator` is a single web submission that carries the orchestrator
 ownership contract: that one GPT session owns delegated exploration, code
 authoring, tests, and internal parallel lanes, and its answer is the result.
@@ -34,11 +37,14 @@ comprehensive mode when the plan itself needs an independent review stage,
 when Pro or Web Multi must participate, or when completion must be proven by a
 deterministic local gate.
 
+Web Multi participates only when explicitly selected. Do not transition a
+regular or failed run into Web Multi automatically.
+
 CodexPro is frozen for new work. Never mention it in a new mission, probe its
 endpoint, repair/register/delete its app, or use it as a DevSpace fallback.
 
 Oracle explicitly selects `GPT-5.6 Sol` and `heavy`, verifies the visible
-`Extra High` tier, and records both in Oracle evidence. The exact 0.16.1
+`Extra High` tier, and records both in Oracle evidence. The active 0.17.0
 compatibility layer is hash-gated and fails closed on an unknown version or
 third-party file. Never invent xhigh or silently downgrade.
 

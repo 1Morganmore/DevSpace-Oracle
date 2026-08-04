@@ -19,6 +19,9 @@ from typing import Any, Sequence
 
 SCHEMA = "codex.chatgpt.oracle-run/v1"
 DEVSPACE_APP_NAME = "DevSpace"
+ORACLE_ACTIVE_VERSION = "0.17.0"
+ORACLE_RECOVERABLE_VERSIONS = ("0.16.1", ORACLE_ACTIVE_VERSION)
+ORACLE_PACKAGE = "@steipete/oracle"
 STATE_SCHEMA = "codex.chatgpt.oracle-run-state/v1"
 STATUSES = {"prepared", "running", "complete", "failed", "attention_required", "abandoned"}
 # One bounded lifecycle vocabulary.  The stored `status` values above remain the
@@ -65,7 +68,7 @@ SAFE_ORACLE_VALUE_OPTIONS = {
     "--heartbeat",
     "--timeout",
     "--zombie-timeout",
-    # Oracle 0.16.1 is compatibility-patched so this is one overall answer
+    # Tested Oracle versions are compatibility-patched so this is one overall answer
     # budget, including fallback capture.  The host also enforces the same
     # wall-clock deadline with a short grace if CDP evaluation itself wedges.
     "--browser-timeout",
@@ -97,7 +100,7 @@ ORACLE_RECOVERY_STATE_RE = re.compile(r"(?im)^\s*State:\s*[a-z][a-z0-9_-]*\s*$")
 # Upstream Oracle copies a signed-in browser profile with rsync.  On POSIX
 # hosts without rsync the copy fails after launch, so feasibility is decided
 # while loading the manifest instead of crashing mid-launch.  The pinned
-# `oracle-compat/0.16.1/profileCopy.patch` replaces that spawn with Node's
+# The versioned `oracle-compat/*/profileCopy.patch` replaces that spawn with Node's
 # built-in recursive copy on Windows, so `nt` needs no external dependency.
 # Checking PATH there would drop per-run profile isolation and block every
 # parallel Web Multi lane, which is the exact failure this guard must avoid.
@@ -221,8 +224,27 @@ def oracle_state_root() -> Path:
 
 
 def default_oracle_command(platform_name: str | None = None) -> tuple[str, ...]:
+    return pinned_oracle_command(ORACLE_ACTIVE_VERSION, platform_name=platform_name)
+
+
+def normalize_oracle_version(value: Any) -> str:
+    return str(value or "").strip().removeprefix("oracle ").strip()
+
+
+def pinned_oracle_command(version: str, *, platform_name: str | None = None) -> tuple[str, ...]:
+    normalized = normalize_oracle_version(version)
+    if normalized not in ORACLE_RECOVERABLE_VERSIONS:
+        raise OracleStateError(
+            "ORACLE_VERSION_UNVALIDATED",
+            "Oracle version is not part of the active or recovery compatibility contract",
+            {"version": normalized, "supported": list(ORACLE_RECOVERABLE_VERSIONS)},
+        )
     platform = os.name if platform_name is None else platform_name
-    return ("npx.cmd" if platform == "nt" else "npx", "-y", "@steipete/oracle")
+    return (
+        "npx.cmd" if platform == "nt" else "npx",
+        "-y",
+        f"{ORACLE_PACKAGE}@{normalized}",
+    )
 
 
 def validate_oracle_command(values: Any) -> tuple[str, ...]:
@@ -232,15 +254,17 @@ def validate_oracle_command(values: Any) -> tuple[str, ...]:
     executable = Path(command[0]).name.casefold()
     if executable in {"oracle", "oracle.cmd", "oracle.exe"} and len(command) == 1:
         return command
-    if executable in {"npx", "npx.cmd", "npx.exe"} and command[1:] in {
-        ("-y", "@steipete/oracle"),
-        ("--yes", "@steipete/oracle"),
-        ("@steipete/oracle",),
-    }:
-        return command
+    if executable in {"npx", "npx.cmd", "npx.exe"}:
+        allowed_specs = {f"{ORACLE_PACKAGE}@{version}" for version in ORACLE_RECOVERABLE_VERSIONS}
+        if command[1:] in {
+            *(('-y', spec) for spec in allowed_specs),
+            *(('--yes', spec) for spec in allowed_specs),
+            *((spec,) for spec in allowed_specs),
+        }:
+            return command
     raise OracleStateError(
         "ORACLE_COMMAND_FORBIDDEN",
-        "oracle_command must resolve directly to Oracle or npx @steipete/oracle",
+        "oracle_command must resolve directly to Oracle or an exact tested @steipete/oracle version",
         {"command": command_for_display(command)},
     )
 
@@ -1105,10 +1129,14 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
     normalized_error = stderr_text.lstrip()
     if not normalized_error.startswith("version resolution failed:"):
         return None
-    if not (
+    if "Oracle compatibility is validated only for tested versions" in normalized_error:
+        failure_reason = "compatibility-version-drift"
+    elif (
         "ORACLE_VERSION_TIMEOUT:" in normalized_error
-        or ("--version" in normalized_error and "timed out after 30 seconds" in normalized_error)
+        or ("--version" in normalized_error and "timed out after" in normalized_error)
     ):
+        failure_reason = "version-resolution-timeout"
+    else:
         return None
     return {
         "schema": "codex.chatgpt.oracle-pre-submit-host-failure/v1",
@@ -1118,6 +1146,7 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
         "output_absent": True,
         "conversation_url_absent": True,
         "resolved_version": "unresolved",
+        "failure_reason": failure_reason,
     }
 
 

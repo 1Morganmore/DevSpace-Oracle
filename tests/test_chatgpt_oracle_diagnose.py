@@ -252,26 +252,32 @@ def test_host_watchdog_transition_is_post_submit_and_never_retry_safe() -> None:
 
 def test_version_resolution_prelaunch_failure_is_host_safe_only_with_absence_proof() -> None:
     module = load()
-    verdict = module.classify_run(
-        {
-            "status": "attention_required",
-            "session_authority": "pre_submit",
-            "terminal_harvested": False,
-            "task_outcome": "pending",
-            "pre_submit_failure": {
+    state = {
+        "status": "attention_required",
+        "session_authority": "pre_submit",
+        "terminal_harvested": False,
+        "task_outcome": "pending",
+    }
+
+    for failure_reason, signature in (
+        ("version-resolution-timeout", "oracle-version-resolution-prelaunch-timeout"),
+        ("compatibility-version-drift", "oracle-version-resolution-prelaunch-compatibility-drift"),
+    ):
+        verdict = module.classify_run(
+            state,
+            stdout_text="",
+            has_output=False,
+            pre_submit_host_failure={
                 "code": "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED",
                 "output_absent": True,
                 "conversation_url_absent": True,
+                "failure_reason": failure_reason,
             },
-        },
-        stdout_text="",
-        has_output=False,
-    )
-
-    assert verdict == {
-        "bucket": "pre-submit-host-environment",
-        "signature": "oracle-version-resolution-prelaunch-timeout",
-    }
+        )
+        assert verdict == {
+            "bucket": "pre-submit-host-environment",
+            "signature": signature,
+        }
 
 
 def test_user_confirmed_no_submission_overrides_prompt_timeout_only_with_validated_proof() -> None:
