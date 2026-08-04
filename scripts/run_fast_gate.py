@@ -923,6 +923,7 @@ def run_fast_gate(
             cwd=ROOT,
             environment=environment,
             hard_timeout_seconds=hard_timeout_seconds,
+            forward_stdio=True,
         )
     return {
         **execution,
