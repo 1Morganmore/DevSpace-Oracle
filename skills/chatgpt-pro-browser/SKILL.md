@@ -51,7 +51,7 @@ headroom for the mission, evidence index, and final Pro answer; never pad with
 irrelevant files merely to increase byte count.
 
 The evidence index must record the effective attachment/context budget used for
-the run, included bytes or tokens when measurable, reserved answer headroom,
+the run, included bytes or tokens when measurable, transport answer headroom,
 and why any remaining capacity could not improve the decision. When evidence
 exceeds the boundary, allocate space deterministically in this order: governing
 rules and exact question; canonical current state and measured primary evidence;
@@ -94,12 +94,22 @@ python <skill-root>\scripts\build_project_context_packet.py validate --manifest 
 ```
 
 The manifest schema is `codex.chatgpt.pro-project-context/v1`. It declares the
-absolute project root and packet path, question, required evidence categories,
-the tested one-MiB local attachment profile, and an explicit evidence allowlist
-with category, priority, and frozen SHA-256. The builder never scans the project
-tree. It rejects root escape, symlinks, stale hashes, credentials and volatile
-state, duplicate paths, missing categories, and a packet larger than Oracle's
-tested one-MiB per-file attachment limit.
+absolute project root and packet path, question, exact `mission_path` and
+`mission_sha256`, required evidence categories, optional machine-readable
+`category_omissions`, the tested one-MiB local attachment profile, and an
+explicit evidence allowlist with category, priority, and frozen SHA-256. Each
+category omission requires `category`, `reason`, `coverage_boundary`, and
+`expected_decision_impact`; a required category must be included or explicitly
+omitted. The builder never scans the project tree. It rejects root escape,
+symlinks, stale mission or evidence hashes, credentials and volatile state,
+duplicate paths, invalid omissions, missing categories, and a packet larger
+than Oracle's tested one-MiB per-file attachment limit.
+
+The evidence index and receipt record
+`transport_answer_headroom_bytes: 0` for the tested attachment transport only.
+They separately record `model_context_budget_status: unverified` and
+`model_answer_headroom_tokens: null`; never present the transport byte envelope
+as a verified model-context or answer-token limit.
 
 Prefer one deterministic, path-preserved ZIP plus the short UTF-8 mission. The
 ZIP must contain a root mission/packet, an evidence index, original absolute and
@@ -140,6 +150,8 @@ Required fields:
 - `project_root`.
 - `task_kind: pro`.
 - `mission_path`: the short Pro instruction file.
+- `project_context_manifest_path`: the validated packet manifest bound to that
+  exact mission and its SHA-256.
 - `attachments`: one or more exact attachment paths.
 - `model_strategy: select`.
 
@@ -149,7 +161,7 @@ hard error.
 Preview without launching a browser:
 
 ```powershell
-python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" --mode pro --project-root C:\project --mission-path C:\project\pro.md --attachment C:\project\packet.zip --manifest-output C:\project\.ai-bridge\pro.json --dry-run
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" --mode pro --project-root C:\project --mission-path C:\project\pro.md --context-manifest C:\project\.ai-bridge\pro-context-manifest.json --attachment C:\project\packet.zip --manifest-output C:\project\.ai-bridge\pro.json --dry-run
 ```
 
 The preview must show the exact Oracle command, attachment paths/hashes, model

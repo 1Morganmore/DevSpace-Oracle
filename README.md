@@ -169,7 +169,8 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
   --mode pro `
   --project-root C:\project `
   --mission-path C:\project\pro.md `
-  --attachment C:\project\evidence.zip `
+  --context-manifest C:\project\.ai-bridge\pro-context-manifest.json `
+  --attachment C:\project\.ai-bridge\packet.zip `
   --manifest-output C:\project\.ai-bridge\pro.json `
   --dry-run
 ```

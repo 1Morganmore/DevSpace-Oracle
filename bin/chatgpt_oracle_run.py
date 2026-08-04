@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -16,6 +17,13 @@ from typing import Any, Callable, Sequence
 STATE_PATH = Path(__file__).resolve().with_name("chatgpt_oracle_state.py")
 COMPAT_PATH = Path(__file__).resolve().with_name("chatgpt_oracle_compat.py")
 DEVSPACE_COMPAT_PATH = Path(__file__).resolve().with_name("chatgpt_devspace_compat.py")
+PRO_CONTEXT_BUILDER_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "skills"
+    / "chatgpt-pro-browser"
+    / "scripts"
+    / "build_project_context_packet.py"
+)
 
 
 def load_state_module():
@@ -60,6 +68,22 @@ def load_devspace_compat_module():
 DEVSPACE_COMPAT = load_devspace_compat_module()
 
 
+def load_pro_context_builder_module():
+    spec = importlib.util.spec_from_file_location(
+        "chatgpt_pro_context_builder_runtime",
+        PRO_CONTEXT_BUILDER_PATH,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Pro context builder unavailable: {PRO_CONTEXT_BUILDER_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+PRO_CONTEXT_BUILDER = load_pro_context_builder_module()
+
+
 class OracleRunError(RuntimeError):
     def __init__(self, code: str, message: str, evidence: dict[str, Any] | None = None):
         super().__init__(message)
@@ -89,7 +113,99 @@ def validate_oracle_attachment_sizes(config) -> None:
         )
 
 
-def build_oracle_argv(config, layout, prompt: str, *, resolved_version: str | None = None) -> list[str]:
+def validate_pro_context_preflight(config) -> dict[str, Any] | None:
+    if config.transport != "pro-attachment-only":
+        return None
+    manifest_path = config.project_context_manifest_path
+    expected_manifest_sha256 = config.project_context_manifest_sha256
+    if manifest_path is None or expected_manifest_sha256 is None:
+        raise OracleRunError("PRO_CONTEXT_MANIFEST_REQUIRED", "Pro context manifest identity is missing")
+    actual_manifest_sha256 = STATE.sha256_file(manifest_path)
+    if actual_manifest_sha256 != expected_manifest_sha256:
+        raise OracleRunError(
+            "PRO_CONTEXT_MANIFEST_CHANGED",
+            "Pro context manifest changed after Oracle manifest validation",
+            {"expected": expected_manifest_sha256, "actual": actual_manifest_sha256},
+        )
+    try:
+        context = json.loads(STATE.read_utf8_strict(manifest_path))
+        receipt = PRO_CONTEXT_BUILDER.validate(manifest_path)
+        packet_path = Path(context["packet_path"]).expanduser().resolve(strict=True)
+    except Exception as exc:
+        raise OracleRunError(
+            "PRO_CONTEXT_PREFLIGHT_FAILED",
+            "Pro packet builder validation failed before submission",
+            {"detail": str(exc)},
+        ) from exc
+    expected_attachments = (config.mission_path, packet_path)
+    envelope = receipt.get("local_transport_envelope") or {}
+    packet_sha256 = STATE.sha256_file(packet_path)
+    if any((
+        receipt.get("project_root") != str(config.project_root),
+        receipt.get("mission_path") != str(config.mission_path),
+        receipt.get("mission_sha256") != config.mission_sha256,
+        tuple(config.attachments) != expected_attachments,
+        receipt.get("packet_sha256") != packet_sha256,
+        envelope.get("profile") != PRO_CONTEXT_BUILDER.LOCAL_PROFILE_ID,
+        envelope.get("total_budget_bytes") != ORACLE_PRO_ATTACHMENT_MAX_BYTES,
+        envelope.get("max_packet_zip_bytes") != ORACLE_PRO_ATTACHMENT_MAX_BYTES,
+    )):
+        raise OracleRunError(
+            "PRO_CONTEXT_BINDING_INVALID",
+            "Pro context receipt is not bound to the exact project, mission, packet, and transport profile",
+        )
+    return {
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": expected_manifest_sha256,
+        "packet_path": str(packet_path),
+        "packet_sha256": packet_sha256,
+    }
+
+
+def validated_oracle_runtime_command(
+    compatibility: dict[str, Any],
+    resolved_version: str,
+    *,
+    which_runner: Callable[[str], str | None] = shutil.which,
+) -> tuple[str, str]:
+    version = STATE.normalize_oracle_version(resolved_version)
+    try:
+        root = Path(str(compatibility["package_root"])).expanduser().resolve(strict=True)
+        reported_roots = {
+            Path(str(value)).expanduser().resolve(strict=True)
+            for value in compatibility["package_roots"]
+        }
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise OracleRunError(
+            "ORACLE_COMPATIBILITY_ROOT_UNBOUND",
+            "Oracle compatibility did not identify the exact validated package root",
+        ) from exc
+    if (
+        compatibility.get("ok") is not True
+        or STATE.normalize_oracle_version(compatibility.get("version")) != version
+        or root not in reported_roots
+        or COMPAT.package_version(root) != version
+    ):
+        raise OracleRunError(
+            "ORACLE_COMPATIBILITY_ROOT_UNBOUND",
+            "Oracle compatibility report is not bound to the resolved version and package root",
+        )
+    cli = STATE.exact_regular_file(root / "dist" / "bin" / "oracle-cli.js", label="validated_oracle_cli")
+    node = which_runner("node")
+    if not node:
+        raise OracleRunError("NODE_RUNTIME_NOT_FOUND", "Node.js is required to launch the validated Oracle package")
+    node_path = STATE.exact_regular_file(Path(node).expanduser().resolve(strict=True), label="node_runtime")
+    return str(node_path), str(cli)
+
+
+def build_oracle_argv(
+    config,
+    layout,
+    prompt: str,
+    *,
+    resolved_version: str | None = None,
+    runtime_command: Sequence[str] | None = None,
+) -> list[str]:
     lifecycle_args = [] if "--browser-hide-window" in config.oracle_args else ["--browser-hide-window"]
     wait_args = ["--wait"] if STATE.normalize_oracle_version(
         resolved_version or STATE.ORACLE_ACTIVE_VERSION
@@ -107,7 +223,7 @@ def build_oracle_argv(config, layout, prompt: str, *, resolved_version: str | No
         else ["--browser-timeout", STATE.DEFAULT_BROWSER_ANSWER_TIMEOUT]
     )
     command = [
-        *config.oracle_command,
+        *(runtime_command or config.oracle_command),
         "--engine", "browser",
         "--model", config.model,
         "--browser-model-strategy", config.model_strategy,
@@ -248,6 +364,14 @@ def dry_run_payload(config, layout, argv: Sequence[str], prompt: str) -> dict[st
             {"path": str(path), "sha256": digest}
             for path, digest in zip(config.attachments, config.attachment_sha256s, strict=True)
         ],
+        "project_context_manifest": (
+            {
+                "path": str(config.project_context_manifest_path),
+                "sha256": config.project_context_manifest_sha256,
+            }
+            if config.project_context_manifest_path is not None
+            else None
+        ),
         "output_path": str(layout.output_path),
         "transcript_path": str(layout.transcript_path),
         "stdout_path": str(layout.stdout_path),
@@ -359,9 +483,11 @@ def execute_run(
     devspace_compat_factory: Callable[[], dict[str, Any]] = (
         DEVSPACE_COMPAT.ensure_devspace_compatibility
     ),
+    runtime_command_factory: Callable[[dict[str, Any], str], Sequence[str]] = validated_oracle_runtime_command,
 ) -> dict[str, Any]:
     config = STATE.load_manifest(manifest_path, platform_name=platform_name)
     validate_oracle_attachment_sizes(config)
+    validate_pro_context_preflight(config)
     layout = STATE.create_layout(config, run_id=config.requested_run_id)
     transport_mission_path = layout.run_dir / "mission.md"
     # The app reads the project mission. The copied bytes below are host-only
@@ -400,8 +526,21 @@ def execute_run(
     oracle_process_pid: int | None = None
     try:
         version = resolve_oracle_version(config.oracle_command, run_factory=run_factory, platform_name=platform_name)
-        compat_factory(version)
-        argv = build_oracle_argv(config, layout, prompt, resolved_version=version)
+        if STATE.normalize_oracle_version(version) != STATE.ORACLE_ACTIVE_VERSION:
+            raise OracleRunError(
+                "ORACLE_NEW_RUN_VERSION_UNVALIDATED",
+                "Oracle compatibility is validated only for tested versions on new submissions",
+                {"resolved": version, "active": STATE.ORACLE_ACTIVE_VERSION},
+            )
+        compatibility = compat_factory(version)
+        runtime_command = runtime_command_factory(compatibility, version)
+        argv = build_oracle_argv(
+            config,
+            layout,
+            prompt,
+            resolved_version=version,
+            runtime_command=runtime_command,
+        )
         watchdog_timeout_seconds = host_watchdog_timeout_seconds(config, argv)
         if config.transport == "devspace":
             devspace_compat = devspace_compat_factory()
@@ -477,6 +616,7 @@ def execute_run(
                             "attachment bytes changed after manifest validation",
                             {"path": str(attachment), "expected": expected, "actual": actual},
                         )
+                validate_pro_context_preflight(config)
                 process = popen_factory(
                     argv,
                     cwd=str(config.project_root),
@@ -640,8 +780,11 @@ def _recover_run_locked(
     action: str,
     dry_run: bool = False,
     oracle_command: Sequence[str] | None = None,
+    run_factory: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     popen_factory: Callable[..., Any] = subprocess.Popen,
     platform_name: str | None = None,
+    compat_factory: Callable[[str], dict[str, Any]] = COMPAT.ensure_oracle_compatibility,
+    runtime_command_factory: Callable[[dict[str, Any], str], Sequence[str]] = validated_oracle_runtime_command,
 ) -> dict[str, Any]:
     directory = run_dir.expanduser().resolve(strict=True)
     state = STATE.load_state(directory / "state.json")
@@ -703,19 +846,72 @@ def _recover_run_locked(
     output_path = Path(str(artifacts.get("output") or (directory / "output.md"))).expanduser().resolve()
     if not STATE.is_within(STATE.oracle_state_root(), output_path):
         raise OracleRunError("RECOVERY_OUTPUT_OUTSIDE_HOST_STATE", "recovery output must remain inside host-only Oracle state")
-    stored_command = oracle.get("command")
-    stored_version = STATE.normalize_oracle_version(oracle.get("resolved_version"))
-    command = (
-        STATE.validate_oracle_command(list(oracle_command))
-        if oracle_command is not None
-        else STATE.pinned_oracle_command(stored_version, platform_name=platform_name)
-        if stored_version in STATE.ORACLE_RECOVERABLE_VERSIONS
-        else STATE.validate_oracle_command(stored_command)
-    )
-    argv_output = directory / f"recovery-{action}-candidate.md"
-    argv = recovery_argv(command, locator, action, argv_output)
-    if dry_run:
-        return {"ok": True, "status": "dry-run", "run_dir": str(directory), "action": action, "argv": STATE.command_for_display(argv)}
+    try:
+        stored_version = STATE.normalize_oracle_version(oracle.get("resolved_version"))
+        if stored_version not in STATE.ORACLE_RECOVERABLE_VERSIONS:
+            raise OracleRunError(
+                "RECOVERY_STORED_VERSION_UNVALIDATED",
+                "recovery requires a recognized stored Oracle version",
+                {
+                    "stored": oracle.get("resolved_version"),
+                    "supported": list(STATE.ORACLE_RECOVERABLE_VERSIONS),
+                },
+            )
+        command = STATE.pinned_oracle_command(stored_version, platform_name=platform_name)
+        if oracle_command is not None and tuple(oracle_command) != command:
+            raise OracleRunError(
+                "RECOVERY_COMMAND_VERSION_MISMATCH",
+                "recovery command must be the exact npx pin for the stored Oracle version",
+                {
+                    "stored_version": stored_version,
+                    "expected": STATE.command_for_display(command),
+                    "actual": STATE.command_for_display(oracle_command),
+                },
+            )
+        argv_output = directory / f"recovery-{action}-candidate.md"
+        argv = recovery_argv(command, locator, action, argv_output)
+        if dry_run:
+            return {
+                "ok": True,
+                "status": "dry-run",
+                "run_dir": str(directory),
+                "action": action,
+                "argv": STATE.command_for_display(argv),
+            }
+        resolved_version = resolve_oracle_version(
+            command,
+            run_factory=run_factory,
+            platform_name=platform_name,
+        )
+        if STATE.normalize_oracle_version(resolved_version) != stored_version:
+            raise OracleRunError(
+                "RECOVERY_RESOLVED_VERSION_MISMATCH",
+                "recovery command did not resolve to the stored Oracle version",
+                {"stored": stored_version, "resolved": resolved_version},
+            )
+        compatibility = compat_factory(resolved_version)
+        runtime_command = runtime_command_factory(compatibility, resolved_version)
+        argv = recovery_argv(runtime_command, locator, action, argv_output)
+    except Exception as exc:
+        updated = STATE.update_state(
+            directory / "state.json",
+            status="attention_required",
+            exit_code=state.get("exit_code"),
+            session_authority=str(state.get("session_authority") or "submitted_unknown"),
+        )
+        error = exc.envelope()["error"] if isinstance(exc, OracleRunError) else {
+            "code": getattr(exc, "code", "RECOVERY_PREFLIGHT_FAILED"),
+            "message": str(exc),
+            "evidence": getattr(exc, "evidence", {}),
+        }
+        return {
+            "ok": False,
+            "status": "recovery_preflight_failed",
+            "run_dir": str(directory),
+            "action": action,
+            "error": error,
+            "result": updated,
+        }
     stdout_path = directory / f"recovery-{action}-stdout.log"
     stderr_path = directory / f"recovery-{action}-stderr.log"
     recovery_browser_temp = directory / f"recovery-{action}-browser-temp"
@@ -1047,8 +1243,11 @@ def recover_run(
     action: str,
     dry_run: bool = False,
     oracle_command: Sequence[str] | None = None,
+    run_factory: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     popen_factory: Callable[..., Any] = subprocess.Popen,
     platform_name: str | None = None,
+    compat_factory: Callable[[str], dict[str, Any]] = COMPAT.ensure_oracle_compatibility,
+    runtime_command_factory: Callable[[dict[str, Any], str], Sequence[str]] = validated_oracle_runtime_command,
     settle_timeout_seconds: float = 0,
     settle_interval_seconds: float = 15,
     sleep: Callable[[float], None] = time.sleep,
@@ -1078,8 +1277,11 @@ def recover_run(
             action=action,
             dry_run=dry_run,
             oracle_command=oracle_command,
+            run_factory=run_factory,
             popen_factory=popen_factory,
             platform_name=platform_name,
+            compat_factory=compat_factory,
+            runtime_command_factory=runtime_command_factory,
         )
         if dry_run or action != "live" or settle_timeout_seconds <= 0:
             return result
@@ -1087,7 +1289,10 @@ def recover_run(
         while True:
             if result.get("ok"):
                 return result
-            if result.get("status") == "recovery_binding_unavailable":
+            if result.get("status") in {
+                "recovery_binding_unavailable",
+                "recovery_preflight_failed",
+            }:
                 return result
             if result.get("status") == "terminal_observed":
                 return _recover_run_locked(
@@ -1095,8 +1300,11 @@ def recover_run(
                     action="harvest",
                     dry_run=False,
                     oracle_command=oracle_command,
+                    run_factory=run_factory,
                     popen_factory=popen_factory,
                     platform_name=platform_name,
+                    compat_factory=compat_factory,
+                    runtime_command_factory=runtime_command_factory,
                 )
             current = result.get("result") if isinstance(result.get("result"), dict) else {}
             authority = str(current.get("session_authority") or "")
@@ -1126,8 +1334,11 @@ def recover_run(
                 action="live",
                 dry_run=False,
                 oracle_command=oracle_command,
+                run_factory=run_factory,
                 popen_factory=popen_factory,
                 platform_name=platform_name,
+                compat_factory=compat_factory,
+                runtime_command_factory=runtime_command_factory,
             )
 
 

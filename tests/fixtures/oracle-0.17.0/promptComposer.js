@@ -1,0 +1,855 @@
+import { INPUT_SELECTORS, PROMPT_PRIMARY_SELECTOR, PROMPT_FALLBACK_SELECTOR, SEND_BUTTON_SELECTORS, STOP_BUTTON_SELECTOR, ASSISTANT_ROLE_SELECTOR, } from "../constants.js";
+import { buildConversationTurnCountExpression, buildConversationTurnListExpression, } from "../conversationTurns.js";
+import { delay } from "../utils.js";
+import { logDomFailure } from "../domDebug.js";
+import { buildClickDispatcher } from "./domEvents.js";
+import { BrowserAutomationError } from "../../oracle/errors.js";
+const ENTER_KEY_EVENT = {
+    key: "Enter",
+    code: "Enter",
+    windowsVirtualKeyCode: 13,
+    nativeVirtualKeyCode: 13,
+};
+const ENTER_KEY_TEXT = "\r";
+export async function submitPrompt(deps, prompt, logger) {
+    const { runtime, input } = deps;
+    await waitForDomReady(runtime, logger, deps.inputTimeoutMs ?? undefined);
+    const encodedPrompt = JSON.stringify(prompt);
+    const focusResult = await runtime.evaluate({
+        expression: `(() => {
+      ${buildClickDispatcher()}
+      const SELECTORS = ${JSON.stringify(INPUT_SELECTORS)};
+      const isVisible = (node) => {
+        if (!node || typeof node.getBoundingClientRect !== 'function') {
+          return false;
+        }
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const focusNode = (node) => {
+        if (!node) {
+          return false;
+        }
+        // Learned: React/ProseMirror require a real click + focus + selection for inserts to stick.
+        dispatchClickSequence(node);
+        if (typeof node.focus === 'function') {
+          node.focus();
+        }
+        const doc = node.ownerDocument;
+        const selection = doc?.getSelection?.();
+        if (selection) {
+          const range = doc.createRange();
+          range.selectNodeContents(node);
+          range.collapse(false);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+        return true;
+      };
+
+      const candidates = [];
+      for (const selector of SELECTORS) {
+        const node = document.querySelector(selector);
+        if (node) {
+          candidates.push(node);
+        }
+      }
+      const preferred = candidates.find((node) => isVisible(node)) || candidates[0];
+      if (preferred && focusNode(preferred)) {
+        return { focused: true };
+      }
+      return { focused: false };
+    })()`,
+        returnByValue: true,
+        awaitPromise: true,
+    });
+    if (!focusResult.result?.value?.focused) {
+        await logDomFailure(runtime, logger, "focus-textarea");
+        throw new Error("Failed to focus prompt textarea");
+    }
+    await input.insertText({ text: prompt });
+    // Some pages (notably ChatGPT when subscriptions/widgets load) need a brief settle
+    // before the send button becomes enabled; give it a short breather to avoid races.
+    await delay(500);
+    const primarySelectorLiteral = JSON.stringify(PROMPT_PRIMARY_SELECTOR);
+    const fallbackSelectorLiteral = JSON.stringify(PROMPT_FALLBACK_SELECTOR);
+    const verification = await runtime.evaluate({
+        expression: `(() => {
+      const editor = document.querySelector(${primarySelectorLiteral});
+      const fallback = document.querySelector(${fallbackSelectorLiteral});
+      const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
+      const readValue = (node) => {
+        if (!node) return '';
+        if (node instanceof HTMLTextAreaElement) return node.value ?? '';
+        return node.innerText ?? '';
+      };
+      const isVisible = (node) => {
+        if (!node || typeof node.getBoundingClientRect !== 'function') return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const candidates = inputSelectors
+        .map((selector) => document.querySelector(selector))
+        .filter((node) => Boolean(node));
+      const active = candidates.find((node) => isVisible(node)) || candidates[0] || null;
+      return {
+        editorText: editor?.innerText ?? '',
+        fallbackValue: fallback?.value ?? '',
+        activeValue: active ? readValue(active) : '',
+      };
+    })()`,
+        returnByValue: true,
+    });
+    const editorTextRaw = verification.result?.value?.editorText ?? "";
+    const fallbackValueRaw = verification.result?.value?.fallbackValue ?? "";
+    const activeValueRaw = verification.result?.value?.activeValue ?? "";
+    const editorTextTrimmed = editorTextRaw?.trim?.() ?? "";
+    const fallbackValueTrimmed = fallbackValueRaw?.trim?.() ?? "";
+    const activeValueTrimmed = activeValueRaw?.trim?.() ?? "";
+    if (!editorTextTrimmed && !fallbackValueTrimmed && !activeValueTrimmed) {
+        // Learned: occasionally Input.insertText doesn't land in the editor; force textContent/value + input events.
+        await runtime.evaluate({
+            expression: `(() => {
+        const fallback = document.querySelector(${fallbackSelectorLiteral});
+        if (fallback) {
+          fallback.value = ${encodedPrompt};
+          fallback.dispatchEvent(new InputEvent('input', { bubbles: true, data: ${encodedPrompt}, inputType: 'insertFromPaste' }));
+          fallback.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        const editor = document.querySelector(${primarySelectorLiteral});
+        if (editor) {
+          editor.textContent = ${encodedPrompt};
+          // Nudge ProseMirror to register the textContent write so its state/send-button updates
+          editor.dispatchEvent(new InputEvent('input', { bubbles: true, data: ${encodedPrompt}, inputType: 'insertFromPaste' }));
+        }
+      })()`,
+        });
+    }
+    const promptLength = prompt.length;
+    const postVerification = await runtime.evaluate({
+        expression: `(() => {
+      const editor = document.querySelector(${primarySelectorLiteral});
+      const fallback = document.querySelector(${fallbackSelectorLiteral});
+      const inputSelectors = ${JSON.stringify(INPUT_SELECTORS)};
+      const readValue = (node) => {
+        if (!node) return '';
+        if (node instanceof HTMLTextAreaElement) return node.value ?? '';
+        return node.innerText ?? '';
+      };
+      const isVisible = (node) => {
+        if (!node || typeof node.getBoundingClientRect !== 'function') return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const candidates = inputSelectors
+        .map((selector) => document.querySelector(selector))
+        .filter((node) => Boolean(node));
+      const active = candidates.find((node) => isVisible(node)) || candidates[0] || null;
+      return {
+        editorText: editor?.innerText ?? '',
+        fallbackValue: fallback?.value ?? '',
+        activeValue: active ? readValue(active) : '',
+      };
+    })()`,
+        returnByValue: true,
+    });
+    const observedEditor = postVerification.result?.value?.editorText ?? "";
+    const observedFallback = postVerification.result?.value?.fallbackValue ?? "";
+    const observedActive = postVerification.result?.value?.activeValue ?? "";
+    const observedLength = Math.max(observedEditor.length, observedFallback.length, observedActive.length);
+    if (promptLength >= 50_000 && observedLength > 0 && observedLength < promptLength - 2_000) {
+        // Learned: very large prompts can truncate silently; fail fast so we can fall back to file uploads.
+        await logDomFailure(runtime, logger, "prompt-too-large");
+        throw new BrowserAutomationError("Prompt appears truncated in the composer (likely too large).", {
+            stage: "submit-prompt",
+            code: "prompt-too-large",
+            promptLength,
+            observedLength,
+        });
+    }
+    const clicked = await attemptSendButton(runtime, input, logger, deps?.attachmentNames, deps?.attachmentTimeoutMs);
+    if (!clicked) {
+        await input.dispatchKeyEvent({
+            type: "keyDown",
+            ...ENTER_KEY_EVENT,
+            text: ENTER_KEY_TEXT,
+            unmodifiedText: ENTER_KEY_TEXT,
+        });
+        await input.dispatchKeyEvent({
+            type: "keyUp",
+            ...ENTER_KEY_EVENT,
+        });
+        logger("Submitted prompt via Enter key");
+    }
+    else {
+        logger("Clicked send button");
+    }
+    await deps.onPromptSubmitted?.();
+    const commitTimeoutMs = Math.max(60_000, deps.inputTimeoutMs ?? 0);
+    // Learned: the send button can succeed but the turn doesn't appear immediately; verify commit via turns/stop button.
+    return await verifyPromptCommitted(runtime, prompt, commitTimeoutMs, logger, deps.baselineTurns ?? undefined);
+}
+export async function clearPromptComposer(Runtime, logger) {
+    const primarySelectorLiteral = JSON.stringify(PROMPT_PRIMARY_SELECTOR);
+    const fallbackSelectorLiteral = JSON.stringify(PROMPT_FALLBACK_SELECTOR);
+    const inputSelectorsLiteral = JSON.stringify(INPUT_SELECTORS);
+    const result = await Runtime.evaluate({
+        expression: `(() => {
+      const SELECTORS = ${inputSelectorsLiteral};
+      const fallback = document.querySelector(${fallbackSelectorLiteral});
+      const editor = document.querySelector(${primarySelectorLiteral});
+      const readValue = (node) => {
+        if (!node) return '';
+        if (node instanceof HTMLTextAreaElement || node instanceof HTMLInputElement) return node.value ?? '';
+        return node.innerText ?? node.textContent ?? '';
+      };
+      const dispatchClearEvents = (node) => {
+        try {
+          node.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: null, inputType: 'deleteContentBackward' }));
+        } catch {}
+        try {
+          node.dispatchEvent(new InputEvent('input', { bubbles: true, data: '', inputType: 'deleteByCut' }));
+        } catch {
+          node.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        node.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      const clearEditable = (node) => {
+        if (!node) return false;
+        try {
+          node.focus?.();
+        } catch {}
+        if (node instanceof HTMLTextAreaElement || node instanceof HTMLInputElement) {
+          node.value = '';
+          dispatchClearEvents(node);
+          return true;
+        }
+        if (node.isContentEditable || node.getAttribute('contenteditable') === 'true') {
+          try {
+            const selection = node.ownerDocument?.getSelection?.();
+            const range = node.ownerDocument?.createRange?.();
+            if (selection && range) {
+              range.selectNodeContents(node);
+              selection.removeAllRanges();
+              selection.addRange(range);
+              node.ownerDocument?.execCommand?.('delete', false);
+            }
+          } catch {}
+          node.textContent = '';
+          dispatchClearEvents(node);
+          return true;
+        }
+        return false;
+      };
+      let cleared = false;
+      const nodes = SELECTORS
+        .map((selector) => document.querySelector(selector))
+        .filter((node) => Boolean(node));
+      for (const node of Array.from(new Set([fallback, editor, ...nodes])).filter(Boolean)) {
+        cleared = clearEditable(node) || cleared;
+      }
+      const remaining = Array.from(new Set([fallback, editor, ...nodes]))
+        .filter(Boolean)
+        .map((node) => readValue(node).trim())
+        .filter(Boolean);
+      return { cleared, remaining };
+    })()`,
+        returnByValue: true,
+    });
+    const value = result.result?.value;
+    if (!value?.cleared || (value.remaining?.length ?? 0) > 0) {
+        await logDomFailure(Runtime, logger, "clear-composer");
+        throw new Error("Failed to clear prompt composer");
+    }
+    await delay(250);
+}
+async function waitForDomReady(Runtime, logger, timeoutMs = 10_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        const { result } = await Runtime.evaluate({
+            expression: `(() => {
+        const ready = document.readyState === 'complete';
+        const composer = document.querySelector('[data-testid*="composer"]') || document.querySelector('form');
+        const fileInput = document.querySelector('input[type="file"]');
+        return { ready, composer: Boolean(composer), fileInput: Boolean(fileInput) };
+      })()`,
+            returnByValue: true,
+        });
+        const value = result?.value;
+        if (value?.ready && value.composer) {
+            return;
+        }
+        await delay(150);
+    }
+    logger?.(`Page did not reach ready/composer state within ${timeoutMs}ms; continuing cautiously.`);
+}
+function buildAttachmentReadyExpression(attachmentNames) {
+    const attachmentExpectations = attachmentNames.map((attachment) => {
+        const name = typeof attachment === "string" ? attachment : attachment.name;
+        const normalized = name.toLowerCase().replace(/\s+/g, " ").trim();
+        return {
+            name: normalized,
+            stem: normalized.replace(/\.[a-z0-9]{1,10}$/i, ""),
+            extension: normalized.match(/(\.[a-z0-9]{1,10})$/i)?.[1] ?? "",
+            generatedBundle: typeof attachment === "object" && attachment.generatedBundle === true,
+        };
+    });
+    const namesLiteral = JSON.stringify(attachmentExpectations);
+    return `(() => {
+    const expected = ${namesLiteral};
+    const sendSelectors = ${JSON.stringify(SEND_BUTTON_SELECTORS)};
+    const normalize = (value) => String(value || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+    const hasNameBoundary = (text, name) => {
+      if (!name) return false;
+      let from = 0;
+      while (from < text.length) {
+        const index = text.indexOf(name, from);
+        if (index === -1) return false;
+        const previous = text[index - 1] || '';
+        const next = text[index + name.length] || '';
+        const previousOk = !previous || !/[a-z0-9._-]/.test(previous);
+        const nextOk = !next || !/[a-z0-9._-]/.test(next);
+        if (previousOk && nextOk) return true;
+        from = index + name.length;
+      }
+      return false;
+    };
+    const hasStemFileBoundary = (text, stem) => {
+      if (!stem) return false;
+      let from = 0;
+      while (from < text.length) {
+        const index = text.indexOf(stem, from);
+        if (index === -1) return false;
+        const previous = text[index - 1] || '';
+        const next = text[index + stem.length] || '';
+        const previousOk = !previous || !/[a-z0-9._-]/.test(previous);
+        const nextOk = !next || !/[a-z0-9._-]/.test(next);
+        if (previousOk && nextOk) return true;
+        from = index + stem.length;
+      }
+      return false;
+    };
+    const hasBareStemBoundary = (text, stem) => {
+      if (!stem) return false;
+      let from = 0;
+      while (from < text.length) {
+        const index = text.indexOf(stem, from);
+        if (index === -1) return false;
+        const previous = text[index - 1] || '';
+        const next = text[index + stem.length] || '';
+        const previousOk = !previous || !/[a-z0-9._-]/.test(previous);
+        const nextOk = !next || !/[a-z0-9._(-]/.test(next);
+        if (previousOk && nextOk) return true;
+        from = index + stem.length;
+      }
+      return false;
+    };
+    const hasExtensionBoundary = (text, extension) => {
+      if (!extension) return false;
+      let from = 0;
+      while (from < text.length) {
+        const index = text.indexOf(extension, from);
+        if (index === -1) return false;
+        const next = text[index + extension.length] || '';
+        if (!next || !/[a-z0-9]/.test(next)) return true;
+        from = index + extension.length;
+      }
+      return false;
+    };
+    const matchesExpected = (value, item) => {
+      const text = normalize(value);
+      if (!text) return false;
+      if (hasNameBoundary(text, item.name)) return true;
+      if (item.generatedBundle && hasBareStemBoundary(text, item.stem)) return true;
+      if (
+        item.stem &&
+        item.stem.length >= 4 &&
+        item.extension &&
+        text.includes(item.stem + '(') &&
+        hasExtensionBoundary(text, item.extension)
+      ) {
+        return true;
+      }
+      if (text.includes('…') || text.includes('...')) {
+        const marker = text.includes('…') ? '…' : '...';
+        const [prefixRaw, suffixRaw] = text.split(marker);
+        const prefix = normalize(prefixRaw);
+        const suffix = normalize(suffixRaw);
+        const prefixParts = prefix.split(' ').filter(Boolean);
+        const suffixParts = suffix.split(' ').filter(Boolean);
+        const prefixCandidates = prefixParts.map((_, index) => prefixParts.slice(index).join(' '));
+        const suffixCandidates = suffixParts.map((_, index) =>
+          suffixParts.slice(0, suffixParts.length - index).join(' '),
+        );
+        if (prefixCandidates.length === 0 || suffixCandidates.length === 0) return false;
+        const targets = [item.name, item.stem && item.stem.length >= 4 ? item.stem : ''].filter(Boolean);
+        return targets.some((target) => {
+          return prefixCandidates.some((prefixPart) =>
+            suffixCandidates.some((suffixPart) => {
+              const strongEnough =
+                suffixPart.length >= 2 &&
+                (prefixPart.length >= 3 || (prefixPart.length >= 2 && suffixPart.length >= 4));
+              return strongEnough && target.startsWith(prefixPart) && target.endsWith(suffixPart);
+            }),
+          );
+        });
+      }
+      return false;
+    };
+    // Restrict to attachment affordances; never scan generic div/span nodes (prompt text can contain the file name).
+    const attachmentSelectors = [
+      // Current ChatGPT file tiles expose the filename through a role-group aria label.
+      '[role="group"][aria-label]',
+      '[data-testid*="chip"]',
+      '[data-testid*="attachment"]',
+      '[data-testid*="upload"]',
+      '[data-testid*="file"]',
+      '[aria-label*="Remove file"]',
+      'button[aria-label*="Remove file"]',
+      '[aria-label*="remove file"]',
+      'button[aria-label*="remove file"]',
+      '[aria-label*="Remove attachment"]',
+      'button[aria-label*="Remove attachment"]',
+      '[aria-label*="remove attachment"]',
+      'button[aria-label*="remove attachment"]',
+    ];
+    const sendButton = sendSelectors
+      .map((selector) => document.querySelector(selector))
+      .find(Boolean);
+    const isUsableComposerRoot = (node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      if (String(node.tagName || '').toLowerCase() === 'button') return false;
+      const testId = String(node.getAttribute?.('data-testid') || '').toLowerCase();
+      if (!testId.includes('composer')) return false;
+      return !(
+        testId.includes('footer') ||
+        testId.includes('action') ||
+        testId.includes('plus') ||
+        testId.includes('send')
+      );
+    };
+    const closestComposerRoot = (node) => {
+      let current = node instanceof HTMLElement ? node : null;
+      while (current) {
+        if (isUsableComposerRoot(current)) return current;
+        current = current.parentElement;
+      }
+      return null;
+    };
+    const firstComposerRoot = () =>
+      Array.from(document.querySelectorAll('[data-testid*="composer"]')).find(isUsableComposerRoot) || null;
+    const composer =
+      closestComposerRoot(sendButton) ||
+      sendButton?.closest?.('form') ||
+      firstComposerRoot() ||
+      document.querySelector('form') ||
+      document.body ||
+      document;
+    // Walk node + ancestors (up to grandparent) + descendants to gather every textual hint.
+    // ChatGPT's current chip DOM nests the filename inside truncated child spans, so checking
+    // only the node's own textContent/aria/title misses the match.
+    const collectOwnLabelHaystack = (node) => {
+      if (!node) return '';
+      const pieces = [];
+      const pushAttrs = (el) => {
+        if (!el || typeof el.getAttribute !== 'function') return;
+        for (const attr of ['aria-label', 'title', 'data-testid', 'data-tooltip', 'data-tooltip-content']) {
+          const v = el.getAttribute(attr);
+          if (v) pieces.push(v);
+        }
+      };
+      const pushText = (el) => {
+        if (!el) return;
+        const text = (el.innerText ?? el.textContent ?? '').trim();
+        if (text) pieces.push(text);
+      };
+      pushAttrs(node);
+      pushText(node);
+      return pieces.join(' ').toLowerCase();
+    };
+    const collectLabelHaystack = (node) => {
+      if (!node) return '';
+      const pieces = [collectOwnLabelHaystack(node)];
+      const push = (el) => {
+        const text = collectOwnLabelHaystack(el);
+        if (text) pieces.push(text);
+      };
+      const parent = node.parentElement;
+      push(parent);
+      const grandparent = parent?.parentElement;
+      push(grandparent);
+      return pieces.join(' ').toLowerCase();
+    };
+    const attachmentRoots = Array.from(new Set([composer])).filter(Boolean);
+    const collectChipNodes = () => {
+      const seen = new Set();
+      const collected = [];
+      for (const root of attachmentRoots) {
+        for (const node of Array.from(root.querySelectorAll(attachmentSelectors.join(',')))) {
+          if (!(node instanceof HTMLElement)) continue;
+          // Skip elements clearly inside the editable input (composer textarea may contain
+          // filename text in the user's prompt — avoid mistaking that for a chip).
+          if (node.closest('textarea,[contenteditable="true"]')) continue;
+          if (seen.has(node)) continue;
+          seen.add(node);
+          collected.push(node);
+        }
+      }
+      return collected;
+    };
+    const chipNodes = collectChipNodes();
+    const chipLabels = chipNodes.map((node) => collectLabelHaystack(node));
+    const chipOwnLabels = chipNodes.map((node) => collectOwnLabelHaystack(node));
+    const hasEllipsisSuffix = (label) => {
+      const marker = label.includes('…') ? '…' : label.includes('...') ? '...' : '';
+      if (!marker) return false;
+      return normalize(label.split(marker)[1] || '').length > 0;
+    };
+    const chipOwnLabelsWithVisibleNames = chipOwnLabels.filter((label) =>
+      /\\.[a-z][a-z0-9]{0,9}(?:\\b|$)/i.test(label) ||
+      hasEllipsisSuffix(label),
+    );
+    const visibleExtensionLabelsMatchExpected = chipOwnLabelsWithVisibleNames.every((label) =>
+      expected.some((item) => matchesExpected(label, item)),
+    );
+    const visibleStemOnlyMismatch = chipOwnLabels.some((label) =>
+      expected.some(
+        (item) =>
+          !item.generatedBundle &&
+          item.stem &&
+          hasStemFileBoundary(label, item.stem) &&
+          !matchesExpected(label, item),
+      ),
+    );
+
+    const chipsReady = (() => {
+      const used = new Set();
+      return expected.every((item) => {
+        const index = chipLabels.findIndex((label, candidateIndex) =>
+          !used.has(candidateIndex) && matchesExpected(label, item),
+        );
+        if (index === -1) return false;
+        used.add(index);
+        return true;
+      });
+    })();
+    const inputsReady = expected.every((item) =>
+      attachmentRoots.some((root) =>
+        Array.from(root.querySelectorAll('input[type="file"]')).some((el) =>
+          Array.from((el instanceof HTMLInputElement ? el.files : []) || []).some((file) =>
+            matchesExpected(file?.name, item),
+          ),
+        ),
+      ),
+    );
+    // Count-based fallback: if we cannot match names individually (ChatGPT may strip
+    // the filename out of attribute-readable text into a deeply nested span), but we
+    // do see at least as many distinct "Remove" affordances as attachments we
+    // uploaded, trust the upload without double-counting nested chip/remove nodes.
+    const removeAffordances = [];
+    const removeSeen = new Set();
+    for (const root of attachmentRoots) {
+      for (const node of Array.from(root.querySelectorAll(
+        '[aria-label*="Remove" i], [aria-label*="remove" i], button[aria-label*="Remove" i], button[aria-label*="remove" i]',
+      ))) {
+        if (!(node instanceof HTMLElement)) continue;
+        if (node.closest('textarea,[contenteditable="true"]')) continue;
+        const aria = (node.getAttribute?.('aria-label') ?? '').toLowerCase();
+        const fileSpecific = aria.includes('remove file') || aria.includes('remove attachment');
+        const attachmentOwner = node.closest(
+          '[data-testid*="chip"], [data-testid*="attachment"], [data-testid*="upload"], [data-testid*="file"]',
+        );
+        if (!fileSpecific && !attachmentOwner) continue;
+        if (removeSeen.has(node)) continue;
+        removeSeen.add(node);
+        removeAffordances.push(node);
+      }
+    }
+    const countReady =
+      !visibleStemOnlyMismatch &&
+      visibleExtensionLabelsMatchExpected &&
+      removeAffordances.length >= expected.length;
+
+    return chipsReady || inputsReady || countReady;
+  })()`;
+}
+export function buildAttachmentReadyExpressionForTest(attachmentNames) {
+    return buildAttachmentReadyExpression(attachmentNames);
+}
+async function attemptSendButton(Runtime, Input, _logger, attachmentNames, attachmentTimeoutMs) {
+    const needAttachment = Array.isArray(attachmentNames) && attachmentNames.length > 0;
+    const script = `(() => {
+    ${buildClickDispatcher()}
+    const selectors = ${JSON.stringify(SEND_BUTTON_SELECTORS)};
+    const isVisible = (node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      const rect = node.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const style = window.getComputedStyle(node);
+      return style.display !== 'none' && style.visibility !== 'hidden';
+    };
+    const isEnabled = (node) => {
+      const ariaDisabled = node.getAttribute('aria-disabled');
+      const dataDisabled = node.getAttribute('data-disabled');
+      const style = window.getComputedStyle(node);
+      return !(
+        node.hasAttribute('disabled') ||
+        ariaDisabled === 'true' ||
+        dataDisabled === 'true' ||
+        style.pointerEvents === 'none' ||
+        style.display === 'none'
+      );
+    };
+    const candidates = [];
+    for (const selector of selectors) {
+      candidates.push(...Array.from(document.querySelectorAll(selector)));
+    }
+    const button = candidates.find((node) => isVisible(node) && isEnabled(node)) || null;
+    if (!button) return { status: 'missing' };
+    button.scrollIntoView({ block: 'center', inline: 'center' });
+    const rect = button.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      return { status: 'point', x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    }
+    // Last-resort fallback for unusual DOMs where the button is visible but has no useful rect.
+    dispatchClickSequence(button);
+    return { status: 'clicked' };
+  })()`;
+    // Give attachment-bearing submissions more headroom. ChatGPT's chip render can
+    // settle slowly for multi-file uploads, but plain text sends should keep the
+    // shorter historical deadline.
+    const timeoutMs = sendButtonTimeoutMs(attachmentNames, attachmentTimeoutMs);
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        if (needAttachment) {
+            const ready = await Runtime.evaluate({
+                expression: buildAttachmentReadyExpression(attachmentNames),
+                returnByValue: true,
+            });
+            if (!ready?.result?.value) {
+                await delay(150);
+                continue;
+            }
+        }
+        const { result } = await Runtime.evaluate({ expression: script, returnByValue: true });
+        const value = result.value;
+        const status = typeof value === "string" ? value : value?.status;
+        if (status === "point" &&
+            typeof value === "object" &&
+            typeof value.x === "number" &&
+            typeof value.y === "number") {
+            await clickTrustedPoint(Runtime, Input, value.x, value.y);
+            return true;
+        }
+        if (status === "clicked") {
+            return true;
+        }
+        if (status === "missing") {
+            break;
+        }
+        await delay(100);
+    }
+    if (Array.isArray(attachmentNames) && attachmentNames.length > 0) {
+        throw new BrowserAutomationError(`Attachments never reached a clickable send button after ${Math.ceil(timeoutMs / 1000)}s; tune --browser-attachment-timeout.`, {
+            stage: "submit-prompt",
+            code: "attachment-send-not-ready",
+            attachmentNames,
+            timeoutMs,
+        });
+    }
+    return false;
+}
+async function clickTrustedPoint(Runtime, Input, x, y) {
+    if (Input && typeof Input.dispatchMouseEvent === "function") {
+        await Input.dispatchMouseEvent({ type: "mouseMoved", x, y });
+        await Input.dispatchMouseEvent({ type: "mousePressed", x, y, button: "left", clickCount: 1 });
+        await Input.dispatchMouseEvent({ type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+        return;
+    }
+    await Runtime.evaluate({
+        expression: `(() => {
+      const el = document.elementFromPoint(${JSON.stringify(x)}, ${JSON.stringify(y)});
+      if (!(el instanceof HTMLElement)) return false;
+      el.click();
+      return true;
+    })()`,
+        returnByValue: true,
+    });
+}
+function sendButtonTimeoutMs(attachmentNames, attachmentTimeoutMs) {
+    if (!Array.isArray(attachmentNames) || attachmentNames.length === 0) {
+        return 20_000;
+    }
+    return typeof attachmentTimeoutMs === "number" && Number.isFinite(attachmentTimeoutMs)
+        ? Math.max(1_000, attachmentTimeoutMs)
+        : 45_000;
+}
+async function verifyPromptCommitted(Runtime, prompt, timeoutMs, logger, baselineTurns) {
+    const deadline = Date.now() + timeoutMs;
+    const encodedPrompt = JSON.stringify(prompt.trim());
+    const primarySelectorLiteral = JSON.stringify(PROMPT_PRIMARY_SELECTOR);
+    const fallbackSelectorLiteral = JSON.stringify(PROMPT_FALLBACK_SELECTOR);
+    const inputSelectorsLiteral = JSON.stringify(INPUT_SELECTORS);
+    const stopSelectorLiteral = JSON.stringify(STOP_BUTTON_SELECTOR);
+    const assistantSelectorLiteral = JSON.stringify(ASSISTANT_ROLE_SELECTOR);
+    let baseline = typeof baselineTurns === "number" && Number.isFinite(baselineTurns) && baselineTurns >= 0
+        ? Math.floor(baselineTurns)
+        : null;
+    if (baseline === null) {
+        try {
+            const { result } = await Runtime.evaluate({
+                expression: buildConversationTurnCountExpression(),
+                returnByValue: true,
+            });
+            const raw = typeof result?.value === "number" ? result.value : Number(result?.value);
+            if (Number.isFinite(raw)) {
+                baseline = Math.max(0, Math.floor(raw));
+            }
+        }
+        catch {
+            // ignore; baseline stays unknown
+        }
+    }
+    const baselineLiteral = baseline ?? -1;
+    // Learned: ChatGPT can echo/format text; normalize markdown and use prefix matches to detect the sent prompt.
+    const script = `(() => {
+		    const editor = document.querySelector(${primarySelectorLiteral});
+		    const fallback = document.querySelector(${fallbackSelectorLiteral});
+		    const inputSelectors = ${inputSelectorsLiteral};
+	    const normalize = (value) => {
+	      let text = value?.toLowerCase?.() ?? '';
+	      // Strip markdown *markers* but keep content (ChatGPT renders fence markers differently).
+	      text = text.replace(/\`\`\`[^\\n]*\\n([\\s\\S]*?)\`\`\`/g, ' $1 ');
+	      text = text.replace(/\`\`\`/g, ' ');
+	      text = text.replace(/\`([^\`]*)\`/g, '$1');
+	      return text.replace(/\\s+/g, ' ').trim();
+	    };
+	    const normalizedPrompt = normalize(${encodedPrompt});
+	    const normalizedPromptPrefix = normalizedPrompt.slice(0, 120);
+	    const articles = ${buildConversationTurnListExpression()};
+	    const normalizedTurns = articles.map((node) => normalize(node?.innerText));
+	    const readValue = (node) => {
+	      if (!node) return '';
+	      if (node instanceof HTMLTextAreaElement) return node.value ?? '';
+	      return node.innerText ?? '';
+	    };
+	    const isVisible = (node) => {
+	      if (!node || typeof node.getBoundingClientRect !== 'function') return false;
+	      const rect = node.getBoundingClientRect();
+	      return rect.width > 0 && rect.height > 0;
+	    };
+	    const inputs = inputSelectors
+	      .map((selector) => document.querySelector(selector))
+	      .filter((node) => Boolean(node));
+	    const visibleInputs = inputs.filter((node) => isVisible(node));
+	    const activeInputs = visibleInputs.length > 0 ? visibleInputs : inputs;
+	    const userMatched =
+	      normalizedPrompt.length > 0 && normalizedTurns.some((text) => text.includes(normalizedPrompt));
+	    const prefixMatched =
+	      normalizedPromptPrefix.length > 30 &&
+	      normalizedTurns.some((text) => text.includes(normalizedPromptPrefix));
+		    const lastTurn = normalizedTurns[normalizedTurns.length - 1] ?? '';
+		    const lastMatched =
+		      normalizedPrompt.length > 0 &&
+		      (lastTurn.includes(normalizedPrompt) ||
+		        (normalizedPromptPrefix.length > 30 && lastTurn.includes(normalizedPromptPrefix)));
+		    const baseline = ${baselineLiteral};
+		    const hasNewTurn = baseline < 0 ? false : normalizedTurns.length > baseline;
+		    const stopVisible = Boolean(document.querySelector(${stopSelectorLiteral}));
+		    const assistantVisible = Boolean(
+		      document.querySelector(${assistantSelectorLiteral}) ||
+		      document.querySelector('[data-testid*="assistant"]'),
+		    );
+	    // Learned: composer clearing + stop button or assistant presence is a reliable fallback signal.
+      const editorValue = editor?.innerText ?? '';
+      const fallbackValue = fallback?.value ?? '';
+      const activeEmpty =
+        activeInputs.length === 0 ? null : activeInputs.every((node) => !String(readValue(node)).trim());
+      const composerCleared = activeEmpty ?? !(String(editorValue).trim() || String(fallbackValue).trim());
+      const href = typeof location === 'object' && location.href ? location.href : '';
+      const inConversation = /\\/c\\//.test(href);
+		    return {
+        baseline,
+	      userMatched,
+	      prefixMatched,
+	      lastMatched,
+	      hasNewTurn,
+	      stopVisible,
+      assistantVisible,
+      composerCleared,
+      inConversation,
+      href,
+      fallbackValue,
+      editorValue,
+      lastTurn,
+      turnsCount: normalizedTurns.length,
+    };
+  })()`;
+    let lastProbe;
+    while (Date.now() < deadline) {
+        const { result } = await Runtime.evaluate({ expression: script, returnByValue: true });
+        const info = result.value;
+        if (info && typeof info === "object") {
+            lastProbe = info;
+        }
+        const turnsCount = result.value?.turnsCount;
+        const matchesPrompt = Boolean(info?.lastMatched || info?.userMatched || info?.prefixMatched);
+        const baselineUnknown = typeof info?.baseline === "number" ? info.baseline < 0 : baselineLiteral < 0;
+        if (matchesPrompt && (baselineUnknown || info?.hasNewTurn)) {
+            return typeof turnsCount === "number" && Number.isFinite(turnsCount) ? turnsCount : null;
+        }
+        const fallbackCommit = info?.composerCleared &&
+            Boolean(info?.hasNewTurn) &&
+            ((info?.stopVisible ?? false) || info?.assistantVisible || info?.inConversation);
+        if (fallbackCommit) {
+            return typeof turnsCount === "number" && Number.isFinite(turnsCount) ? turnsCount : null;
+        }
+        await delay(100);
+    }
+    const finalProbe = await Runtime.evaluate({ expression: script, returnByValue: true })
+        .then((res) => res?.result?.value)
+        .catch(() => undefined);
+    const probe = finalProbe && typeof finalProbe === "object" ? finalProbe : lastProbe;
+    if (logger) {
+        logger(`Prompt commit check failed; latest state: ${probe ? JSON.stringify(probe) : "unavailable"}`);
+        await logDomFailure(Runtime, logger, "prompt-commit");
+    }
+    if (prompt.trim().length >= 50_000) {
+        throw new BrowserAutomationError("Prompt did not appear in conversation before timeout (likely too large).", {
+            stage: "submit-prompt",
+            code: "prompt-too-large",
+            promptLength: prompt.trim().length,
+            timeoutMs,
+        });
+    }
+    throw new BrowserAutomationError("Prompt did not appear in conversation before timeout (send may have failed)", {
+        stage: "submit-prompt",
+        code: "prompt-commit-timeout",
+        promptLength: prompt.trim().length,
+        timeoutMs,
+        commitProbe: probe ? summarizeCommitProbe(probe) : undefined,
+    });
+}
+// Keep booleans/counts but replace free text with lengths so session metadata stays lean.
+function summarizeCommitProbe(probe) {
+    return {
+        baseline: probe.baseline,
+        turnsCount: probe.turnsCount,
+        userMatched: probe.userMatched,
+        prefixMatched: probe.prefixMatched,
+        lastMatched: probe.lastMatched,
+        hasNewTurn: probe.hasNewTurn,
+        stopVisible: probe.stopVisible,
+        assistantVisible: probe.assistantVisible,
+        composerCleared: probe.composerCleared,
+        inConversation: probe.inConversation,
+        editorLength: typeof probe.editorValue === "string" ? probe.editorValue.length : undefined,
+        lastTurnLength: typeof probe.lastTurn === "string" ? probe.lastTurn.length : undefined,
+    };
+}
+// biome-ignore lint/style/useNamingConvention: test-only export used in vitest suite
+export const __test__ = {
+    attemptSendButton,
+    sendButtonTimeoutMs,
+    verifyPromptCommitted,
+};

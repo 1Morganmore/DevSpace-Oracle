@@ -23,10 +23,13 @@ SCHEMA = "codex.chatgpt.pro-project-context/v1"
 LOCAL_PROFILE_ID = "oracle-pro-attachment-1mib/v1"
 TOTAL_ENVELOPE_BYTES = 1 * 1024 * 1024
 ANSWER_HEADROOM_BYTES = 0
+TRANSPORT_ANSWER_HEADROOM_BYTES = ANSWER_HEADROOM_BYTES
 METADATA_RESERVE_BYTES = 64 * 1024
 EVIDENCE_BUDGET_BYTES = TOTAL_ENVELOPE_BYTES - METADATA_RESERVE_BYTES
 MAX_SINGLE_FILE_BYTES = EVIDENCE_BUDGET_BYTES
 MAX_PACKET_ZIP_BYTES = TOTAL_ENVELOPE_BYTES
+MODEL_CONTEXT_BUDGET_STATUS = "unverified"
+MODEL_ANSWER_HEADROOM_TOKENS = None
 INDEX_NAME = "evidence-index.json"
 PACKET_NAME = "packet.json"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -151,7 +154,7 @@ def _entry_record(item: dict[str, Any]) -> dict[str, Any]:
 
 def _validate_budget_profile(envelope: Any, answer: Any, reserve: Any) -> None:
     """Require the tested local profile; these are not provider/model limits."""
-    expected = (TOTAL_ENVELOPE_BYTES, ANSWER_HEADROOM_BYTES, METADATA_RESERVE_BYTES)
+    expected = (TOTAL_ENVELOPE_BYTES, TRANSPORT_ANSWER_HEADROOM_BYTES, METADATA_RESERVE_BYTES)
     actual = (envelope, answer, reserve)
     if actual != expected:
         raise _error("BUDGET_PROFILE_MISMATCH", f"expected {expected}, got {actual}")
@@ -162,7 +165,7 @@ def _validate_file_size(size: int, path: Path) -> None:
         raise _error("SINGLE_FILE_CAP_EXCEEDED", str(path))
 
 
-def _verify_archive(archive_path: Path, index: dict[str, Any], entries: list[dict[str, Any]]) -> None:
+def _verify_archive(archive_path: Path, packet: dict[str, Any], index: dict[str, Any], entries: list[dict[str, Any]]) -> None:
     included = index.get("included", [])
     expected_names = [PACKET_NAME, INDEX_NAME, *(f"evidence/{item['relative_path']}" for item in included)]
     by_relative = {item["relative_path"]: item for item in entries}
@@ -170,6 +173,8 @@ def _verify_archive(archive_path: Path, index: dict[str, Any], entries: list[dic
         with zipfile.ZipFile(archive_path) as archive:
             if archive.namelist() != expected_names:
                 raise _error("ARCHIVE_INVALID", "member set/order differs")
+            if json.loads(archive.read(PACKET_NAME).decode("utf-8")) != packet:
+                raise _error("ARCHIVE_INVALID", "packet metadata differs")
             if json.loads(archive.read(INDEX_NAME).decode("utf-8")) != index:
                 raise _error("ARCHIVE_INVALID", "evidence index differs")
             for record in included:
@@ -184,7 +189,38 @@ def _verify_archive(archive_path: Path, index: dict[str, Any], entries: list[dic
         raise _error("ARCHIVE_INVALID", str(exc)) from exc
 
 
-def _load_and_validate(manifest_path: Path) -> tuple[dict[str, Any], Path, Path, list[dict[str, Any]]]:
+def _packet_record(manifest: dict[str, Any], root: Path, mission: Path, mission_sha256: str) -> dict[str, Any]:
+    return {
+        "schema": SCHEMA,
+        "project_root": str(root),
+        "question": manifest["question"],
+        "mission_path": str(mission),
+        "mission_sha256": mission_sha256,
+        "read_instruction": "Read packet.json, evidence-index.json, and every included evidence file before answering. Resolve contradictions using the declared project rules and distinguish observed evidence from inference.",
+        "evidence_index": INDEX_NAME,
+    }
+
+
+def _category_omissions(value: Any, categories: list[str]) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise _error("CATEGORY_OMISSIONS_INVALID", "category_omissions must be a list")
+    required = {"category", "reason", "coverage_boundary", "expected_decision_impact"}
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != required or any(not isinstance(item[key], str) or not item[key].strip() for key in required):
+            raise _error("CATEGORY_OMISSION_INVALID", "entries require non-empty category/reason/coverage_boundary/expected_decision_impact")
+        category = item["category"]
+        if category not in categories:
+            raise _error("CATEGORY_OMISSION_INVALID", f"unknown required category: {category}")
+        if category in seen:
+            raise _error("CATEGORY_OMISSION_INVALID", f"duplicate category: {category}")
+        seen.add(category)
+        result.append({key: item[key] for key in ("category", "reason", "coverage_boundary", "expected_decision_impact")})
+    return result
+
+
+def _load_and_validate(manifest_path: Path) -> tuple[dict[str, Any], Path, Path, Path, str, list[dict[str, str]], list[dict[str, Any]]]:
     manifest = _read_json(manifest_path)
     if manifest.get("schema") != SCHEMA:
         raise _error("SCHEMA_INVALID", "expected " + SCHEMA)
@@ -200,11 +236,21 @@ def _load_and_validate(manifest_path: Path) -> tuple[dict[str, Any], Path, Path,
     question = manifest.get("question")
     if not isinstance(question, str) or not question.strip():
         raise _error("QUESTION_REQUIRED", "question must be non-empty")
+    mission = _path_from(manifest.get("mission_path"), root, "mission_path")
+    if not mission.is_file() or mission.is_symlink():
+        raise _error("REGULAR_FILE_REQUIRED", str(mission))
+    expected_mission_sha256 = manifest.get("mission_sha256")
+    if not isinstance(expected_mission_sha256, str) or not SHA256_RE.fullmatch(expected_mission_sha256):
+        raise _error("MISSION_HASH_REQUIRED", str(mission))
+    mission_sha256 = sha256_file(mission)
+    if mission_sha256 != expected_mission_sha256:
+        raise _error("STALE_MISSION_HASH", str(mission))
     categories = manifest.get("required_categories")
     if not isinstance(categories, list) or not categories or any(not isinstance(x, str) or not x for x in categories):
         raise _error("REQUIRED_CATEGORIES_REQUIRED", "declare non-empty project-specific categories")
     if len(set(categories)) != len(categories):
         raise _error("CATEGORY_DUPLICATE", "required_categories")
+    category_omissions = _category_omissions(manifest.get("category_omissions", []), categories)
     envelope = manifest.get("local_transport_envelope_bytes")
     answer = manifest.get("answer_headroom_bytes")
     reserve = manifest.get("metadata_reserve_bytes")
@@ -249,7 +295,7 @@ def _load_and_validate(manifest_path: Path) -> tuple[dict[str, Any], Path, Path,
         entries.append({"path": path, "relative_path": relative, "category": category, "priority": priority, "sha256": actual, "bytes": path.stat().st_size})
     receipt = output.with_suffix(output.suffix + ".index.json")
     manifest_resolved = manifest_path.resolve(strict=True)
-    collisions = {"manifest": manifest_resolved}
+    collisions = {"manifest": manifest_resolved, "mission": mission}
     for label, candidate in (("packet", output), ("receipt", receipt)):
         if candidate == manifest_resolved:
             raise _error("OUTPUT_COLLISION", f"{label} would overwrite manifest")
@@ -257,13 +303,13 @@ def _load_and_validate(manifest_path: Path) -> tuple[dict[str, Any], Path, Path,
             raise _error("OUTPUT_COLLISION", f"{label} would overwrite evidence")
         collisions[label] = candidate
     if len(set(collisions.values())) != len(collisions):
-        raise _error("OUTPUT_COLLISION", "manifest, packet, and receipt paths must differ")
+        raise _error("OUTPUT_COLLISION", "manifest, mission, packet, and receipt paths must differ")
     entries.sort(key=lambda item: (item["priority"], item["category"], item["relative_path"]))
-    return manifest, root, output, entries
+    return manifest, root, output, mission, mission_sha256, category_omissions, entries
 
 
 def build(manifest_path: Path) -> dict[str, Any]:
-    manifest, root, output, entries = _load_and_validate(manifest_path)
+    manifest, root, output, mission, mission_sha256, category_omissions, entries = _load_and_validate(manifest_path)
     available = EVIDENCE_BUDGET_BYTES
     included: list[dict[str, Any]] = []
     omitted: list[dict[str, Any]] = []
@@ -276,7 +322,12 @@ def build(manifest_path: Path) -> dict[str, Any]:
             used_source_bytes += item["bytes"]
         else:
             omitted.append({**_entry_record(item), "reason": "local_transport_envelope_exhausted", "truncated": False})
-    missing = sorted(set(manifest["required_categories"]) - {item["category"] for item in included})
+    included_categories = {item["category"] for item in included}
+    explicitly_omitted_categories = {item["category"] for item in category_omissions}
+    conflict = sorted(included_categories & explicitly_omitted_categories)
+    if conflict:
+        raise _error("CATEGORY_OMISSION_CONFLICT", ", ".join(conflict))
+    missing = sorted(set(manifest["required_categories"]) - included_categories - explicitly_omitted_categories)
     if missing:
         raise _error("REQUIRED_CATEGORY_MISSING", ", ".join(missing))
     archive_names = [f"evidence/{item['relative_path']}" for item in included]
@@ -286,15 +337,21 @@ def build(manifest_path: Path) -> dict[str, Any]:
         "schema": SCHEMA,
         "project_root": str(root),
         "question": manifest["question"],
-        "local_transport_envelope": {"profile": LOCAL_PROFILE_ID, "label": "local proven/configured envelope, not a vendor or model limit", "total_budget_bytes": TOTAL_ENVELOPE_BYTES, "answer_headroom_bytes": ANSWER_HEADROOM_BYTES, "metadata_reserve_bytes": METADATA_RESERVE_BYTES, "evidence_budget_bytes": available, "max_single_file_bytes": MAX_SINGLE_FILE_BYTES, "max_packet_zip_bytes": MAX_PACKET_ZIP_BYTES, "used_source_bytes": used_source_bytes},
+        "mission_path": str(mission),
+        "mission_sha256": mission_sha256,
+        "transport_answer_headroom_bytes": TRANSPORT_ANSWER_HEADROOM_BYTES,
+        "model_context_budget_status": MODEL_CONTEXT_BUDGET_STATUS,
+        "model_answer_headroom_tokens": MODEL_ANSWER_HEADROOM_TOKENS,
+        "local_transport_envelope": {"profile": LOCAL_PROFILE_ID, "label": "local proven/configured envelope, not a vendor or model limit", "total_budget_bytes": TOTAL_ENVELOPE_BYTES, "metadata_reserve_bytes": METADATA_RESERVE_BYTES, "evidence_budget_bytes": available, "max_single_file_bytes": MAX_SINGLE_FILE_BYTES, "max_packet_zip_bytes": MAX_PACKET_ZIP_BYTES, "used_source_bytes": used_source_bytes},
         "required_categories": manifest["required_categories"],
+        "category_omissions": category_omissions,
         "included": [_entry_record(item) for item in included],
         "omissions": omitted,
         "truncations": [],
         "selection_order": "priority ascending, category ascending, project-relative path ascending",
         "collection": "explicit manifest allowlist; no recursive project scan",
     }
-    packet = {"schema": SCHEMA, "project_root": str(root), "question": manifest["question"], "read_instruction": "Read packet.json, evidence-index.json, and every included evidence file before answering. Resolve contradictions using the declared project rules and distinguish observed evidence from inference.", "evidence_index": INDEX_NAME}
+    packet = _packet_record(manifest, root, mission, mission_sha256)
     output.parent.mkdir(parents=True, exist_ok=True)
     temp_handle = tempfile.NamedTemporaryFile(prefix=f".{output.name}.", suffix=".tmp", dir=output.parent, delete=False)
     temp_path = Path(temp_handle.name)
@@ -312,7 +369,7 @@ def build(manifest_path: Path) -> dict[str, Any]:
         archive_bytes = temp_path.stat().st_size
         if archive_bytes > MAX_PACKET_ZIP_BYTES:
             raise _error("OVERBUDGET", "archive exceeds local transport envelope")
-        _verify_archive(temp_path, index, entries)
+        _verify_archive(temp_path, packet, index, entries)
         index["local_transport_envelope"]["archive_bytes"] = archive_bytes
     # Store the final index outside the archive as a validator receipt.  It is
     # intentionally not an attachment and is regenerated deterministically.
@@ -335,7 +392,7 @@ def build(manifest_path: Path) -> dict[str, Any]:
 
 
 def validate(manifest_path: Path) -> dict[str, Any]:
-    manifest, root, output, entries = _load_and_validate(manifest_path)
+    manifest, root, output, mission, mission_sha256, category_omissions, entries = _load_and_validate(manifest_path)
     if not output.is_file() or output.is_symlink():
         raise _error("PACKET_MISSING", str(output))
     if output.stat().st_size > MAX_PACKET_ZIP_BYTES:
@@ -345,16 +402,33 @@ def validate(manifest_path: Path) -> dict[str, Any]:
             index = json.loads(archive.read(INDEX_NAME).decode("utf-8"))
     except (OSError, zipfile.BadZipFile, KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise _error("ARCHIVE_INVALID", str(exc)) from exc
-    if index.get("project_root") != str(root) or index.get("question") != manifest["question"]:
-        raise _error("PACKET_BINDING_INVALID", "root or question differs")
+    if any((
+        index.get("project_root") != str(root),
+        index.get("question") != manifest["question"],
+        index.get("mission_path") != str(mission),
+        index.get("mission_sha256") != mission_sha256,
+    )):
+        raise _error("PACKET_BINDING_INVALID", "root, question, or mission differs")
+    if (
+        index.get("transport_answer_headroom_bytes") != TRANSPORT_ANSWER_HEADROOM_BYTES
+        or index.get("model_context_budget_status") != MODEL_CONTEXT_BUDGET_STATUS
+        or index.get("model_answer_headroom_tokens") is not MODEL_ANSWER_HEADROOM_TOKENS
+    ):
+        raise _error("BUDGET_RECORD_INVALID", "transport and model budget facts differ")
+    if index.get("category_omissions") != category_omissions:
+        raise _error("CATEGORY_OMISSION_INVALID", "packet category omissions differ")
+    included_categories = {item.get("category") for item in index.get("included", [])}
+    if included_categories & {item["category"] for item in category_omissions}:
+        raise _error("CATEGORY_OMISSION_CONFLICT", "packet includes an explicitly omitted category")
     expected = [_entry_record(item) for item in entries]
     listed = index.get("included", []) + [{key: value for key, value in item.items() if key not in {"reason", "truncated"}} for item in index.get("omissions", [])]
     listed.sort(key=lambda item: (item["priority"], item["category"], item["relative_path"]))
     if listed != expected:
         raise _error("EVIDENCE_INDEX_INVALID", "allowlist/order differs")
-    if set(manifest["required_categories"]) - {item.get("category") for item in index.get("included", [])}:
+    satisfied_categories = included_categories | {item["category"] for item in category_omissions}
+    if set(manifest["required_categories"]) - satisfied_categories:
         raise _error("REQUIRED_CATEGORY_MISSING", "packet")
-    _verify_archive(output, index, entries)
+    _verify_archive(output, _packet_record(manifest, root, mission, mission_sha256), index, entries)
     receipt_path = output.with_suffix(output.suffix + ".index.json")
     try:
         receipt = _read_json(receipt_path)

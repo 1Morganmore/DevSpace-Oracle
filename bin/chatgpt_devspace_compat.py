@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
 import re
 import shutil
@@ -167,15 +168,18 @@ def _assert_devspace_service_identity(
             "DevSpace service is not listening on the expected local port",
         )
     command_line = str(value.get("command_line") or "")
-    normalized = command_line.replace("\\", "/").casefold()
+    tokens = [quoted or bare for quoted, bare in re.findall(r'"([^"]*)"|(\S+)', command_line)]
+    normalized_tokens = [ntpath.normcase(ntpath.normpath(token)) for token in tokens]
     expected_cli_paths = [
-        str(root / "dist" / "cli.js").replace("\\", "/").casefold()
+        ntpath.normcase(ntpath.normpath(str(root / "dist" / "cli.js")))
         for root in package_roots
     ]
     if not any(
-        expected in normalized
-        and re.search(rf"{re.escape(expected)}(?:\"|\s)+serve(?:\s|$)", normalized)
+        token == expected
+        and index + 1 < len(normalized_tokens)
+        and normalized_tokens[index + 1] == "serve"
         for expected in expected_cli_paths
+        for index, token in enumerate(normalized_tokens)
     ):
         raise DevSpaceCompatError(
             "DEVSPACE_SERVICE_IDENTITY_MISMATCH",

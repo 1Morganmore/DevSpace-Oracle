@@ -145,6 +145,8 @@ class OracleConfig:
     transport: str
     attachments: tuple[Path, ...]
     attachment_sha256s: tuple[str, ...]
+    project_context_manifest_path: Path | None
+    project_context_manifest_sha256: str | None
     run_root: Path
     oracle_command: tuple[str, ...]
     oracle_args: tuple[str, ...]
@@ -252,10 +254,8 @@ def validate_oracle_command(values: Any) -> tuple[str, ...]:
         raise OracleStateError("ORACLE_COMMAND_INVALID", "oracle_command must be a nonempty list of strings")
     command = tuple(values)
     executable = Path(command[0]).name.casefold()
-    if executable in {"oracle", "oracle.cmd", "oracle.exe"} and len(command) == 1:
-        return command
     if executable in {"npx", "npx.cmd", "npx.exe"}:
-        allowed_specs = {f"{ORACLE_PACKAGE}@{version}" for version in ORACLE_RECOVERABLE_VERSIONS}
+        allowed_specs = {f"{ORACLE_PACKAGE}@{ORACLE_ACTIVE_VERSION}"}
         if command[1:] in {
             *(('-y', spec) for spec in allowed_specs),
             *(('--yes', spec) for spec in allowed_specs),
@@ -264,7 +264,7 @@ def validate_oracle_command(values: Any) -> tuple[str, ...]:
             return command
     raise OracleStateError(
         "ORACLE_COMMAND_FORBIDDEN",
-        "oracle_command must resolve directly to Oracle or an exact tested @steipete/oracle version",
+        "oracle_command must use the exact active @steipete/oracle npx version",
         {"command": command_for_display(command)},
     )
 
@@ -333,7 +333,14 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
         app_name: str | None = app_name_raw
         if payload.get("attachments"):
             raise OracleStateError("REGULAR_ATTACHMENTS_FORBIDDEN", "DevSpace runs must not attach files")
+        if payload.get("project_context_manifest_path") not in {None, ""}:
+            raise OracleStateError(
+                "CONTEXT_MANIFEST_FORBIDDEN",
+                "project_context_manifest_path is only valid for Pro attachment-only runs",
+            )
         attachments: tuple[Path, ...] = ()
+        project_context_manifest_path: Path | None = None
+        project_context_manifest_sha256: str | None = None
     else:
         if app_name_raw:
             raise OracleStateError("PRO_APP_FORBIDDEN", "Pro attachment-only runs must not name an app")
@@ -349,6 +356,16 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
             raise OracleStateError("PRO_ATTACHMENTS_DUPLICATE", "Pro attachment paths must be unique")
         if mission_path not in attachments:
             raise OracleStateError("PRO_MISSION_ATTACHMENT_REQUIRED", "mission_path must be one of the Pro attachments")
+        project_context_manifest_path = exact_regular_file(
+            payload.get("project_context_manifest_path"),
+            label="project_context_manifest_path",
+        )
+        if not is_within(project_root, project_context_manifest_path):
+            raise OracleStateError(
+                "PRO_CONTEXT_MANIFEST_OUTSIDE_PROJECT",
+                "project_context_manifest_path must stay inside project_root",
+            )
+        project_context_manifest_sha256 = sha256_file(project_context_manifest_path)
     state_root = oracle_state_root()
     if is_within(project_root, state_root) or is_within(state_root, project_root):
         raise OracleStateError(
@@ -457,6 +474,8 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
         transport,
         attachments,
         tuple(sha256_file(item) for item in attachments),
+        project_context_manifest_path,
+        project_context_manifest_sha256,
         run_root,
         oracle_command,
         validate_oracle_args(payload.get("oracle_args")),
@@ -478,6 +497,7 @@ def composer_prompt(config: OracleConfig, mission_path: Path | None = None) -> s
         identity_material = "\0".join((
             str(config.project_root).casefold(),
             config.mission_sha256,
+            config.project_context_manifest_sha256 or "",
             *config.attachment_sha256s,
         ))
         identity = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()[:24]
@@ -551,6 +571,14 @@ def state_payload(config: OracleConfig, layout: RunLayout, *, status: str, resol
             {"path": str(path), "sha256": digest, "size_bytes": path.stat().st_size}
             for path, digest in zip(config.attachments, config.attachment_sha256s, strict=True)
         ],
+        "project_context_manifest": (
+            {
+                "path": str(config.project_context_manifest_path),
+                "sha256": config.project_context_manifest_sha256,
+            }
+            if config.project_context_manifest_path is not None
+            else None
+        ),
         "oracle": {
             "resolved_version": resolved_version,
             "command": list(config.oracle_command),

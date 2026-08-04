@@ -29,9 +29,13 @@ def manifest(tmp_path: Path, mission_path: Path | str, **extra) -> Path:
         "mission_path": str(mission_path),
         "app_name": "DevSpace",
         "mode": "browser",
-        "oracle_command": ["oracle"],
+        "oracle_command": ["npx", "-y", "@steipete/oracle@0.17.0"],
     }
     value.update(extra)
+    if value.get("transport") == "pro-attachment-only" and "project_context_manifest_path" not in extra:
+        context_manifest = tmp_path / "pro-context-manifest.json"
+        context_manifest.write_text("{}", encoding="utf-8")
+        value["project_context_manifest_path"] = str(context_manifest.resolve())
     path = tmp_path / "job.json"
     path.write_text(json.dumps(value), encoding="utf-8")
     return path.resolve()
@@ -87,6 +91,9 @@ def test_pro_manifest_is_attachment_only_and_hashes_exact_files(tmp_path: Path) 
         state.sha256_file(prompt.resolve()),
         state.sha256_file(packet.resolve()),
     )
+    context_manifest = (tmp_path / "pro-context-manifest.json").resolve()
+    assert config.project_context_manifest_path == context_manifest
+    assert config.project_context_manifest_sha256 == state.sha256_file(context_manifest)
     composer = state.composer_prompt(config)
     assert composer.startswith(
         "Read the attached prompt/instructions and all attached files, then complete the task. "
@@ -101,6 +108,45 @@ def test_pro_manifest_is_attachment_only_and_hashes_exact_files(tmp_path: Path) 
     payload = state.state_payload(config, layout, status="prepared", resolved_version="oracle 0.17.0")
     assert payload["transport"] == "pro-attachment-only"
     assert payload["attachments"][1]["sha256"] == state.sha256_file(packet.resolve())
+    assert payload["project_context_manifest"]["sha256"] == state.sha256_file(context_manifest)
+
+
+def test_context_manifest_is_required_only_for_pro(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(tmp_path, mission.resolve(), project_context_manifest_path=str(mission.resolve())))
+    assert exc.value.code == "CONTEXT_MANIFEST_FORBIDDEN"
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(
+            tmp_path,
+            mission.resolve(),
+            transport="pro-attachment-only",
+            app_name=None,
+            model="gpt-5.5-pro",
+            thinking_time="heavy",
+            attachments=[str(mission.resolve())],
+            project_context_manifest_path=None,
+        ))
+    assert exc.value.code == "PROJECT_CONTEXT_MANIFEST_PATH_ABSOLUTE_REQUIRED"
+
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-context.json"
+    outside.write_text("{}", encoding="utf-8")
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(
+            tmp_path,
+            mission.resolve(),
+            transport="pro-attachment-only",
+            app_name=None,
+            model="gpt-5.5-pro",
+            thinking_time="heavy",
+            attachments=[str(mission.resolve())],
+            project_context_manifest_path=str(outside.resolve()),
+        ))
+    assert exc.value.code == "PRO_CONTEXT_MANIFEST_OUTSIDE_PROJECT"
 
 
 def test_pro_composer_identity_changes_with_project_or_attachment_bytes(tmp_path: Path) -> None:
@@ -187,7 +233,9 @@ def test_oracle_commands_pin_the_active_and_recoverable_versions() -> None:
     assert state.validate_oracle_command(["npx", "--yes", "@steipete/oracle@0.17.0"])
 
     for command in (
+        ["oracle"],
         ["npx", "-y", "@steipete/oracle"],
+        ["npx", "-y", "@steipete/oracle@0.16.1"],
         ["npx", "-y", "@steipete/oracle@0.18.0"],
     ):
         with pytest.raises(state.OracleStateError) as exc:

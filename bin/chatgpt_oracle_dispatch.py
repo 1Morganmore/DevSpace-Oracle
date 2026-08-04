@@ -32,6 +32,7 @@ def compile_manifest(
     output_path: Path,
     reasoning_level: str | None = None,
     attachment_paths: Iterable[Path] | None = None,
+    context_manifest_path: Path | None = None,
 ) -> dict[str, Any]:
     contract = PROFILES.build_launch_contract(
         mode,
@@ -39,6 +40,11 @@ def compile_manifest(
         reasoning_level=reasoning_level,
         attachment_paths=list(attachment_paths or ()),
     )
+    is_pro = contract["mode"] == "pro"
+    if is_pro and context_manifest_path is None:
+        raise ValueError("PRO_CONTEXT_MANIFEST_REQUIRED: --context-manifest is required for Pro mode")
+    if not is_pro and context_manifest_path is not None:
+        raise ValueError("CONTEXT_MANIFEST_FORBIDDEN: --context-manifest is only valid for Pro mode")
     result = {"ok": True, "contract": contract, "oracle_manifest_path": None}
     if not contract["oracle_launch"]:
         return result
@@ -57,8 +63,20 @@ def compile_manifest(
         "research": "deep" if contract["research"] else "off",
         "archive": "auto",
     }
-    if contract["mode"] == "pro":
+    if is_pro:
+        assert context_manifest_path is not None
+        raw_context_manifest = context_manifest_path.expanduser()
+        if not raw_context_manifest.is_absolute():
+            raise ValueError("PRO_CONTEXT_MANIFEST_ABSOLUTE_REQUIRED: --context-manifest must be absolute")
+        if raw_context_manifest.is_symlink() or not raw_context_manifest.is_file():
+            raise ValueError("PRO_CONTEXT_MANIFEST_FILE_REQUIRED: --context-manifest must be a regular non-symlink file")
+        context_manifest = raw_context_manifest.resolve(strict=True)
+        try:
+            context_manifest.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("PRO_CONTEXT_MANIFEST_ROOT_ESCAPE: --context-manifest must be inside project_root") from exc
         manifest["attachments"] = contract["attachments"]
+        manifest["project_context_manifest_path"] = str(context_manifest)
     else:
         manifest["app_name"] = "DevSpace"
         manifest["task_outcome_contract"] = "v1"
@@ -75,6 +93,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--manifest-output", type=Path, required=True)
     parser.add_argument("--reasoning-level")
     parser.add_argument("--attachment", type=Path, action="append", default=[])
+    parser.add_argument("--context-manifest", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -85,6 +104,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             output_path=args.manifest_output,
             reasoning_level=args.reasoning_level,
             attachment_paths=args.attachment,
+            context_manifest_path=args.context_manifest,
         )
         if compiled["oracle_manifest_path"]:
             run = RUNNER.execute_run(Path(compiled["oracle_manifest_path"]), dry_run=args.dry_run)

@@ -33,6 +33,35 @@ FAST_TARGETS = [
     "tests/test_chatgpt_oracle_diagnose.py",
     "tests/test_chatgpt_oracle_incident.py",
     "tests/test_chatgpt_oracle_compat.py",
+    "tests/test_chatgpt_devspace_compat.py",
+    "tests/test_chatgpt_oracle_profiles.py",
+    "tests/test_global_gpt_browser_policy.py",
+    "tests/test_pro_project_context_packet.py",
+    "tests/test_release_packaging.py",
+]
+
+# Keep the sub-minute gate representative as the full contract files grow.
+# Full files still run in the comprehensive gates; these nodes cover the
+# pre-submit boundaries that make a fresh run safe or unsafe.
+FAST_NODE_IDS = [
+    "tests/test_chatgpt_oracle_state.py::test_pro_manifest_is_attachment_only_and_hashes_exact_files",
+    "tests/test_chatgpt_oracle_state.py::test_context_manifest_is_required_only_for_pro",
+    "tests/test_chatgpt_oracle_state.py::test_oracle_commands_pin_the_active_and_recoverable_versions",
+    "tests/test_chatgpt_oracle_run.py::test_new_submission_rejects_recovery_only_oracle_0161_before_launch",
+    "tests/test_chatgpt_oracle_run.py::test_validated_package_root_is_the_exact_runtime_popen_target",
+    "tests/test_chatgpt_oracle_run.py::test_validated_runtime_rejects_an_unlisted_compatibility_root",
+    "tests/test_chatgpt_oracle_run.py::test_pro_runner_rejects_an_unvalidated_packet_before_layout",
+    "tests/test_chatgpt_oracle_run.py::test_pro_runner_revalidates_nonattachment_evidence_before_popen",
+    "tests/test_chatgpt_oracle_run.py::test_recovery_resolves_and_compat_checks_the_exact_stored_version",
+    "tests/test_chatgpt_oracle_run.py::test_recovery_rejects_non_exact_override_without_resolve_or_popen",
+    "tests/test_chatgpt_oracle_run.py::test_devspace_patch_change_blocks_before_submission_until_restart",
+    "tests/test_chatgpt_oracle_compat.py::test_prompt_composer_patch_applies_to_pristine_0170_and_is_idempotent",
+    "tests/test_chatgpt_oracle_compat.py::test_literal_devspace_without_semantic_token_clears_and_fails_before_send",
+    "tests/test_chatgpt_oracle_compat.py::test_exact_semantic_devspace_token_proceeds_when_transient_ui_is_absent",
+    "tests/test_chatgpt_oracle_compat.py::test_only_visible_exact_devspace_token_inside_editor_can_authorize_send",
+    "tests/test_chatgpt_devspace_compat.py::test_service_identity_normalizes_npx_bin_parent_path",
+    "tests/test_chatgpt_oracle_diagnose.py",
+    "tests/test_chatgpt_oracle_incident.py",
     "tests/test_chatgpt_oracle_profiles.py",
     "tests/test_global_gpt_browser_policy.py",
     "tests/test_pro_project_context_packet.py",
@@ -886,7 +915,7 @@ def run_fast_gate(
     with tempfile.TemporaryDirectory(prefix="cf-") as basetemp:
         command = [
             sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-            *FAST_TARGETS,
+            *FAST_NODE_IDS,
             "--basetemp", basetemp,
         ]
         execution = run_gate_command(
@@ -900,6 +929,7 @@ def run_fast_gate(
         "budget_seconds": budget_seconds,
         "within_budget": float(execution["elapsed_seconds"]) <= budget_seconds,
         "targets": list(FAST_TARGETS),
+        "selected_tests": list(FAST_NODE_IDS),
     }
 
 

@@ -165,15 +165,17 @@ Remove `--dry-run` only when the run is authorized.
 
 ## Pro example
 
-Pro uses no project app. It attaches the exact mission and evidence files with
-frozen hashes.
+Pro uses no project app. Build and validate the 1 MiB context packet described
+in `skills/chatgpt-pro-browser/SKILL.md`; dispatch then revalidates its manifest,
+receipt, mission, packet, and evidence hashes before submission.
 
 ```powershell
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
   --mode pro `
   --project-root C:\project `
   --mission-path C:\project\pro.md `
-  --attachment C:\project\evidence.zip `
+  --context-manifest C:\project\.ai-bridge\pro-context-manifest.json `
+  --attachment C:\project\.ai-bridge\packet.zip `
   --manifest-output C:\project\.ai-bridge\pro.json `
   --dry-run
 ```

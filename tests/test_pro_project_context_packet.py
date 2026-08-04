@@ -27,11 +27,15 @@ def write_manifest(project: Path, evidence: list[tuple[str, str, int]], **overri
     for relative, category, priority in evidence:
         source = project / relative
         values.append({"path": str(source.resolve()), "category": category, "priority": priority, "sha256": digest(source)})
+    mission = project / "pro-mission.md"
     manifest = {
         "schema": packet.SCHEMA,
         "project_root": str(project.resolve()),
         "question": "Decide whether the project can safely proceed.",
+        "mission_path": str(mission.resolve()),
+        "mission_sha256": digest(mission),
         "required_categories": ["rules", "state"],
+        "category_omissions": [],
         "local_transport_envelope_bytes": packet.TOTAL_ENVELOPE_BYTES,
         "answer_headroom_bytes": packet.ANSWER_HEADROOM_BYTES,
         "metadata_reserve_bytes": packet.METADATA_RESERVE_BYTES,
@@ -50,6 +54,7 @@ def fixture_project(tmp_path: Path) -> Path:
     (project / "AGENTS.md").write_text("rules", encoding="utf-8")
     (project / "state.json").write_text('{"state":"current"}', encoding="utf-8")
     (project / "support.md").write_text("supporting evidence" * 100, encoding="utf-8")
+    (project / "pro-mission.md").write_text("Review the project packet and decide.", encoding="utf-8")
     return project
 
 
@@ -61,7 +66,16 @@ def test_builder_maximum_fill_is_deterministic_and_validates(tmp_path: Path) -> 
     first_bytes = archive.read_bytes()
     assert [item["relative_path"] for item in first["included"]] == ["AGENTS.md", "state.json", "support.md"]
     assert first["local_transport_envelope"]["total_budget_bytes"] == packet.TOTAL_ENVELOPE_BYTES
-    assert first["local_transport_envelope"]["answer_headroom_bytes"] == packet.ANSWER_HEADROOM_BYTES
+    assert first["transport_answer_headroom_bytes"] == 0
+    assert first["model_context_budget_status"] == "unverified"
+    assert first["model_answer_headroom_tokens"] is None
+    assert first["mission_path"] == str((project / "pro-mission.md").resolve())
+    assert first["mission_sha256"] == digest(project / "pro-mission.md")
+    with zipfile.ZipFile(archive) as handle:
+        index = json.loads(handle.read(packet.INDEX_NAME).decode("utf-8"))
+    assert index["transport_answer_headroom_bytes"] == 0
+    assert index["model_context_budget_status"] == "unverified"
+    assert index["model_answer_headroom_tokens"] is None
     assert first["local_transport_envelope"]["metadata_reserve_bytes"] == packet.METADATA_RESERVE_BYTES
     assert first["collection"] == "explicit manifest allowlist; no recursive project scan"
     assert packet.validate(manifest)["packet_sha256"] == digest(archive)
@@ -77,6 +91,7 @@ def test_builder_maximum_fill_is_deterministic_and_validates(tmp_path: Path) -> 
         (lambda project, manifest: manifest["evidence"][0].update({"sha256": "0" * 64}), "STALE_HASH"),
         (lambda project, manifest: manifest.update({"required_categories": ["rules", "state", "missing"]}), "REQUIRED_CATEGORY_MISSING"),
         (lambda project, manifest: manifest.update({"local_transport_envelope_bytes": 100, "answer_headroom_bytes": 20, "metadata_reserve_bytes": 20}), "BUDGET_PROFILE_MISMATCH"),
+        (lambda project, manifest: manifest.update({"mission_sha256": "0" * 64}), "STALE_MISSION_HASH"),
     ],
 )
 def test_builder_fails_closed_for_root_hash_category_and_budget(tmp_path: Path, mutate, code: str) -> None:
@@ -110,6 +125,81 @@ def test_builder_rejects_duplicate_and_validates_stale_packet(tmp_path: Path) ->
     archive = Path(result["project_root"]) / ".ai-bridge" / "packet.zip"
     archive.write_bytes(archive.read_bytes() + b"tampered")
     with pytest.raises(packet.PacketError, match="STALE_PACKET_HASH"):
+        packet.validate(manifest)
+
+
+def test_required_category_can_be_explicitly_omitted(tmp_path: Path) -> None:
+    project = fixture_project(tmp_path)
+    omission = {
+        "category": "prior_decisions",
+        "reason": "No prior review exists.",
+        "coverage_boundary": "Project history through the current mission.",
+        "expected_decision_impact": "Pro must decide without prior-review precedent.",
+    }
+    manifest = write_manifest(
+        project,
+        [("AGENTS.md", "rules", 0), ("state.json", "state", 1)],
+        required_categories=["rules", "state", "prior_decisions"],
+        category_omissions=[omission],
+    )
+    result = packet.build(manifest)
+    assert result["category_omissions"] == [omission]
+    assert packet.validate(manifest)["category_omissions"] == [omission]
+
+
+@pytest.mark.parametrize(
+    "omissions",
+    [
+        {},
+        None,
+        [{"category": "state", "reason": "missing fields"}],
+        [{"category": "state", "reason": "", "coverage_boundary": "all", "expected_decision_impact": "unknown"}],
+        [{"category": "unknown", "reason": "none", "coverage_boundary": "all", "expected_decision_impact": "unknown"}],
+        [
+            {"category": "state", "reason": "none", "coverage_boundary": "all", "expected_decision_impact": "unknown"},
+            {"category": "state", "reason": "none", "coverage_boundary": "all", "expected_decision_impact": "unknown"},
+        ],
+    ],
+)
+def test_builder_rejects_invalid_category_omission_schema(tmp_path: Path, omissions: object) -> None:
+    project = fixture_project(tmp_path)
+    manifest = write_manifest(
+        project,
+        [("AGENTS.md", "rules", 0), ("state.json", "state", 1)],
+        category_omissions=omissions,
+    )
+    with pytest.raises(packet.PacketError, match="CATEGORY_OMISSION"):
+        packet.build(manifest)
+
+
+def test_builder_rejects_included_category_marked_omitted(tmp_path: Path) -> None:
+    project = fixture_project(tmp_path)
+    manifest = write_manifest(
+        project,
+        [("AGENTS.md", "rules", 0), ("state.json", "state", 1)],
+        category_omissions=[{
+            "category": "state",
+            "reason": "none",
+            "coverage_boundary": "all",
+            "expected_decision_impact": "unknown",
+        }],
+    )
+    with pytest.raises(packet.PacketError, match="CATEGORY_OMISSION_CONFLICT"):
+        packet.build(manifest)
+
+
+def test_validate_rejects_stale_or_rebound_mission(tmp_path: Path) -> None:
+    project = fixture_project(tmp_path)
+    manifest = write_manifest(project, [("AGENTS.md", "rules", 0), ("state.json", "state", 1)])
+    packet.build(manifest)
+    mission = project / "pro-mission.md"
+    mission.write_text("Changed mission.", encoding="utf-8")
+    with pytest.raises(packet.PacketError, match="STALE_MISSION_HASH"):
+        packet.validate(manifest)
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value["mission_sha256"] = digest(mission)
+    manifest.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(packet.PacketError, match="PACKET_BINDING_INVALID"):
         packet.validate(manifest)
 
 

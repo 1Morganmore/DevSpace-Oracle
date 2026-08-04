@@ -159,6 +159,20 @@ def test_stop_service_requires_exact_devspace_identity() -> None:
     assert foreign.value.code == "DEVSPACE_SERVICE_IDENTITY_MISMATCH"
 
 
+def test_service_identity_normalizes_npx_bin_parent_path() -> None:
+    compat = load_compat()
+    package = Path(r"C:\cache\node_modules\@waishnav\devspace")
+    identity = {
+        "pid": 44,
+        "command_line": (
+            r'"node" "C:\cache\node_modules\.bin\\..\@waishnav\devspace\dist\cli.js" serve'
+        ),
+        "started_at_unix_ns": 1,
+    }
+
+    assert compat._assert_devspace_service_identity(identity, [package]) is identity
+
+
 def test_unknown_devspace_version_or_file_hash_fails_closed(tmp_path: Path) -> None:
     compat = load_compat()
     package = tmp_path / "package"
