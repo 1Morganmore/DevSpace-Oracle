@@ -387,7 +387,10 @@ def pro_required_answer_labels(mission_path: Path) -> tuple[str, ...]:
     next_heading = re.search(r"(?m)^\s*#+\s+", section)
     if next_heading is not None:
         section = section[:next_heading.start()]
-    labels = re.findall(r"`([A-Z][A-Z0-9_]+)(?::[^`]*)?`", section)
+    labels = re.findall(
+        r"(?m)^\s*\d+\.\s+`([A-Z][A-Z0-9_]+)(?::[^`]*)?`",
+        section,
+    )
     return tuple(dict.fromkeys(labels))
 
 
@@ -410,13 +413,17 @@ def pro_output_satisfies_required_schema(state: dict[str, Any], output_path: Pat
     except (OSError, UnicodeDecodeError):
         return False
     heading_re = re.compile(
-        r"(?m)^\s{0,3}#{1,6}\s+(?:\d+\.\s+)?(?:`(?P<ticked>[A-Z][A-Z0-9_]+)(?::[^`]*)?`|(?P<plain>[A-Z][A-Z0-9_]+)(?::\s*[^\r\n]*)?)\s*$"
+        r"(?m)^\s{0,3}(?P<level>#{1,6})\s+(?:\d+\.\s+)?(?:`(?P<ticked>[A-Z][A-Z0-9_]+)(?::[^`]*)?`|(?P<plain>[A-Z][A-Z0-9_]+)(?::\s*[^\r\n]*)?)\s*$"
     )
     headings = list(heading_re.finditer(output))
     sections: dict[str, str] = {}
     for index, heading in enumerate(headings):
         label = (heading.group("ticked") or heading.group("plain") or "").casefold()
-        next_start = headings[index + 1].start() if index + 1 < len(headings) else len(output)
+        level = len(heading.group("level"))
+        next_start = next(
+            (item.start() for item in headings[index + 1:] if len(item.group("level")) <= level),
+            len(output),
+        )
         if label and output[heading.end():next_start].strip():
             sections[label] = "present"
     return all(label.casefold() in sections for label in labels)
