@@ -1,16 +1,16 @@
 {
   "name": "codexpro-automation",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "private": false,
   "description": "Windows orchestrator that delegates Codex planning, research, implementation, and review to web ChatGPT through Oracle and DevSpace",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ventianima-lab/codexpro-automation.git"
+    "url": "git+https://github.com/1Morganmore/DevSpace-Oracle.git"
   },
-  "homepage": "https://github.com/ventianima-lab/codexpro-automation#readme",
+  "homepage": "https://github.com/1Morganmore/DevSpace-Oracle#readme",
   "bugs": {
-    "url": "https://github.com/ventianima-lab/codexpro-automation/issues"
+    "url": "https://github.com/1Morganmore/DevSpace-Oracle/issues"
   },
   "keywords": [
     "codex",
@@ -22,6 +22,7 @@
     "windows"
   ],
   "files": [
+    "requirements-dev.txt",
     "README.en.md",
     "bin/chatgpt_agbrowse_bridge.py",
     "bin/chatgpt_agbrowse_composer.py",
@@ -91,8 +92,12 @@
     "scripts/run_v3_contract_tests.py",
     "scripts/run_v4_contract_tests.py",
     "scripts/run_fast_gate.py",
+    "scripts/run_posix_tree_child.py",
+    "scripts/run_windows_job_child.py",
+    "scripts/check_skill_metadata.py",
     "scripts/run_golden_path_smoke.py",
     "contracts/install/",
+    "contracts/multi-gpt/",
     "tests/fixtures/planner-v7-app-trace-quiescent-incident.json",
     "tests/fixtures/planner-v8-app-trace-quiescent-incident.json",
     "skills/chatgpt-question-designer/SKILL.md",

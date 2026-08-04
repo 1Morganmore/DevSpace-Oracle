@@ -59,12 +59,15 @@ def test_manifest_covers_runtime_and_schemas() -> None:
         'skills/chatgpt-pro-plan-handoff/scripts/run_pro_plan_handoff.py',
         'skills/chatgpt-pro-plan-handoff/schemas/*.json',
         'scripts/run_v4_contract_tests.py',
+        'scripts/run_posix_tree_child.py',
+        'scripts/run_windows_job_child.py',
         'contracts/install/*.json',
+        'contracts/multi-gpt/*.json',
         'tests/fixtures/planner-v7-app-trace-quiescent-incident.json',
         'tests/fixtures/planner-v8-app-trace-quiescent-incident.json',
     }
     assert required <= includes
-    assert not any('*' in path for path in includes if not (path.endswith('/schemas/*.json') or path == 'contracts/install/*.json'))
+    assert not any('*' in path for path in includes if not (path.endswith('/schemas/*.json') or path in {'contracts/install/*.json', 'contracts/multi-gpt/*.json'}))
     package_files = set(json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))['files'])
     assert {
         'skills/chatgpt-pro-browser/SKILL.md',
@@ -115,8 +118,8 @@ def test_package_is_publishable_and_lockfile_matches() -> None:
     assert package['name'] == lock['name'] == lock['packages']['']['name']
     assert package['version'] == lock['version'] == lock['packages']['']['version']
     assert package['license'] == lock['packages']['']['license'] == 'MIT'
-    assert package['repository']['url'] == 'git+https://github.com/ventianima-lab/codexpro-automation.git'
-    assert package['homepage'].startswith('https://github.com/ventianima-lab/codexpro-automation')
+    assert package['repository']['url'] == 'git+https://github.com/1Morganmore/DevSpace-Oracle.git'
+    assert package['homepage'].startswith('https://github.com/1Morganmore/DevSpace-Oracle')
     assert {
         'bin/chatgpt_agbrowse_bridge.py',
         'skills/chatgpt-thinking-browser/SKILL.md',
@@ -124,14 +127,19 @@ def test_package_is_publishable_and_lockfile_matches() -> None:
         'LICENSE',
         'scripts/run_v4_contract_tests.py',
         'contracts/install/',
+        'contracts/multi-gpt/',
+        'requirements-dev.txt',
     } <= set(package['files'])
 
 
 def test_release_workflow_installs_pytest_before_running_contract_runner() -> None:
     workflow = (ROOT / '.github/workflows/release-portability.yml').read_text(encoding='utf-8')
-    install = workflow.index('python -m pip install "pytest>=8,<10"')
+    requirements = (ROOT / 'requirements-dev.txt').read_text(encoding='utf-8')
+    install = workflow.index('python -m pip install -r requirements-dev.txt')
     run_tests = workflow.index('python scripts/run_v4_contract_tests.py --focused')
     assert install < run_tests
+    assert 'pytest>=8,<10' in requirements
+    assert 'PyYAML>=6,<7' in requirements
 
 
 def test_release_workflow_runs_focused_and_full_contract_checks() -> None:

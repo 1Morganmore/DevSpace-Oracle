@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +23,13 @@ def main() -> int:
     mode.add_argument("--full", action="store_true")
     args = parser.parse_args()
     targets = FOCUSED if args.focused else ["tests"]
-    result = subprocess.run([sys.executable, "-m", "pytest", "-q", *targets], cwd=ROOT)
+    # Keep this short: several Windows concurrency tests create hash-bound
+    # artifact names near MAX_PATH beneath the pytest base directory.
+    with tempfile.TemporaryDirectory(prefix="co-") as basetemp:
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *targets, "--basetemp", basetemp],
+            cwd=ROOT,
+        )
     return result.returncode
 
 

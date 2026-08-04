@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex.multi-gpt.job/v1",
+  "type": "object",
+  "required": [
+    "schema", "schema_version", "revision", "job_id", "status",
+    "created_at", "updated_at", "owner", "model", "reasoning_effort",
+    "requested_contract", "enforced_launch_contract", "max_iterations",
+    "file_count", "result", "error"
+  ],
+  "properties": {
+    "schema": {"const": "codex.multi-gpt.job/v1"},
+    "schema_version": {"const": 1},
+    "revision": {"type": "integer", "minimum": 1},
+    "previous_revision_hash": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+    "job_id": {"type": "string", "pattern": "^[a-zA-Z0-9_-]+$"},
+    "status": {"enum": ["running", "completed", "failed", "canceled"]},
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "owner": {"$ref": "#/$defs/owner"},
+    "model": {"type": "string", "minLength": 1},
+    "reasoning_effort": {"type": "string", "minLength": 1},
+    "requested_contract": {"$ref": "#/$defs/requestedContract"},
+    "enforced_launch_contract": {"$ref": "#/$defs/enforcedContract"},
+    "max_iterations": {"type": "integer", "minimum": 1, "maximum": 10},
+    "file_count": {"type": "integer", "minimum": 0},
+    "result": {"type": ["object", "null"]},
+    "error": {"type": ["object", "null"]},
+    "canceled_at": {"type": "string", "format": "date-time"},
+    "failed_at": {"type": "string", "format": "date-time"},
+    "recovered_from_backup_at": {"type": "string", "format": "date-time"},
+    "migrated_from_legacy_at": {"type": "string", "format": "date-time"},
+    "legacy_source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  },
+  "$defs": {
+    "owner": {
+      "type": "object",
+      "required": ["instance_id", "pid", "process_started_at", "heartbeat_at"],
+      "properties": {
+        "instance_id": {"type": "string", "minLength": 1},
+        "pid": {"type": "integer", "minimum": 1},
+        "process_started_at": {"type": "string", "format": "date-time"},
+        "heartbeat_at": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": false
+    },
+    "requestedContract": {
+      "type": "object",
+      "required": ["model", "reasoning_effort"],
+      "properties": {
+        "model": {"type": ["string", "null"]},
+        "reasoning_effort": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "enforcedContract": {
+      "type": "object",
+      "required": ["model", "reasoning_effort"],
+      "properties": {
+        "model": {"type": "string", "minLength": 1},
+        "reasoning_effort": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -18,3 +18,9 @@ DevSpace는 허용한 프로젝트에서 로컬 사용자 권한으로 파일과
 등록하세요. Tailscale Funnel은 공개 인터넷 endpoint이므로 Tailnet
 정책, HTTPS, hostname과 공개 범위를 먼저 확인해야 합니다. 평상시 GPT
 실행은 Funnel이나 ChatGPT 앱 설정을 변경하지 않습니다.
+
+Local Multi-GPT에 파일을 전달할 때는 필요한 증거 디렉터리만
+`MULTI_GPT_ALLOWED_ROOTS_JSON`에 JSON 배열로 설정하세요. 드라이브 루트나 홈
+전체는 허용되지 않습니다. 민감 파일이 필요하면 정책을 약화하지 말고 비밀을
+제거한 사본을 별도의 허용 디렉터리에 만드세요. 실제 허용 root 목록은 저장소,
+공개 Issue, 로그에 기록하지 마세요.

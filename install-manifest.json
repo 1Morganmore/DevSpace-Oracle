@@ -1,6 +1,6 @@
 {
   "schema": "codexpro.install-manifest/v1",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "include": [
     "bin/chatgpt_agbrowse_bridge.py",
     "bin/chatgpt_agbrowse_composer.py",
@@ -75,8 +75,12 @@
     "scripts/run_v3_contract_tests.py",
     "scripts/run_v4_contract_tests.py",
     "scripts/run_fast_gate.py",
+    "scripts/run_posix_tree_child.py",
+    "scripts/run_windows_job_child.py",
+    "scripts/check_skill_metadata.py",
     "scripts/run_golden_path_smoke.py",
     "contracts/install/*.json",
+    "contracts/multi-gpt/*.json",
     "tests/fixtures/planner-v7-app-trace-quiescent-incident.json",
     "tests/fixtures/planner-v8-app-trace-quiescent-incident.json",
     "skills/chatgpt-question-designer/SKILL.md",

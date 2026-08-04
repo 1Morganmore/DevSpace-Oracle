@@ -10,6 +10,7 @@ $ReceiptRoot = Join-Path $CodexRoot 'receipts'
 $Issues = @()
 $Warnings = @()
 $Commands = @('powershell -ExecutionPolicy Bypass -File .\install.ps1 -WhatIf')
+$InstallReceiptValue = $null
 
 function Get-Sha256([string]$Path) {
   $stream = $null
@@ -46,6 +47,7 @@ if (!$Receipt) {
 } else {
   try {
     $Value = Get-Content -LiteralPath $Receipt.FullName -Raw | ConvertFrom-Json
+    $InstallReceiptValue = $Value
     if (@('codexpro.install-receipt/v2','codexpro.install-receipt/v3') -notcontains [string]$Value.schema) {
       throw 'unsupported install receipt schema'
     }
@@ -100,12 +102,14 @@ $UpdateReceipt = $null
 $SelectedVersion = '0.1.18'
 $SelectedIntegrity = $null
 $Contract = Join-Path $CodexRoot 'contracts/agbrowse-0.1.18.json'
+$LegacyRecoveryManaged = [string]$InstallReceiptValue.dependency.mode -eq 'applied'
 if (Test-Path -LiteralPath $UpdateReceiptPath) {
   try {
     $UpdateReceipt = Get-Content -LiteralPath $UpdateReceiptPath -Raw | ConvertFrom-Json
     if ($UpdateReceipt.schema -ne 'codexpro.agbrowse-update-receipt/v2') { throw 'unsupported update receipt schema' }
     $SelectedVersion = [string]$UpdateReceipt.selected_version
     $SelectedIntegrity = [string]$UpdateReceipt.integrity
+    $LegacyRecoveryManaged = $true
     $Contract = [IO.Path]::GetFullPath([string]$UpdateReceipt.contract)
     if (!(Test-IsWithinRoot (Join-Path $CodexRoot 'contracts') $Contract)) { throw 'update contract path escapes CODEX_HOME' }
   } catch {
@@ -114,8 +118,14 @@ if (Test-Path -LiteralPath $UpdateReceiptPath) {
   }
 }
 
-if (!$Python -or !(Test-Path -LiteralPath $Contract)) {
-  $Issues += @{code='CONTRACT_UNVERIFIED'; detail='Python or contract manifest unavailable'}
+if (!$Python) {
+  $Issues += @{code='PYTHON_MISSING'; detail='Python is required for the installed automation'}
+} elseif (!(Test-Path -LiteralPath $Contract)) {
+  if ($LegacyRecoveryManaged) {
+    $Issues += @{code='LEGACY_CONTRACT_UNVERIFIED'; detail='Managed legacy recovery requires its validated contract manifest'}
+  } else {
+    $Warnings += @{code='LEGACY_CONTRACT_UNAVAILABLE'; detail='Legacy agbrowse recovery is unverified; current Oracle/DevSpace routes are unaffected'}
+  }
 } else {
   if ($UpdateReceipt -and (Get-Sha256 $Contract) -ne [string]$UpdateReceipt.contract_sha256) {
     $Issues += @{code='CONTRACT_RECEIPT_HASH_MISMATCH'; contract=$Contract}

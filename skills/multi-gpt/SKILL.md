@@ -37,14 +37,26 @@ Call `multi_gpt_start` with:
 - `files`: absolute read-only evidence paths. Each attachment is inlined verbatim into every
   stage prompt, so the caps are a context budget, not an I/O limit: 512 KB per file and
   768 KB total. Oversized input fails at intake with `file too large` or
-  `total file context too large`; pass an excerpt instead of a whole large document.
+  `total file context too large`; pass an excerpt instead of a whole large document. Files
+  must resolve inside `MULTI_GPT_ALLOWED_ROOTS_JSON`, a JSON array of narrow absolute
+  directories configured on the MCP server. File-backed jobs fail closed when it is
+  unset, and filesystem or home-wide roots are rejected. Canonical-path containment, symlink/junction rejection,
+  sensitive-name and high-confidence secret-content denial, UTF-8 validation,
+  byte length, and SHA-256 provenance are enforced
+  before content reaches any child.
 - `model`: omit it or specify exactly `gpt-5.6-luna`; every other value is rejected before any child starts
 - `reasoning_effort`: omit it or specify exactly `max`; every other value is rejected before any child starts
 - `max_iterations`: `1` for prompt shaping, `2` for broad critique, `3` for architecture comparison, and `5` only for explicit heavy use
 
 The tool returns a `job_id`. Runs commonly take 5-20 minutes. Poll `multi_gpt_status` sparingly until `completed`, `failed`, or `canceled`.
 
-Use `multi_gpt_cancel` only for a mistakenly started or explicitly stopped job owned by the current MCP server. After an MCP server restart, stale job files remain inspectable with `multi_gpt_status`, but their former child processes cannot be targeted reliably. Do not expose partial hidden stage reasoning as a user answer.
+Actual Codex child creation is protected by a server-wide FIFO semaphore. The
+default is four active children across all jobs; set `MULTI_GPT_MAX_CHILDREN`
+to an integer from 1 through 20 before starting the MCP server when a different
+host-safe limit is required. Stage fan-out may queue more logical work, but it
+cannot bypass this process limit.
+
+Use `multi_gpt_cancel` only for a mistakenly started or explicitly stopped job owned by the current MCP server. Job state is revisioned and atomically persisted with a last-known-good backup. After an MCP server restart, a provably dead owner is reconciled to `failed / ORPHANED_AFTER_RESTART`; a live or ambiguous foreign owner remains read-only and cannot be canceled by the new process. Do not expose partial hidden stage reasoning as a user answer.
 
 ## Lane Selection
 

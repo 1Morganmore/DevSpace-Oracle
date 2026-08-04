@@ -77,6 +77,19 @@ fixed to `gpt-5.6-luna` with `max` reasoning; any other model or effort is
 rejected before a child process starts. Web Multi-GPT instead runs independent
 ChatGPT web sessions through Oracle and merges their results.
 
+File-backed Local Multi-GPT jobs fail closed unless the MCP host defines
+`MULTI_GPT_ALLOWED_ROOTS_JSON` as a JSON array of narrow absolute directories.
+Filesystem roots and the whole home directory are rejected. The server resolves
+canonical paths, rejects symlink/junction and sensitive inputs, blocks
+high-confidence secret material, verifies strict UTF-8, and records redacted
+relative-path plus SHA-256 provenance before starting a child. Background job
+state is revisioned and atomically persisted; after a restart, a provably dead
+owner becomes `failed` with `ORPHANED_AFTER_RESTART`, while live or ambiguous
+external ownership is preserved and cannot be canceled by the new process.
+The server also limits actual Codex child processes across all jobs with a FIFO
+backpressure queue: four by default, configurable from 1 through 20 with
+`MULTI_GPT_MAX_CHILDREN`.
+
 ## Requirements
 
 - Windows 11
@@ -94,8 +107,8 @@ match.
 ## Install
 
 ```powershell
-git clone https://github.com/ventianima-lab/codexpro-automation.git
-cd codexpro-automation
+git clone https://github.com/1Morganmore/DevSpace-Oracle.git
+cd DevSpace-Oracle
 .\install.ps1 -WhatIf
 .\install.ps1
 ```

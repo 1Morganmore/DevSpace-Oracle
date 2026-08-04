@@ -77,6 +77,14 @@ PC의 Codex 하위 레인을 사용하는 선택적 자문 도구이며, 모든 
 레벨을 요청하면 하위 프로세스를 시작하기 전에 거부합니다. Web Multi-GPT는
 Oracle이 여러 독립 ChatGPT 웹 세션을 실행한 뒤 결과를 병합합니다.
 
+파일을 사용하는 Local Multi-GPT 작업은 MCP 호스트가 좁은 절대 경로 목록을
+JSON 배열로 `MULTI_GPT_ALLOWED_ROOTS_JSON`에 설정한 경우에만 실행됩니다.
+파일시스템 루트와 홈 전체는 거부하며, 정규 경로·링크·민감 파일·UTF-8·크기와
+SHA-256을 하위 프로세스 시작 전에 검사합니다. 작업 상태는 원자적으로 저장되고,
+재시작 후 소유 프로세스가 확실히 종료된 작업은
+`failed / ORPHANED_AFTER_RESTART`가 됩니다. 살아 있거나 소유권이 불명확한
+외부 작업은 보존하며 새 서버에서 취소하지 않습니다.
+
 ## 요구사항
 
 - Windows 11
@@ -93,8 +101,8 @@ Oracle이 여러 독립 ChatGPT 웹 세션을 실행한 뒤 결과를 병합합�
 ## 설치
 
 ```powershell
-git clone https://github.com/ventianima-lab/codexpro-automation.git
-cd codexpro-automation
+git clone https://github.com/1Morganmore/DevSpace-Oracle.git
+cd DevSpace-Oracle
 .\install.ps1 -WhatIf
 .\install.ps1
 ```

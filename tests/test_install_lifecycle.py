@@ -4,6 +4,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+import pytest
+
 ROOT = Path(__file__).parents[1]
 
 
@@ -67,12 +69,16 @@ def test_installer_wal_records_actual_per_file_transition_order() -> None:
         assert installed.returncode == 0, installed.stderr
         receipt = json.loads(next((Path(home) / 'receipts').glob('codexpro-automation-*.json')).read_text(encoding='utf-8-sig'))
         wal = json.loads(Path(receipt['wal']).read_text(encoding='utf-8'))
-        assert wal['schema'] == 'codexpro.install-wal/v1'
+        assert wal['schema'] == 'codexpro.install-wal/v2'
+        assert wal['transaction_id'] == receipt['transaction_id']
         assert wal['status'] == 'COMPLETE'
         assert wal['files']
         for index, entry in enumerate(wal['files']):
             assert entry['phase'] == 'COMPLETE'
-            assert entry['transitions'] == ['INTENT', 'MUTATED', 'VERIFIED', 'COMPLETE']
+            assert entry['transitions'] == [
+                'INTENT', 'BACKUP_DURABLE', 'MUTATED', 'VERIFIED',
+                'REPLACEMENT_RECEIPT_DURABLE', 'COMPLETE',
+            ]
             replacement = Path(entry['replacement'])
             assert replacement.name == 'replacement.json'
             assert replacement.parent.name == str(index)
@@ -106,12 +112,14 @@ def test_interrupted_install_recovery_rolls_back_completed_steps_and_preserves_u
                     'installed_sha256': digest(b'new-completed\n'),
                     'backup_sha256': digest(b'old-completed\n'),
                     'phase': 'COMPLETE', 'transitions': ['INTENT', 'MUTATED', 'VERIFIED', 'COMPLETE'],
+                    'replacement': str(backup_root / 'steps/0/replacement.json'),
                 },
                 {
                     'path': 'bin/intent.py', 'action': 'overwritten',
                     'installed_sha256': digest(b'new-intent\n'),
                     'backup_sha256': digest(b'old-intent\n'),
                     'phase': 'INTENT', 'transitions': ['INTENT'],
+                    'replacement': str(backup_root / 'steps/1/replacement.json'),
                 },
             ],
         }
@@ -126,6 +134,376 @@ def test_interrupted_install_recovery_rolls_back_completed_steps_and_preserves_u
         assert completed_path.read_bytes() == b'old-completed\n'
         assert intent_path.read_bytes() == b'old-intent\n'
         assert json.loads(wal.read_text(encoding='utf-8'))['status'] == 'ROLLED_BACK_AFTER_CRASH'
+
+
+def test_wal_v1_contract_remains_compatible_and_v2_receipt_binding_fails_closed() -> None:
+    v1 = json.loads((ROOT / 'contracts/install/install-wal-v1.schema.json').read_text(encoding='utf-8'))
+    assert v1['$id'] == 'codexpro.install-wal/v1'
+    assert v1['properties']['status']['enum'] == ['ACTIVE', 'COMPLETE', 'ROLLED_BACK_AFTER_CRASH']
+    assert v1['$defs']['file']['properties']['phase']['enum'] == ['INTENT', 'MUTATED', 'VERIFIED', 'COMPLETE']
+
+    with tempfile.TemporaryDirectory() as home:
+        import hashlib
+
+        codex_home = Path(home)
+        backup_root = codex_home / 'backups' / 'ambiguous-receipt'
+        relative = Path('bin/owned.py')
+        destination = codex_home / relative
+        backup = backup_root / relative
+        destination.parent.mkdir(parents=True)
+        backup.parent.mkdir(parents=True)
+        installed = b'installer-owned-current\n'
+        original = b'original-before-install\n'
+        destination.write_bytes(installed)
+        backup.write_bytes(original)
+        receipt = codex_home / 'receipts' / 'ambiguous.json'
+        receipt.parent.mkdir(parents=True)
+        wal = backup_root / 'install.wal.json'
+        receipt.write_text(json.dumps({
+            'schema': 'codexpro.install-receipt/v3',
+            'transaction_id': 'f' * 32,
+            'wal': str(wal),
+            'files': [],
+        }), encoding='utf-8')
+        wal.write_text(json.dumps({
+            'schema': 'codexpro.install-wal/v2',
+            'transaction_id': 'a' * 32,
+            'manifest_version': '1.7.0',
+            'status': 'ACTIVE',
+            'backup': str(backup_root),
+            'receipt': str(receipt),
+            'wal_path': str(wal),
+            'files': [{
+                'sequence_number': 0,
+                'path': str(relative).replace('\\', '/'),
+                'action': 'overwritten',
+                'installed_sha256': hashlib.sha256(installed).hexdigest(),
+                'backup_sha256': hashlib.sha256(original).hexdigest(),
+                'phase': 'MUTATED',
+                'transitions': ['INTENT', 'BACKUP_DURABLE', 'MUTATED'],
+                'replacement': str(backup_root / 'steps/0/replacement.json'),
+            }],
+        }), encoding='utf-8')
+
+        recovered = run_powershell(
+            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home, '-SkipDependencyInstall',
+        )
+
+        assert recovered.returncode != 0
+        assert 'receipt_binding_ambiguous' in recovered.stderr
+        assert destination.read_bytes() == installed
+        assert receipt.is_file()
+        assert json.loads(wal.read_text(encoding='utf-8'))['status'] == 'ACTIVE'
+
+
+@pytest.mark.parametrize(
+    'tamper_kind',
+    [
+        'stored_wal_path', 'backup_binding', 'receipt_outside_root', 'sequence',
+        'sequence_type', 'installed_hash', 'receipt_record', 'receipt_nullability',
+        'replacement_record', 'files_type', 'completed_missing_receipt',
+        'unsupported_schema', 'intent_with_backup_hash',
+    ],
+)
+def test_wal_v2_tampering_is_rejected_before_any_recovery_mutation(tamper_kind: str) -> None:
+    with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as outside:
+        import hashlib
+
+        codex_home = Path(home)
+        backup_root = codex_home / 'backups' / 'tampered-v2'
+        relative = Path('bin/owned.py')
+        destination = codex_home / relative
+        backup = backup_root / relative
+        destination.parent.mkdir(parents=True)
+        backup.parent.mkdir(parents=True)
+        installed = b'installer-owned-current\n'
+        original = b'user-owned-original\n'
+        destination.write_bytes(installed)
+        backup.write_bytes(original)
+        wal = backup_root / 'install.wal.json'
+        receipt = codex_home / 'receipts' / 'bound.json'
+        receipt.parent.mkdir(parents=True)
+        file_record = {
+            'sequence_number': 0,
+            'path': str(relative).replace('\\', '/'),
+            'action': 'overwritten',
+            'installed_sha256': hashlib.sha256(installed).hexdigest(),
+            'backup_sha256': hashlib.sha256(original).hexdigest(),
+            'phase': 'COMPLETE',
+            'transitions': ['INTENT', 'BACKUP_DURABLE', 'MUTATED', 'VERIFIED', 'REPLACEMENT_RECEIPT_DURABLE', 'COMPLETE'],
+            'replacement': str(backup_root / 'steps/0/replacement.json'),
+        }
+        journal = {
+            'schema': 'codexpro.install-wal/v2',
+            'transaction_id': 'd' * 32,
+            'manifest_version': '1.7.0',
+            'status': 'ACTIVE',
+            'backup': str(backup_root),
+            'receipt': str(receipt),
+            'wal_path': str(wal),
+            'files': [file_record],
+        }
+        receipt_value = {
+            'schema': 'codexpro.install-receipt/v3',
+            'transaction_id': journal['transaction_id'],
+            'manifest_version': journal['manifest_version'],
+            'backup': journal['backup'],
+            'wal': journal['wal_path'],
+            'files': [{key: file_record[key] for key in ('path', 'action', 'installed_sha256', 'backup_sha256')}],
+        }
+        replacement_value = {
+            'schema': 'codexpro.install-replacement/v1',
+            **{key: file_record[key] for key in ('path', 'action', 'installed_sha256', 'backup_sha256')},
+            'mutated_at': '2026-08-03T00:00:00Z',
+        }
+        replacement_path = Path(file_record['replacement'])
+        replacement_path.parent.mkdir(parents=True)
+        if tamper_kind == 'stored_wal_path':
+            journal['wal_path'] = str(backup_root / 'other.wal.json')
+        elif tamper_kind == 'backup_binding':
+            journal['backup'] = str(codex_home / 'backups' / 'other-transaction')
+        elif tamper_kind == 'receipt_outside_root':
+            journal['receipt'] = str(Path(outside) / 'outside-receipt.json')
+        elif tamper_kind == 'sequence':
+            file_record['sequence_number'] = 3
+        elif tamper_kind == 'sequence_type':
+            file_record['sequence_number'] = '0'
+        elif tamper_kind == 'installed_hash':
+            file_record['installed_sha256'] = 'not-a-sha256'
+        elif tamper_kind == 'receipt_record':
+            receipt_value['files'][0]['path'] = 'bin/different.py'
+        elif tamper_kind == 'receipt_nullability':
+            receipt_value['files'][0]['backup_sha256'] = None
+        elif tamper_kind == 'replacement_record':
+            replacement_value['installed_sha256'] = 'e' * 64
+        elif tamper_kind == 'files_type':
+            journal['files'] = file_record
+        elif tamper_kind == 'completed_missing_receipt':
+            journal['status'] = 'COMPLETE'
+        elif tamper_kind == 'unsupported_schema':
+            journal['schema'] = 'codexpro.install-wal/v999'
+        elif tamper_kind == 'intent_with_backup_hash':
+            file_record['phase'] = 'INTENT'
+            file_record['transitions'] = ['INTENT']
+        replacement_path.write_text(json.dumps(replacement_value), encoding='utf-8')
+        wal.write_text(json.dumps(journal), encoding='utf-8')
+        if tamper_kind != 'completed_missing_receipt':
+            receipt.write_text(json.dumps(receipt_value), encoding='utf-8')
+
+        recovered = run_powershell(
+            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home, '-SkipDependencyInstall',
+        )
+
+        assert recovered.returncode != 0
+        assert destination.read_bytes() == installed
+        assert backup.read_bytes() == original
+        assert json.loads(wal.read_text(encoding='utf-8'))['status'] == journal['status']
+
+
+def test_wal_rollback_preflights_every_backup_before_first_mutation() -> None:
+    with tempfile.TemporaryDirectory() as home:
+        import hashlib
+
+        codex_home = Path(home)
+        backup_root = codex_home / 'backups' / 'two-entry-preflight'
+        wal = backup_root / 'install.wal.json'
+        receipt = codex_home / 'receipts' / 'planned.json'
+        files = []
+        destinations = []
+        for index in range(2):
+            relative = Path(f'bin/owned-{index}.py')
+            destination = codex_home / relative
+            backup = backup_root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            installed = f'installed-{index}\n'.encode()
+            original = f'original-{index}\n'.encode()
+            destination.write_bytes(installed)
+            backup.write_bytes(b'tampered\n' if index == 0 else original)
+            destinations.append((destination, installed))
+            files.append({
+                'sequence_number': index,
+                'path': str(relative).replace('\\', '/'),
+                'action': 'overwritten',
+                'installed_sha256': hashlib.sha256(installed).hexdigest(),
+                'backup_sha256': hashlib.sha256(original).hexdigest(),
+                'phase': 'MUTATED',
+                'transitions': ['INTENT', 'BACKUP_DURABLE', 'MUTATED'],
+                'replacement': str(backup_root / f'steps/{index}/replacement.json'),
+            })
+        journal = {
+            'schema': 'codexpro.install-wal/v2', 'transaction_id': 'c' * 32,
+            'manifest_version': '1.7.0', 'status': 'ACTIVE', 'backup': str(backup_root),
+            'receipt': str(receipt), 'wal_path': str(wal), 'files': files,
+        }
+        wal.parent.mkdir(parents=True, exist_ok=True)
+        wal.write_text(json.dumps(journal), encoding='utf-8')
+
+        recovered = run_powershell(
+            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home, '-SkipDependencyInstall',
+        )
+
+        assert recovered.returncode != 0
+        assert 'missing_interrupted_backup' in recovered.stderr
+        for destination, installed in destinations:
+            assert destination.read_bytes() == installed
+        assert json.loads(wal.read_text(encoding='utf-8'))['status'] == 'ACTIVE'
+
+
+@pytest.mark.parametrize(
+    'fault_point',
+    [
+        'AFTER_INTENT', 'AFTER_BACKUP_DURABLE', 'AFTER_MUTATION',
+        'AFTER_VERIFICATION', 'AFTER_REPLACEMENT_RECEIPT',
+    ],
+)
+def test_current_process_fault_rolls_back_the_active_wal_entry(fault_point: str) -> None:
+    with tempfile.TemporaryDirectory() as home:
+        codex_home = Path(home)
+        first = codex_home / 'bin' / 'chatgpt_agbrowse_bridge.py'
+        first.parent.mkdir(parents=True)
+        original = b'user-owned-before-fault\x00\n'
+        first.write_bytes(original)
+        env = os.environ.copy()
+        env['CODEXPRO_INSTALL_FAULT_POINT'] = fault_point
+
+        failed = run_powershell(
+            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home,
+            '-SkipDependencyInstall', env=env,
+        )
+
+        assert failed.returncode != 0
+        assert 'INSTALL_FAULT_INJECTED' in failed.stderr
+        assert first.read_bytes() == original
+        assert not list((codex_home / 'receipts').glob('codexpro-automation-*.json'))
+        wal = next((codex_home / 'backups').glob('*/install.wal.json'))
+        state = json.loads(wal.read_text(encoding='utf-8'))
+        assert state['status'] == 'ROLLED_BACK_AFTER_ERROR'
+        assert state['files'][0]['phase'] in {
+            'INTENT', 'BACKUP_DURABLE', 'MUTATED', 'VERIFIED', 'REPLACEMENT_RECEIPT_DURABLE',
+        }
+
+
+def test_current_process_fault_removes_a_just_created_destination() -> None:
+    with tempfile.TemporaryDirectory() as home:
+        codex_home = Path(home)
+        created = codex_home / 'bin' / 'chatgpt_agbrowse_bridge.py'
+        env = os.environ.copy()
+        env['CODEXPRO_INSTALL_FAULT_POINT'] = 'AFTER_MUTATION'
+
+        failed = run_powershell(
+            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home,
+            '-SkipDependencyInstall', env=env,
+        )
+
+        assert failed.returncode != 0
+        assert not created.exists()
+
+
+def test_install_receipt_failure_window_rolls_back_files_and_removes_receipt() -> None:
+    with tempfile.TemporaryDirectory() as home:
+        codex_home = Path(home)
+        first = codex_home / 'bin' / 'chatgpt_agbrowse_bridge.py'
+        first.parent.mkdir(parents=True)
+        original = b'original-before-install-receipt\n'
+        first.write_bytes(original)
+        env = os.environ.copy()
+        env['CODEXPRO_INSTALL_FAULT_POINT'] = 'AFTER_INSTALL_RECEIPT'
+
+        failed = run_powershell(
+            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home,
+            '-SkipDependencyInstall', env=env,
+        )
+
+        assert failed.returncode != 0
+        assert first.read_bytes() == original
+        assert not list((codex_home / 'receipts').glob('codexpro-automation-*.json'))
+        wal = next((codex_home / 'backups').glob('*/install.wal.json'))
+        assert json.loads(wal.read_text(encoding='utf-8'))['status'] == 'ROLLED_BACK_AFTER_ERROR'
+
+
+def test_wal_v1_missing_overwritten_destination_remains_absent() -> None:
+    with tempfile.TemporaryDirectory() as home:
+        import hashlib
+
+        codex_home = Path(home)
+        relative = Path('bin/legacy-missing.py')
+        backup_root = codex_home / 'backups' / 'missing-destination'
+        backup = backup_root / relative
+        backup.parent.mkdir(parents=True)
+        original = b'original-before-crash\n'
+        backup.write_bytes(original)
+        installed = b'installer-owned-before-crash\n'
+        journal = {
+            'schema': 'codexpro.install-wal/v1',
+            'status': 'ACTIVE',
+            'backup': str(backup_root),
+            'files': [{
+                'path': str(relative).replace('\\', '/'),
+                'action': 'overwritten',
+                'installed_sha256': hashlib.sha256(installed).hexdigest(),
+                'backup_sha256': hashlib.sha256(original).hexdigest(),
+                'phase': 'MUTATED',
+                'transitions': ['INTENT', 'MUTATED'],
+                'replacement': str(backup_root / 'steps/0/replacement.json'),
+            }],
+        }
+        wal = backup_root / 'install.wal.json'
+        wal.write_text(json.dumps(journal), encoding='utf-8')
+        recovered = run_powershell(
+            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home,
+            '-SkipDependencyInstall',
+        )
+
+        assert recovered.returncode == 0, recovered.stderr
+        assert not (codex_home / relative).exists()
+        assert json.loads(wal.read_text(encoding='utf-8'))['status'] == 'ROLLED_BACK_AFTER_CRASH'
+
+
+def test_wal_v2_missing_overwritten_destination_is_a_conflict() -> None:
+    with tempfile.TemporaryDirectory() as home:
+        import hashlib
+
+        codex_home = Path(home)
+        relative = Path('bin/v2-missing.py')
+        backup_root = codex_home / 'backups' / 'missing-v2-destination'
+        backup = backup_root / relative
+        backup.parent.mkdir(parents=True)
+        original = b'original-before-crash\n'
+        installed = b'installer-owned-before-crash\n'
+        backup.write_bytes(original)
+        wal = backup_root / 'install.wal.json'
+        receipt = codex_home / 'receipts' / 'planned.json'
+        receipt.parent.mkdir(parents=True)
+        journal = {
+            'schema': 'codexpro.install-wal/v2',
+            'transaction_id': 'b' * 32,
+            'manifest_version': '1.7.0',
+            'status': 'ACTIVE',
+            'backup': str(backup_root),
+            'receipt': str(receipt),
+            'wal_path': str(wal),
+            'files': [{
+                'sequence_number': 0,
+                'path': str(relative).replace('\\', '/'),
+                'action': 'overwritten',
+                'installed_sha256': hashlib.sha256(installed).hexdigest(),
+                'backup_sha256': hashlib.sha256(original).hexdigest(),
+                'phase': 'MUTATED',
+                'transitions': ['INTENT', 'BACKUP_DURABLE', 'MUTATED'],
+                'replacement': str(backup_root / 'steps/0/replacement.json'),
+            }],
+        }
+        wal.write_text(json.dumps(journal), encoding='utf-8')
+
+        recovered = run_powershell(
+            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home, '-SkipDependencyInstall',
+        )
+
+        assert recovered.returncode != 0
+        assert 'missing_overwritten_destination' in recovered.stderr
+        assert not (codex_home / relative).exists()
+        assert json.loads(wal.read_text(encoding='utf-8'))['status'] == 'ACTIVE'
 
 
 def test_doctor_accepts_current_v3_install_receipt_schema() -> None:
@@ -145,6 +523,10 @@ def test_doctor_accepts_current_v3_install_receipt_schema() -> None:
 
         result = run_powershell('-File', str(ROOT / 'doctor.ps1'), '-CodexHome', home)
 
+        assert result.returncode == 0, result.stdout
+        report = json.loads(result.stdout)
+        assert report['status'] == 'PASS'
+        assert any(item['code'] == 'LEGACY_CONTRACT_UNAVAILABLE' for item in report['warnings'])
         assert 'RECEIPT_INVALID' not in result.stdout
         assert 'unsupported install receipt schema' not in result.stdout
 

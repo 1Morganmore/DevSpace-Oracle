@@ -19,6 +19,9 @@ contract-validate agbrowse for an old persisted run.
 - Future agbrowse versions must be explicit resolved semvers. Pass their exact registry integrity to contract capture/validation, retain 0.1.18 only as the tested baseline, and require the invoking agent/workflow to select the resulting versioned contract explicitly.
 - Exercise both file-only install rollback and mocked normal install rollback. Receipt v3 must restore the prior agbrowse package, selected contract bytes, and prior update receipt; the exact inverse must prove registry integrity, installed version, and executable SHA-256 after npm reports success. Dependency drift must fail in preflight before installed files change, and any late inverse failure must report `PARTIAL`.
 - Verify install WAL behavior: per file, durable `INTENT` precedes mutation; the file is flushed, `replacement.json` is written, hashes are verified, and only then is the entry `COMPLETE`. A later install resumes an interrupted WAL by restoring only receipt-owned bytes; a modified destination remains a conflict.
+- Confirm the historical install WAL v1 schema remains byte-for-byte compatible, new installs write WAL v2, and the durable receipt binds the same transaction before WAL completion.
+- Confirm `contracts/multi-gpt/job-v1.schema.json` ships in both install and npm artifacts. File-backed jobs must fail closed without narrow host-configured `MULTI_GPT_ALLOWED_ROOTS_JSON`; no real root value may appear in public artifacts.
+- Exercise corrupt-primary backup recovery, dead/live/ambiguous restart ownership, current-owner cancellation, child timeout, all output byte caps, and strict judge validation through the MCP entry point.
 
 ## Parallel implementation v3
 
