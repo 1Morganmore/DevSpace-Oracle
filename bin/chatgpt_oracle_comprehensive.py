@@ -411,8 +411,37 @@ def _oracle_manifest(
         "run_id": run_id,
     }
     if stage == "pro":
+        evidence = tuple(pro_attachments)
+        if not evidence:
+            raise WorkflowError("Pro context packet requires explicit project evidence")
+        builder = RUNNER.PRO_CONTEXT_BUILDER
+        context_manifest = stage_dir / "project-context-manifest.json"
+        packet = stage_dir / "project-context.zip"
+        category = "comprehensive-stage-evidence"
+        _write(context_manifest, {
+            "schema": builder.SCHEMA,
+            "project_root": str(config["project_root"]),
+            "question": "Complete the comprehensive Pro stage using the exact attached project evidence.",
+            "mission_path": str(mission),
+            "mission_sha256": sha(mission),
+            "required_categories": [category],
+            "category_omissions": [],
+            "local_transport_envelope_bytes": builder.TOTAL_ENVELOPE_BYTES,
+            "answer_headroom_bytes": builder.TRANSPORT_ANSWER_HEADROOM_BYTES,
+            "metadata_reserve_bytes": builder.METADATA_RESERVE_BYTES,
+            "packet_path": str(packet),
+            "evidence": [
+                {"path": str(item), "category": category, "priority": priority, "sha256": sha(item)}
+                for priority, item in enumerate(evidence)
+            ],
+        })
+        try:
+            builder.build(context_manifest)
+        except builder.PacketError as exc:
+            raise WorkflowError(f"Pro context packet invalid: {exc}") from exc
         payload["transport"] = "pro-attachment-only"
-        payload["attachments"] = [str(mission), *(str(item) for item in pro_attachments)]
+        payload["attachments"] = [str(mission), str(packet)]
+        payload["project_context_manifest_path"] = str(context_manifest)
     else:
         payload["transport"] = "devspace"
         payload["app_name"] = config["app_name"]
@@ -1426,6 +1455,8 @@ def _run_workflow_locked(
         attempt_id = uuid.uuid4().hex
         if stage == "pro":
             pro_attachments = _declared_pro_attachments(config, source)
+            if not pro_attachments:
+                pro_attachments = (source,)
             mission, receipt_path, input_sha = _pro_stage_mission(
                 config, workflow_id, index, source, attempt_id
             )

@@ -40,6 +40,23 @@ def manifest(tmp_path: Path) -> Path:
     return path
 
 
+def assert_pro_context(module, payload: dict, mission: Path, evidence: tuple[Path, ...]) -> Path:
+    context_manifest = Path(payload["project_context_manifest_path"])
+    context = json.loads(context_manifest.read_text(encoding="utf-8"))
+    packet = Path(context["packet_path"])
+    assert payload["attachments"] == [str(mission), str(packet)]
+    assert context["mission_path"] == str(mission)
+    assert context["mission_sha256"] == module.sha(mission)
+    assert [item["path"] for item in context["evidence"]] == [str(item) for item in evidence]
+    receipt = module.RUNNER.PRO_CONTEXT_BUILDER.validate(context_manifest)
+    assert receipt["packet_sha256"] == module.sha(packet)
+    binding = module.RUNNER.validate_pro_context_preflight(
+        module.RUNNER.STATE.load_manifest(context_manifest.parent / "oracle.json")
+    )
+    assert binding["packet_path"] == str(packet.resolve())
+    return packet
+
+
 def test_manifest_rejects_non_devspace_app_before_workflow_creation(tmp_path: Path) -> None:
     module = load()
     path = manifest(tmp_path)
@@ -129,7 +146,7 @@ def test_pro_stage_runs_oracle_attachment_only_and_materializes_bound_receipt(tm
         if stage == "pro":
             assert payload["transport"] == "pro-attachment-only"
             assert payload["model"] == "gpt-5.5-pro"
-            assert payload["attachments"] == [str(mission)]
+            assert_pro_context(module, payload, mission, (tmp_path / "next-plan.md",))
             assert "app_name" not in payload
             attempt = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("attempt_id="))
             input_sha = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("input_mission_sha256="))
@@ -175,7 +192,11 @@ def test_pro_exact_recovery_materializes_output_without_resubmission(tmp_path: P
     source = tmp_path / "pro-source.md"
     source.write_text("Pro review request", encoding="utf-8")
     mission, receipt, input_sha = module._pro_stage_mission(config, "a" * 32, 1, source, attempt)
-    oracle_manifest = module._oracle_manifest(config, mission, mission.parent, attempt, stage="pro")
+    oracle_manifest = module._oracle_manifest(
+        config, mission, mission.parent, attempt, stage="pro", pro_attachments=(source,)
+    )
+    payload = json.loads(oracle_manifest.read_text(encoding="utf-8"))
+    assert_pro_context(module, payload, mission, (source,))
     run_dir = _oracle_running_state(module, oracle_manifest)
     state_path = module._state_path(config, "a" * 32)
     module._write(state_path, {
@@ -1426,7 +1447,8 @@ def test_pro_attachment_contract_includes_only_declared_exact_packet(tmp_path: P
     payload = json.loads(module._oracle_manifest(
         config, augmented, tmp_path, "c" * 32, stage="pro", pro_attachments=extras
     ).read_text(encoding="utf-8"))
-    assert payload["attachments"] == [str(augmented), str(packet.resolve())]
+    context_packet = assert_pro_context(module, payload, augmented, (packet.resolve(),))
+    assert context_packet != packet.resolve()
 
 
 def test_pro_attachment_contract_rejects_hash_mismatch_before_submission(tmp_path: Path) -> None:
@@ -1460,7 +1482,7 @@ def test_pro_attachment_contract_rejects_outside_project_and_symlink(tmp_path: P
         module._declared_pro_attachments(config, source)
 
 
-def test_regular_manifest_never_attaches_pro_packets_and_legacy_pro_is_mission_only(tmp_path: Path) -> None:
+def test_regular_manifest_ignores_pro_evidence_and_pro_uses_one_context_packet(tmp_path: Path) -> None:
     module = load()
     config = module.load_manifest(manifest(tmp_path))
     config["_parallel_parent_id"] = "b" * 64
@@ -1473,10 +1495,10 @@ def test_regular_manifest_never_attaches_pro_packets_and_legacy_pro_is_mission_o
     ).read_text(encoding="utf-8"))
     assert "attachments" not in regular
     assert regular["transport"] == "devspace"
-    legacy_pro = json.loads(module._oracle_manifest(
-        config, mission, tmp_path / "legacy-pro", "d" * 32, stage="pro"
+    pro = json.loads(module._oracle_manifest(
+        config, mission, tmp_path / "pro", "d" * 32, stage="pro", pro_attachments=(packet,)
     ).read_text(encoding="utf-8"))
-    assert legacy_pro["attachments"] == [str(mission)]
+    assert_pro_context(module, pro, mission, (packet,))
 
 
 def test_plan_mission_teaches_declared_packet_contract(tmp_path: Path) -> None:
