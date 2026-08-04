@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -386,11 +387,17 @@ def pro_required_answer_labels(mission_path: Path) -> tuple[str, ...]:
     next_heading = re.search(r"(?m)^\s*#+\s+", section)
     if next_heading is not None:
         section = section[:next_heading.start()]
-    labels = re.findall(r"`([A-Z][A-Z0-9_]+)`", section)
+    labels = re.findall(r"`([A-Z][A-Z0-9_]+)(?::[^`]*)?`", section)
     return tuple(dict.fromkeys(labels))
 
 
 def pro_output_satisfies_required_schema(state: dict[str, Any], output_path: Path) -> bool:
+    """Require every declared Pro section to be a nonempty Markdown heading.
+
+    A body mention is not a schema section: terminal preambles must remain
+    ineligible for promotion. Both plain labels and labels wrapped in Markdown
+    code ticks are accepted because the Pro response contract uses both forms.
+    """
     if str(state.get("transport") or "") != "pro-attachment-only":
         return True
     mission = state.get("mission") if isinstance(state.get("mission"), dict) else {}
@@ -399,10 +406,93 @@ def pro_output_satisfies_required_schema(state: dict[str, Any], output_path: Pat
     if not labels:
         return True
     try:
-        output = output_path.read_text(encoding="utf-8", errors="strict").casefold()
+        output = output_path.read_text(encoding="utf-8", errors="strict")
     except (OSError, UnicodeDecodeError):
         return False
-    return all(label.casefold() in output for label in labels)
+    heading_re = re.compile(
+        r"(?m)^\s{0,3}#{1,6}\s+(?:\d+\.\s+)?(?:`(?P<ticked>[A-Z][A-Z0-9_]+)(?::[^`]*)?`|(?P<plain>[A-Z][A-Z0-9_]+)(?::\s*[^\r\n]*)?)\s*$"
+    )
+    headings = list(heading_re.finditer(output))
+    sections: dict[str, str] = {}
+    for index, heading in enumerate(headings):
+        label = (heading.group("ticked") or heading.group("plain") or "").casefold()
+        next_start = headings[index + 1].start() if index + 1 < len(headings) else len(output)
+        if label and output[heading.end():next_start].strip():
+            sections[label] = "present"
+    return all(label.casefold() in sections for label in labels)
+
+
+def promote_terminal_harvest_candidate(
+    run_dir: Path,
+    *,
+    candidate_path: Path,
+    expected_candidate_sha256: str,
+) -> dict[str, Any]:
+    """Promote one already observed terminal candidate without launching Oracle."""
+    directory = run_dir.expanduser().resolve(strict=True)
+    state_path = directory / "state.json"
+    state = STATE.load_state(state_path)
+    if str(state.get("session_authority") or "") != "terminal_observed":
+        raise OracleRunError(
+            "PROMOTION_TERMINAL_OBSERVATION_REQUIRED",
+            "only an exact terminal observation may promote a harvested candidate",
+        )
+    if state.get("terminal_harvested") is True:
+        raise OracleRunError("PROMOTION_ALREADY_HARVESTED", "the exact run is already harvested")
+    candidate = candidate_path.expanduser().resolve(strict=True)
+    if not STATE.is_within(directory, candidate) or not re.fullmatch(
+        r"recovery-(?:harvest|live)-candidate\.md", candidate.name
+    ):
+        raise OracleRunError(
+            "PROMOTION_CANDIDATE_INVALID",
+            "candidate must be the exact run's persisted recovery candidate",
+        )
+    actual_sha256 = STATE.sha256_file(candidate)
+    if actual_sha256 != expected_candidate_sha256.strip().casefold():
+        raise OracleRunError(
+            "PROMOTION_CANDIDATE_HASH_MISMATCH",
+            "candidate bytes differ from the supplied exact hash",
+            {"expected": expected_candidate_sha256, "actual": actual_sha256},
+        )
+    if not STATE.output_is_nonempty(candidate) or not pro_output_satisfies_required_schema(state, candidate):
+        raise OracleRunError(
+            "PROMOTION_CANDIDATE_SCHEMA_INCOMPLETE",
+            "candidate does not satisfy the exact Pro required-answer schema",
+        )
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    output_path = Path(str(artifacts.get("output") or directory / "output.md")).resolve()
+    if output_path != (directory / "output.md").resolve() or output_path.exists():
+        raise OracleRunError("PROMOTION_OUTPUT_PATH_INVALID", "exact run output path is unavailable")
+    temporary = output_path.with_name(f".{output_path.name}.promote-{os.getpid()}.tmp")
+    try:
+        with candidate.open("rb") as source, temporary.open("xb") as destination:
+            shutil.copyfileobj(source, destination)
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.replace(temporary, output_path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    layout = STATE.RunLayout(
+        str(state["run_id"]), str((state.get("oracle") or {}).get("slug") or ""), directory,
+        state_path, output_path, Path(str(artifacts.get("transcript") or directory / "transcript.md")),
+        Path(str(artifacts.get("stdout") or directory / "stdout.log")),
+        Path(str(artifacts.get("stderr") or directory / "stderr.log")),
+        Path(str(artifacts.get("browser_temp") or directory / "browser-temp")).resolve(),
+    )
+    STATE.write_transcript(layout)
+    task_outcome = STATE.classify_task_outcome(
+        output_path,
+        contract=str(state.get("task_outcome_contract") or "legacy"),
+        transport=str(state.get("transport") or "devspace"),
+    )
+    updated = STATE.update_state(
+        state_path, status="complete", exit_code=state.get("exit_code"), session_authority="terminal",
+        terminal_harvested=True, artifact_sha256=actual_sha256, transport_status="complete",
+        task_outcome=task_outcome, task_outcome_reason="deterministic-terminal-candidate-promotion",
+    )
+    return {"ok": True, "status": "complete", "run_dir": str(directory), "output_path": str(output_path),
+            "candidate_path": str(candidate), "artifact_sha256": actual_sha256, "result": updated}
 
 
 def execute_run(
@@ -1226,6 +1316,10 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     adjudicate_parser.add_argument("--reason", required=True)
+    promote_parser = commands.add_parser("promote-harvest-candidate")
+    promote_parser.add_argument("--run-dir", type=Path, required=True)
+    promote_parser.add_argument("--candidate-path", type=Path, required=True)
+    promote_parser.add_argument("--expected-candidate-sha256", required=True)
     settle_parser = commands.add_parser("settle-no-submission")
     settle_parser.add_argument("--run-dir", type=Path, required=True)
     settle_parser.add_argument(
@@ -1257,6 +1351,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 expected_output_sha256=args.expected_output_sha256,
                 task_outcome=args.task_outcome,
                 reason=args.reason,
+            )
+        elif args.command == "promote-harvest-candidate":
+            payload = promote_terminal_harvest_candidate(
+                args.run_dir,
+                candidate_path=args.candidate_path,
+                expected_candidate_sha256=args.expected_candidate_sha256,
             )
         else:
             payload = settle_user_confirmed_no_submission(

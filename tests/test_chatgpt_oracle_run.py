@@ -1398,6 +1398,80 @@ def test_pro_structured_mission_rejects_short_terminal_preamble(tmp_path: Path) 
     assert restored["result"]["session_authority"] == "live"
 
 
+def test_pro_terminal_candidate_with_all_ticked_sections_promotes_without_browser(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+    manifest_path = pro_manifest(tmp_path)
+    (tmp_path / "prompt.txt").write_text(
+        "# Mission\n\n## Required answer schema\n\n"
+        "1. `DIRECTION_VERDICT`: decision.\n"
+        "2. `WEB_MULTI_NEEDED: YES|NO`: reason.\n"
+        "3. `WHY`: evidence.\n"
+        "4. `SELECTED_ROUTE_ID`: route.\n"
+        "5. `SEED_AUTHORITY`: authority.\n"
+        "6. `MANAGER_AUTHORITY`: authority.\n"
+        "7. `DATA_AND_WINDOW`: data.\n"
+        "8. `COST_AND_FUNDING`: costs.\n"
+        "9. `PRE_PNL_GATES`: gates.\n"
+        "10. `CONTROLS`: controls.\n"
+        "11. `RISK_AND_LEVERAGE`: risk.\n"
+        "12. `RESOURCE_CONTRACT`: resources.\n"
+        "13. `NO_RETUNE_BOUNDARY`: boundary.\n"
+        "14. `EXACT_TERMINAL_VERDICTS`: verdicts.\n"
+        "15. `REGULAR_WEB_IMPLEMENTATION_MISSION`: mission.\n"
+        "16. `NEXT_ACTION`: action.\n",
+        encoding="utf-8",
+    )
+    initial = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=popen_for(7, None, {}, []),
+    )
+    run_dir = Path(initial["run_dir"])
+    labels = (
+        "DIRECTION_VERDICT", "WEB_MULTI_NEEDED: NO", "WHY", "SELECTED_ROUTE_ID",
+        "SEED_AUTHORITY", "MANAGER_AUTHORITY", "DATA_AND_WINDOW", "COST_AND_FUNDING",
+        "PRE_PNL_GATES", "CONTROLS", "RISK_AND_LEVERAGE", "RESOURCE_CONTRACT",
+        "NO_RETUNE_BOUNDARY", "EXACT_TERMINAL_VERDICTS",
+        "REGULAR_WEB_IMPLEMENTATION_MISSION", "NEXT_ACTION",
+    )
+    answer = "\n\n".join(
+        f"## {index}. `{label}`\n\ncontent {index}"
+        for index, label in enumerate(labels, start=1)
+    )
+
+    candidate = run_dir / "recovery-harvest-candidate.md"
+    candidate.write_text(answer, encoding="utf-8")
+    runner.STATE.update_state(
+        run_dir / "state.json",
+        status="attention_required",
+        session_authority="terminal_observed",
+        terminal_harvested=False,
+    )
+    state = runner.STATE.load_state(run_dir / "state.json")
+    expected_sha256 = runner.STATE.sha256_file(candidate)
+
+    assert state["session_authority"] == "terminal_observed"
+    assert runner.pro_output_satisfies_required_schema(state, candidate) is True
+
+    promoted = runner.promote_terminal_harvest_candidate(
+        run_dir,
+        candidate_path=candidate,
+        expected_candidate_sha256=expected_sha256,
+    )
+    completed = runner.STATE.load_state(run_dir / "state.json")
+
+    assert promoted["ok"] is True
+    assert promoted["artifact_sha256"] == expected_sha256
+    assert candidate.is_file()
+    assert Path(promoted["output_path"]).read_text(encoding="utf-8") == answer
+    assert completed["status"] == "complete"
+    assert completed["session_authority"] == "terminal"
+    assert completed["terminal_harvested"] is True
+
+
 def test_live_recovery_holds_one_exact_slug_connection_until_terminal(
     tmp_path: Path,
 ) -> None:
