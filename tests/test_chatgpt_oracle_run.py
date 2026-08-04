@@ -158,6 +158,16 @@ def duplicate_prompt_popen(command, **kwargs):
     return Process(1, [])
 
 
+def profile_copy_ebusy_popen(command, **kwargs):
+    source = Path(command[command.index("--copy-profile") + 1]) / "Default" / "Network" / "Cookies"
+    destination = Path(kwargs["env"]["TEMP"]) / "oracle-browser-test" / "Default" / "Network" / "Cookies"
+    kwargs["stdout"].write(
+        f"ERROR: EBUSY: resource busy or locked, copyfile '{source}' -> '{destination}'\n".encode("utf-8")
+    )
+    kwargs["stdout"].flush()
+    return Process(1, [])
+
+
 def test_dry_run_never_executes_and_has_no_file_flag(tmp_path: Path) -> None:
     runner = load_runner()
     calls = []
@@ -836,6 +846,68 @@ def test_oracle_global_prompt_duplicate_is_proven_pre_submit_and_releases_projec
     )
     assert second["ok"] is True
     assert launches
+
+
+def test_profile_copy_ebusy_is_proven_pre_submit_and_releases_project(tmp_path: Path) -> None:
+    runner = load_runner()
+    seed = tmp_path.parent / f"{tmp_path.name}-profile"
+    cookies = seed / "Default" / "Network" / "Cookies"
+    cookies.parent.mkdir(parents=True)
+    cookies.write_text("seed", encoding="utf-8")
+    result = execute_run(
+        runner,
+        pro_manifest(tmp_path, run_id="c" * 32, copy_profile=str(seed)),
+        run_factory=version_runner,
+        popen_factory=profile_copy_ebusy_popen,
+    )
+    run_dir = Path(result["run_dir"])
+    state = runner.STATE.load_state(run_dir / "state.json")
+
+    assert result["status"] == "pre_submit_failed"
+    assert result["safe_for_fresh_run"] is True
+    assert state["session_authority"] == "pre_submit"
+    assert state["transport_status"] == "failed_pre_submit"
+    assert state["task_outcome"] == "not_executed"
+    assert state["pre_submit_failure"]["code"] == "ORACLE_PROFILE_COPY_EBUSY_PRELAUNCH_FAILED"
+    assert runner.STATE.unresolved_project_sessions(
+        runner.STATE.load_manifest(pro_manifest(tmp_path)).run_root,
+        tmp_path,
+    ) == []
+
+
+def test_recovery_repairs_legacy_profile_copy_ebusy_without_oracle_call(tmp_path: Path) -> None:
+    runner = load_runner()
+    seed = tmp_path.parent / f"{tmp_path.name}-profile"
+    cookies = seed / "Default" / "Network" / "Cookies"
+    cookies.parent.mkdir(parents=True)
+    cookies.write_text("seed", encoding="utf-8")
+    initial = execute_run(
+        runner,
+        pro_manifest(tmp_path, run_id="d" * 32, copy_profile=str(seed)),
+        run_factory=version_runner,
+        popen_factory=profile_copy_ebusy_popen,
+    )
+    run_dir = Path(initial["run_dir"])
+    state_path = run_dir / "state.json"
+    legacy = runner.STATE.load_state(state_path)
+    legacy.update({"session_authority": "submitted_unknown", "transport_status": "failed", "task_outcome": "pending"})
+    legacy.pop("pre_submit_failure", None)
+    runner.STATE.write_json_atomic(state_path, legacy)
+    calls: list[bool] = []
+
+    recovered = runner.recover_run(
+        run_dir,
+        action="harvest",
+        oracle_command=["oracle"],
+        popen_factory=lambda *args, **kwargs: calls.append(True),
+    )
+    settled = runner.STATE.load_state(state_path)
+
+    assert recovered["status"] == "pre_submit_failed"
+    assert recovered["safe_for_fresh_run"] is True
+    assert settled["session_authority"] == "pre_submit"
+    assert settled["task_outcome"] == "not_executed"
+    assert calls == []
 
 
 def test_recovery_settles_legacy_duplicate_prompt_lock_without_oracle_call(tmp_path: Path) -> None:

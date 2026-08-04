@@ -96,6 +96,10 @@ ORACLE_NO_RECOVERABLE_URL_MARKER = (
 USER_CONFIRMED_NO_SUBMISSION = "user-confirmed-no-submission"
 USER_CONFIRMED_EXECUTION_ENDED = "user-confirmed-task-ended"
 ORACLE_RECOVERY_STATE_RE = re.compile(r"(?im)^\s*State:\s*[a-z][a-z0-9_-]*\s*$")
+ORACLE_PROFILE_COPY_EBUSY_RE = re.compile(
+    r"(?im)^(?:ERROR:\s*|User error \(browser-automation\):\s*)?"
+    r"EBUSY: resource busy or locked, copyfile ['\"](?P<source>[^'\"]+)['\"] -> ['\"](?P<destination>[^'\"]+)['\"]\s*$"
+)
 # Upstream Oracle copies a signed-in browser profile with rsync.  On POSIX
 # hosts without rsync the copy fails after launch, so feasibility is decided
 # while loading the manifest instead of crashing mid-launch.  The pinned
@@ -1224,9 +1228,62 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
     }
 
 
+def proven_pre_submit_profile_copy_ebusy(state_path: Path) -> dict[str, Any] | None:
+    """Prove Oracle failed while copying its profile, before it could open ChatGPT."""
+    state = load_state(state_path)
+    if str(state.get("session_authority") or "") not in {"pre_submit", "submitted_unknown"}:
+        return None
+    if state.get("terminal_harvested") is True or _state_has_conversation_url(state):
+        return None
+    profile = state.get("profile") if isinstance(state.get("profile"), dict) else {}
+    copy_profile = Path(str(profile.get("copy_profile") or ""))
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    browser_temp = Path(str(artifacts.get("browser_temp") or ""))
+    output = Path(str(artifacts.get("output") or ""))
+    stdout_record = _artifact_bytes(state, "stdout")
+    stderr_record = _artifact_bytes(state, "stderr")
+    if (
+        not str(copy_profile)
+        or not str(browser_temp)
+        or output_is_nonempty(output)
+        or stdout_record is None
+        or stderr_record is None
+    ):
+        return None
+    _, stdout_bytes = stdout_record
+    _, stderr_bytes = stderr_record
+    text = (stdout_bytes + b"\n" + stderr_bytes).decode("utf-8", errors="replace")
+    if "https://chatgpt.com/c/" in text.casefold():
+        return None
+    match = ORACLE_PROFILE_COPY_EBUSY_RE.search(text)
+    if match is None:
+        return None
+    source = Path(match.group("source"))
+    destination = Path(match.group("destination"))
+    expected_source = copy_profile / "Default" / "Network" / "Cookies"
+    if (
+        source.resolve() != expected_source.resolve()
+        or not is_within(browser_temp.resolve(), destination.resolve())
+        or destination.name.casefold() != "cookies"
+    ):
+        return None
+    return {
+        "schema": "codex.chatgpt.oracle-pre-submit-host-failure/v1",
+        "code": "ORACLE_PROFILE_COPY_EBUSY_PRELAUNCH_FAILED",
+        "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+        "output_absent": True,
+        "conversation_url_absent": True,
+        "failure_reason": "oracle-profile-copy-ebusy",
+        "copy_source": str(source.resolve()),
+        "copy_destination": str(destination.resolve()),
+    }
+
+
 def proven_pre_submit_failure(state_path: Path) -> dict[str, Any] | None:
     return (
         proven_pre_submit_rejection(state_path)
+        or proven_pre_submit_profile_copy_ebusy(state_path)
         or proven_pre_submit_host_failure(state_path)
         or proven_user_confirmed_no_submission(state_path)
     )
@@ -1263,6 +1320,8 @@ def settle_proven_pre_submit_failure(state_path: Path) -> dict[str, Any] | None:
         return load_state(state_path)
     evidence = proven_pre_submit_host_failure(state_path)
     if evidence is None:
+        evidence = proven_pre_submit_profile_copy_ebusy(state_path)
+    if evidence is None:
         return None
     payload = load_state(state_path)
     payload.update({
@@ -1272,8 +1331,12 @@ def settle_proven_pre_submit_failure(state_path: Path) -> dict[str, Any] | None:
         "terminal_harvested": False,
         "artifact_sha256": None,
         "transport_status": "failed_pre_submit",
-        "task_outcome": "pending",
-        "task_outcome_reason": "prelaunch-host-failure",
+        "task_outcome": "not_executed" if evidence["code"] == "ORACLE_PROFILE_COPY_EBUSY_PRELAUNCH_FAILED" else "pending",
+        "task_outcome_reason": (
+            "oracle-profile-copy-ebusy-pre-submit"
+            if evidence["code"] == "ORACLE_PROFILE_COPY_EBUSY_PRELAUNCH_FAILED"
+            else "prelaunch-host-failure"
+        ),
         "pre_submit_failure": evidence,
     })
     write_json_atomic(state_path, payload)
