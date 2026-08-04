@@ -1361,6 +1361,40 @@ def test_live_recovery_settles_stalled_inside_one_exact_slug_process(
     assert Path(settled["output_path"]).read_text(encoding="utf-8") == "durable exact answer"
 
 
+def test_stalled_exact_observation_retains_live_authority_and_project_lock(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+    initial = execute_run(
+        runner,
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(7, None, {}, []),
+    )
+    run_dir = Path(initial["run_dir"])
+
+    def stalled_observer(command, **kwargs):
+        kwargs["stdout"].write(b"State: stalled\n")
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    recovered = runner.recover_run(
+        run_dir,
+        action="live",
+        oracle_command=["oracle"],
+        popen_factory=stalled_observer,
+        settle_timeout_seconds=0,
+    )
+
+    state = runner.STATE.load_state(run_dir / "state.json")
+    assert recovered["ok"] is False
+    assert recovered["status"] == "session_live"
+    assert recovered["exact_session_state"] == "stalled"
+    assert state["status"] == "running"
+    assert state["session_authority"] == "live"
+    assert state["terminal_harvested"] is False
+
+
 def test_live_recovery_cli_defaults_to_one_ninety_minute_settle_process() -> None:
     runner = load_runner()
     args = runner.build_parser().parse_args([

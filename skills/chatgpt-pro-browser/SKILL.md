@@ -130,6 +130,31 @@ arithmetic, and next actions. Preflight fails closed if a required category is
 missing without an explicit omission record, if hashes are stale, or if the
 packet cannot be tied to the exact project root and question.
 
+## Required Web Multi decision
+
+Every Pro mission must end by requiring this exact decision block in the Pro
+answer:
+
+```text
+WEB_MULTI_NEEDED: YES|NO
+WEB_MULTI_REASON: evidence-based reason tied to the decision and alternatives
+```
+
+Pro must choose `YES` only when three to five materially independent regular
+GPT investigations would improve a non-trivial decision; it must not use Web
+Multi for a trivial, single-answer, or purely mechanical question. If the
+answer is `YES`, Pro must additionally author a ready-to-run Web Multi-GPT Very
+High mission that specifies: three to five independent roles and questions,
+the same project maximum-context evidence and the durable Pro answer each role
+must use, stable lane order, and synthesis/judge criteria. The mission must
+preserve the exact project root, read-only evidence boundaries, and the normal
+same-project serialization contract.
+
+After a durable Pro answer says `WEB_MULTI_NEEDED: YES`, Codex starts that
+ready-to-run Oracle Web Multi mission automatically without a routine user
+choice. It waits for the exact Pro session to be terminal first, keeps the
+same-project lock/slug safety, and never resubmits or replaces the Pro session.
+
 ## Preflight
 
 1. Do not run the resource guard as a routine or pressure gate.

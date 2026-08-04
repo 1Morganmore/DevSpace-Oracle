@@ -264,7 +264,10 @@ def append_error(path: Path, message: str) -> None:
 
 SESSION_STATE_RE = re.compile(r"(?im)^\s*State:\s*([a-z][a-z0-9_-]*)\s*$")
 SESSION_URL_RE = re.compile(r"(?im)^\s*URL:\s*(https://chatgpt\.com/c/[^\s?#]+)\s*$")
-LIVE_SESSION_STATES = {"running", "streaming", "thinking", "active"}
+# Oracle's observer may emit ``stalled`` after a quiet DOM interval even while
+# ChatGPT is still visibly working in the exact conversation.  It is therefore
+# not terminal evidence and must retain the exact-slug lock and live authority.
+LIVE_SESSION_STATES = {"running", "streaming", "thinking", "active", "stalled"}
 TERMINAL_SESSION_STATES = {
     "complete", "completed", "done", "finished", "failed", "error", "cancelled", "canceled",
 }
@@ -1094,7 +1097,7 @@ def recover_run(
             still_live_or_unsettled = (
                 result.get("status") in {"session_live", "terminal_settle_disagreement"}
                 or authority in {"live", "submitted_unknown"}
-                and exact_state in {"", "active", "running", "streaming", "thinking", "stalled"}
+                and exact_state in {"", *LIVE_SESSION_STATES}
             )
             if not still_live_or_unsettled:
                 return result
@@ -1105,7 +1108,10 @@ def recover_run(
                     "ok": False,
                     "status": "live_settle_timeout",
                     "settle_timeout_seconds": settle_timeout_seconds,
-                    "next_action": "resume the same exact-slug live recovery; never replace or resubmit",
+                    "next_action": (
+                        "keep the existing exact-slug recovery ownership attached until a later terminal "
+                        "harvest; do not relaunch, replace, or resubmit the conversation"
+                    ),
                 }
             sleep(min(settle_interval_seconds, remaining))
             result = _recover_run_locked(
