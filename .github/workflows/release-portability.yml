@@ -8,8 +8,15 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.11' }
       - run: python -m pip install -r requirements-dev.txt
-      - run: sudo -E env "PATH=$PATH" "$(command -v python)" -m pytest -q tests/test_verification_gates.py::test_fast_gate_posix_escalates_for_sigterm_resistant_descendant
-      - run: sudo -E env "PATH=$PATH" "$(command -v python)" -m pytest -q tests/test_multi_gpt_runtime.py::test_child_slot_is_held_until_detached_descendant_is_observed_dead tests/test_multi_gpt_runtime.py::test_supervisor_cancel_timeout_overlap_reuses_one_termination_receipt
+      - name: Enable and verify unprivileged PID namespaces
+        shell: bash
+        run: |
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          fi
+          unshare --user --map-root-user --pid --fork --kill-child=SIGKILL --mount-proc true
+      - run: python -m pytest -q tests/test_verification_gates.py::test_fast_gate_posix_escalates_for_sigterm_resistant_descendant
+      - run: python -m pytest -q tests/test_multi_gpt_runtime.py::test_child_slot_is_held_until_detached_descendant_is_observed_dead tests/test_multi_gpt_runtime.py::test_supervisor_cancel_timeout_overlap_reuses_one_termination_receipt
   portable:
     runs-on: windows-latest
     steps:
