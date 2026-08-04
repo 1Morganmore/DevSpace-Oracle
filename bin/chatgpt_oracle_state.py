@@ -41,6 +41,7 @@ SESSION_AUTHORITY_RANK = {
     "live": 2,
     "terminal_observed": 3,
     "terminal": 4,
+    "settled_executed": 5,
 }
 WAIT_OBJECT_0 = 0
 WAIT_ABANDONED = 0x80
@@ -93,6 +94,7 @@ ORACLE_NO_RECOVERABLE_URL_MARKER = (
     "session metadata has no recoverable ChatGPT conversation URL"
 )
 USER_CONFIRMED_NO_SUBMISSION = "user-confirmed-no-submission"
+USER_CONFIRMED_EXECUTION_ENDED = "user-confirmed-task-ended"
 ORACLE_RECOVERY_STATE_RE = re.compile(r"(?im)^\s*State:\s*[a-z][a-z0-9_-]*\s*$")
 # Upstream Oracle copies a signed-in browser profile with rsync.  On POSIX
 # hosts without rsync the copy fails after launch, so feasibility is decided
@@ -1058,6 +1060,70 @@ def settle_user_confirmed_no_submission(
     return payload
 
 
+def proven_user_confirmed_execution_ended(state_path: Path) -> dict[str, Any] | None:
+    """Revalidate the narrow post-submit timeout settlement before releasing a lock."""
+    state = load_state(state_path)
+    reference = state.get("user_confirmed_execution_ended")
+    expected_path = state_path.parent / "user-confirmed-execution-ended.json"
+    if (
+        not isinstance(reference, dict)
+        or reference.get("schema") != "codex.chatgpt.oracle-settlement-reference/v1"
+        or Path(str(reference.get("path") or "")).resolve() != expected_path.resolve()
+        or expected_path.is_symlink()
+    ):
+        return None
+    try:
+        raw = expected_path.read_bytes()
+        if sha256_file(expected_path) != str(reference.get("sha256") or ""):
+            return None
+        recorded = json.loads(raw.decode("utf-8", errors="strict"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if (
+        recorded.get("schema") != "codex.chatgpt.oracle-user-confirmed-execution-ended/v1"
+        or recorded.get("code") != "ORACLE_USER_CONFIRMED_EXECUTION_ENDED"
+        or recorded.get("confirmation") != USER_CONFIRMED_EXECUTION_ENDED
+        or not str(recorded.get("reason") or "").strip()
+        or str(state.get("session_authority") or "") != "settled_executed"
+        or state.get("terminal_harvested") is not False
+        or str(state.get("transport_status") or "") != "post_submit_provider_delivery_timeout_settled"
+        or str(state.get("task_outcome") or "") != "executed"
+    ):
+        return None
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    output = Path(str(artifacts.get("output") or ""))
+    project_root = Path(str(state.get("project_root") or ""))
+    if (
+        not output.is_file()
+        or output.is_symlink()
+        or sha256_file(output) != str(recorded.get("output_sha256") or "")
+        or not project_root.is_dir()
+        or recorded.get("run_id") != state.get("run_id")
+        or recorded.get("project_root") != str(project_root.resolve())
+        or recorded.get("conversation_url") != str((state.get("oracle") or {}).get("conversation_url") or "")
+    ):
+        return None
+    evidence = recorded.get("execution_evidence")
+    if not isinstance(evidence, list) or not evidence:
+        return None
+    for item in evidence:
+        if not isinstance(item, dict):
+            return None
+        path = Path(str(item.get("path") or ""))
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError:
+            return None
+        if (
+            path.is_symlink()
+            or not resolved.is_file()
+            or not is_within(project_root.resolve(), resolved)
+            or sha256_file(resolved) != str(item.get("sha256") or "")
+        ):
+            return None
+    return recorded
+
+
 def proven_pre_submit_rejection(state_path: Path) -> dict[str, Any] | None:
     """Return immutable evidence only for Oracle's own pre-submit prompt dedup rejection."""
     state = load_state(state_path)
@@ -1289,6 +1355,8 @@ def resolve_lifecycle(state: dict[str, Any], *, output_is_present: bool | None =
     if status == "abandoned":
         return {"lifecycle": "abandoned", "authority_source": "explicit-abandonment"}
     # 1. Exact terminal web evidence.
+    if authority == "settled_executed" and outcome == "executed":
+        return {"lifecycle": "complete", "authority_source": "user-confirmed-execution-settlement"}
     if authority == "terminal" and harvested and has_output:
         if outcome == "not_executed":
             return {"lifecycle": "needs_attention", "authority_source": "exact-terminal-evidence"}
@@ -1365,12 +1433,19 @@ def unresolved_project_sessions(
             continue
         authority = str(payload.get("session_authority") or "").strip().casefold()
         settlement_artifact = candidate.parent / "user-confirmed-no-submission.json"
+        execution_settlement_artifact = candidate.parent / "user-confirmed-execution-ended.json"
         settlement_derived = (
             "user_confirmed_no_submission" in payload
             or str(payload.get("transport_status") or "") == "not_submitted_user_confirmed"
             or str(payload.get("task_outcome_reason") or "")
             == "user-confirmed-no-submission-after-prompt-timeout"
             or settlement_artifact.exists()
+        )
+        execution_settlement_derived = (
+            "user_confirmed_execution_ended" in payload
+            or str(payload.get("transport_status") or "")
+            == "post_submit_provider_delivery_timeout_settled"
+            or execution_settlement_artifact.exists()
         )
         invalid_settlement = False
         if (
@@ -1381,6 +1456,13 @@ def unresolved_project_sessions(
             # A missing or changed settlement artifact revokes the release and
             # restores fail-closed ownership before any new submission.
             authority = "submitted_unknown"
+            invalid_settlement = True
+        if (
+            authority == "settled_executed"
+            and execution_settlement_derived
+            and proven_user_confirmed_execution_ended(candidate) is None
+        ):
+            authority = "live"
             invalid_settlement = True
         # Legacy running records fail closed because the provider may still be
         # active. Legacy attention-required records predate explicit session
