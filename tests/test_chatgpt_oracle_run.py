@@ -1273,7 +1273,7 @@ def test_running_exact_session_cannot_publish_partial_harvest(tmp_path: Path) ->
     assert not (run_dir / "recovery-harvest-candidate.md").exists()
 
 
-def test_terminal_observation_cannot_regress_to_live_and_later_harvest_settles(tmp_path: Path) -> None:
+def test_later_exact_live_observation_restores_provisional_terminal_authority(tmp_path: Path) -> None:
     runner = load_runner()
     result = execute_run(
         runner,
@@ -1298,8 +1298,8 @@ def test_terminal_observation_cannot_regress_to_live_and_later_harvest_settles(t
         oracle_command=["oracle"],
         popen_factory=observation("completed"),
     )
-    # Reproduce state already regressed by the previously installed runner;
-    # the durable exact live-observer log must restore terminal authority.
+    # A later exact live observer is stronger than the provisional terminal
+    # observation because there is still no durable terminal artifact.
     regressed = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
     regressed["status"] = "running"
     regressed["session_authority"] = "live"
@@ -1329,9 +1329,9 @@ def test_terminal_observation_cannot_regress_to_live_and_later_harvest_settles(t
 
     assert terminal["status"] == "terminal_observed"
     assert terminal["result"]["session_authority"] == "terminal_observed"
-    assert disagreement["status"] == "terminal_settle_disagreement"
-    assert disagreement["result"]["status"] == "attention_required"
-    assert disagreement["result"]["session_authority"] == "terminal_observed"
+    assert disagreement["status"] == "session_live"
+    assert disagreement["result"]["status"] == "running"
+    assert disagreement["result"]["session_authority"] == "live"
     assert disagreement["result"]["terminal_harvested"] is False
     assert output_absent_during_disagreement
     assert blocked_duplicate["ok"] is False
@@ -1343,6 +1343,59 @@ def test_terminal_observation_cannot_regress_to_live_and_later_harvest_settles(t
     assert settled["status"] == "complete"
     assert settled["result"]["session_authority"] == "terminal"
     assert Path(settled["output_path"]).read_text(encoding="utf-8") == "durable answer"
+
+
+def test_pro_structured_mission_rejects_short_terminal_preamble(tmp_path: Path) -> None:
+    runner = load_runner()
+    manifest_path = pro_manifest(tmp_path)
+    (tmp_path / "prompt.txt").write_text(
+        "# Mission\n\n## Required answer schema\n\n"
+        "1. `DIRECTION_VERDICT`: decision.\n"
+        "2. `NEXT_ACTION`: action.\n",
+        encoding="utf-8",
+    )
+    initial = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=popen_for(7, None, {}, []),
+    )
+    run_dir = Path(initial["run_dir"])
+
+    def completed_preamble(command, **kwargs):
+        candidate = Path(command[command.index("--write-output") + 1])
+        candidate.write_text("I'll cross-check the evidence, then deliver the decision.", encoding="utf-8")
+        kwargs["stdout"].write(b"State: completed\n")
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    rejected = runner.recover_run(
+        run_dir,
+        action="harvest",
+        oracle_command=["oracle"],
+        popen_factory=completed_preamble,
+    )
+    state = runner.STATE.load_state(run_dir / "state.json")
+
+    assert rejected["ok"] is False
+    assert rejected["status"] == "pro_output_incomplete"
+    assert state["session_authority"] == "terminal_observed"
+    assert state["terminal_harvested"] is False
+    assert not Path(state["artifacts"]["output"]).exists()
+
+    def running_observer(command, **kwargs):
+        kwargs["stdout"].write(b"State: running\n")
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    restored = runner.recover_run(
+        run_dir,
+        action="live",
+        oracle_command=["oracle"],
+        popen_factory=running_observer,
+    )
+    assert restored["status"] == "session_live"
+    assert restored["result"]["session_authority"] == "live"
 
 
 def test_live_recovery_settles_stalled_inside_one_exact_slug_process(

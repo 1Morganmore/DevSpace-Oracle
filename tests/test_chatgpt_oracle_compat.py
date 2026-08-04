@@ -62,6 +62,38 @@ def test_exact_version_patch_is_hash_gated_idempotent_and_backed_up(tmp_path: Pa
     assert (backup / "sample.txt").read_bytes() == b"before\n"
 
 
+def test_patch_application_tolerates_only_line_ending_drift_before_hash_validation(
+    tmp_path: Path,
+) -> None:
+    compat = load_compat()
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "package.json").write_text(json.dumps({"version": "0.16.1"}), encoding="utf-8")
+    (package / "sample.txt").write_bytes(b"before\r\n")
+    patches = tmp_path / "patches"
+    patches.mkdir()
+    (patches / "sample.patch").write_text(
+        "diff --git a/sample.txt b/sample.txt\n"
+        "--- a/sample.txt\n"
+        "+++ b/sample.txt\n"
+        "@@ -1 +1 @@\n"
+        "-before\n"
+        "+after\n",
+        encoding="utf-8",
+    )
+    compat.PATCHES = {
+        "sample.txt": {
+            "patch": "sample.patch",
+            "pristine": digest(b"before\r\n"),
+            "patched": digest(b"after\n"),
+        }
+    }
+    compat.patch_root = lambda: patches
+    result = compat.ensure_oracle_compatibility("oracle 0.16.1", package_root=package)
+    assert result["changed"] == ["sample.txt"]
+    assert (package / "sample.txt").read_bytes() == b"after\n"
+
+
 def test_unknown_oracle_version_or_file_hash_fails_closed(tmp_path: Path) -> None:
     compat = load_compat()
     with pytest.raises(compat.OracleCompatError) as version:
@@ -206,8 +238,10 @@ def test_copy_profile_recovery_patch_reuses_only_the_persisted_profile_seed() ->
     assert "return copyProfileSource.trim();" in patch
     assert 'mkdtemp(path.join(os.tmpdir(), "oracle-recovery-"))' in patch
     assert "wrapEphemeralRecoveryChrome" in patch
+    assert "const DEFAULT_READY_TIMEOUT_MS = 90_000;" in patch
     assert contract["pristine"] == "8c7d841bc078af20c8922ec435f62e00df7a40605583fbd89334696b3ddb386b"
-    assert contract["patched"] == "650ffe9bdbbaf799510e8cacaa8ba8407322bbbb175e790a3cf7777fa14772fe"
+    assert contract["patched"] == "168d665fa7c6cc0ef5094a990e94e7a3ae57f2d3bebcc5c2625cb6cff0cb89b1"
+    assert "650ffe9bdbbaf799510e8cacaa8ba8407322bbbb175e790a3cf7777fa14772fe" in contract["legacy_patched"]
 
 
 def test_hidden_window_patch_supports_windows_without_headless_mode() -> None:

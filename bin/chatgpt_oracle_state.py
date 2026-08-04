@@ -660,6 +660,7 @@ def update_state(
     host_watchdog: dict[str, Any] | None = None,
     conversation_url: str | None = None,
     conversation_url_conflict: dict[str, str] | None = None,
+    exact_live_observation: bool = False,
 ) -> dict[str, Any]:
     if status not in STATUSES:
         raise OracleStateError("STATUS_INVALID", "invalid Oracle run status")
@@ -672,10 +673,22 @@ def update_state(
         current_authority = str(payload.get("session_authority") or "")
         current_rank = SESSION_AUTHORITY_RANK.get(current_authority, -1)
         requested_rank = SESSION_AUTHORITY_RANK.get(session_authority, -1)
-        payload["session_authority"] = (
-            current_authority if current_rank > requested_rank else session_authority
+        # A terminal observation without a harvested artifact is provisional:
+        # an exact later live observation is stronger evidence that the same
+        # conversation is still generating.  Never apply this exception to a
+        # durably harvested terminal result.
+        restore_live = (
+            exact_live_observation
+            and current_authority == "terminal_observed"
+            and session_authority == "live"
+            and payload.get("terminal_harvested") is not True
         )
-        if current_rank > requested_rank and status == "running":
+        payload["session_authority"] = (
+            session_authority
+            if restore_live or current_rank <= requested_rank
+            else current_authority
+        )
+        if current_rank > requested_rank and not restore_live and status == "running":
             payload["status"] = (
                 "complete"
                 if current_authority == "terminal" and payload.get("terminal_harvested") is True

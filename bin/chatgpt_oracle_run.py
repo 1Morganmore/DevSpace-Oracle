@@ -358,13 +358,51 @@ def historical_session_authority(run_dir: Path, state: dict[str, Any]) -> str:
         and STATE.output_is_nonempty(Path(str(state["artifacts"]["output"])))
     ):
         return "terminal"
+    # Recovery logs are exact observer evidence.  A later `running` observation
+    # supersedes an earlier provisional `completed`; only a harvested artifact
+    # may make terminal authority irreversible.
     strongest = current
-    for path in sorted(run_dir.glob("recovery-*-stdout.log"), key=lambda item: item.name):
+    for path in sorted(
+        run_dir.glob("recovery-*-stdout.log"), key=lambda item: (item.stat().st_mtime_ns, item.name)
+    ):
         observed = exact_session_state(path)
         if observed in TERMINAL_SESSION_STATES:
             strongest = "terminal_observed"
-            break
+        elif observed in LIVE_SESSION_STATES:
+            strongest = "live"
     return strongest
+
+
+def pro_required_answer_labels(mission_path: Path) -> tuple[str, ...]:
+    """Return the explicit structured-answer labels, if a Pro mission requires them."""
+    try:
+        mission = mission_path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
+        return ()
+    marker = re.search(r"(?im)^\s*#+\s*Required answer schema\s*$", mission)
+    if marker is None:
+        return ()
+    section = mission[marker.end():]
+    next_heading = re.search(r"(?m)^\s*#+\s+", section)
+    if next_heading is not None:
+        section = section[:next_heading.start()]
+    labels = re.findall(r"`([A-Z][A-Z0-9_]+)`", section)
+    return tuple(dict.fromkeys(labels))
+
+
+def pro_output_satisfies_required_schema(state: dict[str, Any], output_path: Path) -> bool:
+    if str(state.get("transport") or "") != "pro-attachment-only":
+        return True
+    mission = state.get("mission") if isinstance(state.get("mission"), dict) else {}
+    mission_path = Path(str(mission.get("transport_path") or mission.get("path") or ""))
+    labels = pro_required_answer_labels(mission_path)
+    if not labels:
+        return True
+    try:
+        output = output_path.read_text(encoding="utf-8", errors="strict").casefold()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return all(label.casefold() in output for label in labels)
 
 
 def execute_run(
@@ -853,6 +891,7 @@ def _recover_run_locked(
             exit_code=exit_code,
             session_authority="live",
             conversation_url=observed_conversation_url,
+            exact_live_observation=True,
         )
         settle_disagreement = str(updated.get("session_authority") or "") in {
             "terminal_observed", "terminal",
@@ -892,10 +931,12 @@ def _recover_run_locked(
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
         }
+    candidate_satisfies_schema = pro_output_satisfies_required_schema(state, argv_output)
     if (
         exit_code == 0
         and observed_session_state in TERMINAL_SESSION_STATES
         and STATE.output_is_nonempty(argv_output)
+        and candidate_satisfies_schema
     ):
         os.replace(argv_output, output_path)
     layout = STATE.RunLayout(
@@ -914,6 +955,7 @@ def _recover_run_locked(
         exit_code == 0
         and observed_session_state in TERMINAL_SESSION_STATES
         and STATE.output_is_nonempty(output_path)
+        and candidate_satisfies_schema
     )
     # A failed recovery process is also not web-terminal evidence. Only an
     # exact terminal observation plus a nonempty durable output may complete.
@@ -965,7 +1007,11 @@ def _recover_run_locked(
         STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
     return {
         "ok": status == "complete",
-        "status": status,
+        "status": "pro_output_incomplete" if (
+            not harvested
+            and observed_session_state in TERMINAL_SESSION_STATES
+            and not candidate_satisfies_schema
+        ) else status,
         "run_dir": str(directory),
         "action": action,
         "exit_code": exit_code,

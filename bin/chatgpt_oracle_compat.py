@@ -19,7 +19,8 @@ PATCHES = {
     "dist/src/browser/recoverConversation.js": {
         "patch": "recoverConversation.patch",
         "pristine": "8c7d841bc078af20c8922ec435f62e00df7a40605583fbd89334696b3ddb386b",
-        "patched": "650ffe9bdbbaf799510e8cacaa8ba8407322bbbb175e790a3cf7777fa14772fe",
+        "patched": "168d665fa7c6cc0ef5094a990e94e7a3ae57f2d3bebcc5c2625cb6cff0cb89b1",
+        "legacy_patched": ["650ffe9bdbbaf799510e8cacaa8ba8407322bbbb175e790a3cf7777fa14772fe"],
     },
     "dist/src/browser/profileCopy.js": {
         "patch": "profileCopy.patch",
@@ -136,7 +137,7 @@ def _apply_patch(package_root: Path, patch_path: Path) -> None:
     isolated_env["GIT_CEILING_DIRECTORIES"] = str(package_root.parent)
     patch_bytes = patch_path.read_bytes().replace(b"\r\n", b"\n")
     check = subprocess.run(
-        ["git", "-c", "core.autocrlf=false", "apply", "--check", "-"],
+        ["git", "-c", "core.autocrlf=false", "apply", "--ignore-space-change", "--check", "-"],
         cwd=str(package_root),
         input=patch_bytes,
         capture_output=True,
@@ -151,7 +152,7 @@ def _apply_patch(package_root: Path, patch_path: Path) -> None:
             {"patch": str(patch_path), "stderr": (check.stderr or b"").decode("utf-8", errors="replace").strip()[-1200:]},
         )
     applied = subprocess.run(
-        ["git", "-c", "core.autocrlf=false", "apply", "-"],
+        ["git", "-c", "core.autocrlf=false", "apply", "--ignore-space-change", "-"],
         cwd=str(package_root),
         input=patch_bytes,
         capture_output=True,
