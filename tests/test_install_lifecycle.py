@@ -526,9 +526,38 @@ def test_doctor_accepts_current_v3_install_receipt_schema() -> None:
         assert result.returncode == 0, result.stdout
         report = json.loads(result.stdout)
         assert report['status'] == 'PASS'
+        assert report['oracle']['package'] == '@steipete/oracle@0.17.0'
+        assert report['devspace']['tested_version'] == '1.0.5'
+        assert 'npx -y @steipete/oracle@0.17.0 --version' in report['commands']
         assert any(item['code'] == 'LEGACY_CONTRACT_UNAVAILABLE' for item in report['warnings'])
         assert 'RECEIPT_INVALID' not in result.stdout
         assert 'unsupported install receipt schema' not in result.stdout
+
+
+def test_doctor_rejects_compatibility_module_with_unreceipted_patch_asset() -> None:
+    with tempfile.TemporaryDirectory() as home:
+        codex_home = Path(home)
+        installed = run_powershell(
+            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home, '-SkipDependencyInstall',
+        )
+        assert installed.returncode == 0, installed.stderr
+        readback = run_powershell('-File', str(ROOT / 'doctor.ps1'), '-CodexHome', home)
+        assert readback.returncode == 0, readback.stdout
+        receipt = next((codex_home / 'receipts').glob('codexpro-automation-*.json'))
+        value = json.loads(receipt.read_text(encoding='utf-8-sig'))
+        missing = 'bin/oracle-compat/0.17.0/assistantResponse.patch'
+        value['files'] = [record for record in value['files'] if record['path'] != missing]
+        (codex_home / missing).unlink()
+        receipt.write_text(json.dumps(value), encoding='utf-8')
+
+        result = run_powershell('-File', str(ROOT / 'doctor.ps1'), '-CodexHome', home)
+
+        assert result.returncode != 0
+        report = json.loads(result.stdout)
+        assert [
+            issue['path'] for issue in report['issues']
+            if issue['code'] == 'COMPAT_PATCH_ASSET_MISSING'
+        ] == [missing]
 
 
 def test_failed_dependency_preflight_leaves_existing_managed_file_byte_identical() -> None:
@@ -590,6 +619,8 @@ def test_temp_codex_home_install_and_rollback_is_exact_inverse() -> None:
         created = codex_home / 'bin' / 'chatgpt_agbrowse_composer.py'
         installed_pro_skill = codex_home / 'skills' / 'chatgpt-pro-browser' / 'SKILL.md'
         installed_pro_metadata = codex_home / 'skills' / 'chatgpt-pro-browser' / 'agents' / 'openai.yaml'
+        installed_oracle_patch = codex_home / 'bin' / 'oracle-compat' / '0.17.0' / 'assistantResponse.patch'
+        installed_devspace_patch = codex_home / 'bin' / 'devspace-compat' / '1.0.5' / 'workspaces.patch'
         assert overwritten.read_bytes() != original
         assert created.is_file()
         assert installed_pro_skill.read_bytes() == (
@@ -599,6 +630,8 @@ def test_temp_codex_home_install_and_rollback_is_exact_inverse() -> None:
             ROOT / 'skills' / 'chatgpt-pro-browser' / 'agents' / 'openai.yaml'
         ).read_bytes()
         assert b'allow_implicit_invocation: true' in installed_pro_metadata.read_bytes()
+        assert installed_oracle_patch.is_file()
+        assert installed_devspace_patch.is_file()
 
         rolled_back = run_powershell(
             '-File', str(ROOT / 'rollback.ps1'),
@@ -610,6 +643,8 @@ def test_temp_codex_home_install_and_rollback_is_exact_inverse() -> None:
         assert not created.exists()
         assert not installed_pro_skill.exists()
         assert not installed_pro_metadata.exists()
+        assert not installed_oracle_patch.exists()
+        assert not installed_devspace_patch.exists()
         assert '"status":  "COMPLETE"' in rolled_back.stdout
 
 
