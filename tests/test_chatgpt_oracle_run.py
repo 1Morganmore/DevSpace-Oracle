@@ -1273,6 +1273,47 @@ def test_running_exact_session_cannot_publish_partial_harvest(tmp_path: Path) ->
     assert not (run_dir / "recovery-harvest-candidate.md").exists()
 
 
+def test_delivery_timeout_after_visible_work_cannot_settle_a_terminal_harvest(tmp_path: Path) -> None:
+    """Regression: ChatGPT can keep executing after Oracle sees this error text."""
+    runner = load_runner()
+    result = execute_run(
+        runner,
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(4, None, {}, []),
+    )
+    run_dir = Path(result["run_dir"])
+
+    def timed_out_recovery(command, **kwargs):
+        candidate = Path(command[command.index("--write-output") + 1])
+        candidate.write_text("Message delivery timed out. Please try again.", encoding="utf-8")
+        kwargs["stdout"].write(
+            b"State: running\n"
+            b"State: completed\n"
+            b"Message delivery timed out. Please try again.\n"
+        )
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    recovered = runner.recover_run(
+        run_dir,
+        action="live",
+        oracle_command=["oracle"],
+        popen_factory=timed_out_recovery,
+    )
+    state = runner.STATE.load_state(run_dir / "state.json")
+
+    assert recovered["ok"] is False
+    assert recovered["status"] == "provider_delivery_timeout"
+    assert state["status"] == "running"
+    assert state["session_authority"] == "live"
+    assert state["terminal_harvested"] is False
+    assert state["transport_status"] == "post_submit_provider_delivery_timeout"
+    assert state["task_outcome"] == "pending"
+    assert not Path(state["artifacts"]["output"]).exists()
+    assert not (run_dir / "recovery-live-candidate.md").exists()
+
+
 def test_later_exact_live_observation_restores_provisional_terminal_authority(tmp_path: Path) -> None:
     runner = load_runner()
     result = execute_run(

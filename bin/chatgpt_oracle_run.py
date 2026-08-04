@@ -268,6 +268,10 @@ SESSION_URL_RE = re.compile(r"(?im)^\s*URL:\s*(https://chatgpt\.com/c/[^\s?#]+)\
 # not terminal evidence and must retain the exact-slug lock and live authority.
 LIVE_SESSION_STATES = {"running", "streaming", "thinking", "active", "stalled"}
 POST_SUBMIT_RESPONSE_TIMEOUT_MARKER = "assistant response timed out before completion"
+# This is emitted by ChatGPT's delivery surface after an interrupted response.
+# Oracle may still report ``State: completed`` and write the visible error as an
+# assistant artifact, but neither is evidence that the DevSpace task settled.
+PROVIDER_DELIVERY_TIMEOUT_MARKER = "message delivery timed out. please try again."
 TERMINAL_SESSION_STATES = {
     "complete", "completed", "done", "finished", "failed", "error", "cancelled", "canceled",
 }
@@ -350,9 +354,37 @@ def post_submit_response_timed_out(*paths: Path) -> bool:
     return False
 
 
+def provider_delivery_timed_out(*paths: Path) -> bool:
+    """Return true for ChatGPT's visible delivery-timeout error in observer streams.
+
+    A delivery timeout is provider-side incomplete evidence, even when Oracle's
+    final observer line says ``State: completed``.  It must retain exact-session
+    ownership rather than promote that error text to a terminal harvest.
+    """
+    for path in paths:
+        try:
+            if PROVIDER_DELIVERY_TIMEOUT_MARKER in path.read_text(
+                encoding="utf-8", errors="replace"
+            ).casefold():
+                return True
+        except OSError:
+            pass
+    return False
+
+
 def historical_session_authority(run_dir: Path, state: dict[str, Any]) -> str:
     """Recover the strongest exact-session authority from durable observer logs."""
     current = str(state.get("session_authority") or "submitted_unknown")
+    recovery_streams = [
+        stream
+        for prefix in ("recovery-*-stdout.log", "recovery-*-stderr.log")
+        for stream in run_dir.glob(prefix)
+    ]
+    # A previously persisted false terminal must be repairable from its exact
+    # recovery evidence.  Do this before honoring terminal_harvested so the
+    # state cannot become permanently monotonic on provider error text.
+    if provider_delivery_timed_out(*recovery_streams):
+        return "live"
     if (
         current == "terminal"
         and state.get("terminal_harvested") is True
@@ -718,7 +750,12 @@ def execute_run(
     # explicit assistant-response timeout is evidence that the response was
     # still pending at the observer deadline. Preserve live authority and
     # wait passively; do not prompt a harvest/live relaunch while it works.
-    transport_complete = exit_code == 0 and STATE.output_is_nonempty(layout.output_path)
+    delivery_timeout = provider_delivery_timed_out(layout.stdout_path, layout.stderr_path)
+    transport_complete = (
+        exit_code == 0
+        and STATE.output_is_nonempty(layout.output_path)
+        and not delivery_timeout
+    )
     task_outcome = (
         STATE.classify_task_outcome(
             layout.output_path,
@@ -763,18 +800,22 @@ def execute_run(
         )
         state = STATE.update_state(
             layout.state_path,
-            status="running" if response_timeout else status,
+            status="running" if response_timeout or delivery_timeout else status,
             exit_code=exit_code,
-            session_authority="live" if response_timeout else "submitted_unknown",
+            session_authority="live" if response_timeout or delivery_timeout else "submitted_unknown",
             transport_status=(
                 "post_submit_response_timeout"
                 if response_timeout
+                else "post_submit_provider_delivery_timeout"
+                if delivery_timeout
                 else "failed" if exit_code else "incomplete"
             ),
             task_outcome=task_outcome,
             task_outcome_reason=(
                 "assistant-response-timeout-passive-wait"
                 if response_timeout
+                else "provider-delivery-timeout-passive-wait"
+                if delivery_timeout
                 else None
             ),
             host_watchdog={
@@ -839,13 +880,20 @@ def _recover_run_locked(
         }
     historical_authority = historical_session_authority(directory, state)
     historical_url = historical_conversation_url(directory, state)
+    terminal_evidence_revoked = (
+        historical_authority == "live"
+        and str(state.get("session_authority") or "") in {"terminal_observed", "terminal"}
+    )
     if (
         STATE.SESSION_AUTHORITY_RANK.get(historical_authority, -1)
         > STATE.SESSION_AUTHORITY_RANK.get(str(state.get("session_authority") or ""), -1)
         or (historical_url and not str((state.get("oracle") or {}).get("conversation_url") or "").strip())
+        or terminal_evidence_revoked
     ):
         reconciled_status = (
-            "complete"
+            "running"
+            if terminal_evidence_revoked
+            else "complete"
             if state.get("status") == "complete"
             and state.get("session_authority") == "terminal"
             and state.get("terminal_harvested") is True
@@ -857,6 +905,19 @@ def _recover_run_locked(
             status=reconciled_status,
             exit_code=state.get("exit_code"),
             session_authority=historical_authority,
+            terminal_harvested=False if terminal_evidence_revoked else state.get("terminal_harvested"),
+            artifact_sha256=None if terminal_evidence_revoked else state.get("artifact_sha256"),
+            transport_status=(
+                "post_submit_provider_delivery_timeout"
+                if terminal_evidence_revoked
+                else state.get("transport_status")
+            ),
+            task_outcome="pending" if terminal_evidence_revoked else state.get("task_outcome"),
+            task_outcome_reason=(
+                "provider-delivery-timeout-passive-wait"
+                if terminal_evidence_revoked
+                else state.get("task_outcome_reason")
+            ),
             conversation_url=historical_url,
         )
     if (
@@ -985,6 +1046,33 @@ def _recover_run_locked(
                 "restore the exact persisted ChatGPT conversation URL for this slug, "
                 "then resume exact-slug recovery; never replace or resubmit"
             ),
+        }
+    if provider_delivery_timed_out(stdout_path, stderr_path):
+        if argv_output.exists():
+            argv_output.unlink()
+        updated = STATE.update_state(
+            directory / "state.json",
+            status="running",
+            exit_code=exit_code,
+            session_authority="live",
+            terminal_harvested=False,
+            artifact_sha256=None,
+            transport_status="post_submit_provider_delivery_timeout",
+            task_outcome="pending",
+            task_outcome_reason="provider-delivery-timeout-passive-wait",
+            conversation_url=observed_conversation_url,
+        )
+        return {
+            "ok": False,
+            "status": "provider_delivery_timeout",
+            "run_dir": str(directory),
+            "action": action,
+            "exit_code": exit_code,
+            "exact_session_state": observed_session_state,
+            "result": updated,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "next_action": "preserve and continue exact-session live monitoring; never replace or resubmit",
         }
     if observed_session_state in LIVE_SESSION_STATES:
         if argv_output.exists():
