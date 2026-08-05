@@ -23,7 +23,7 @@ from typing import Any, Callable, Sequence
 
 DEFAULT_PORT = 7676
 APP_NAME = "DevSpace"
-DEVSPACE_PACKAGE = "@waishnav/devspace@1.0.4"
+DEVSPACE_PACKAGE = "@waishnav/devspace@1.0.5"
 SECRET_PATTERN = re.compile(r"(?i)(password|token|secret|authorization)\s*([:=])\s*[^\s,;]+")
 HOSTNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.-]*\.ts\.net$", re.IGNORECASE)
 

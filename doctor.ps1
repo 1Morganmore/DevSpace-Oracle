@@ -11,6 +11,7 @@ $Issues = @()
 $Warnings = @()
 $Commands = @('powershell -ExecutionPolicy Bypass -File .\install.ps1 -WhatIf')
 $InstallReceiptValue = $null
+$ReceiptFiles = @{}
 
 function Get-Sha256([string]$Path) {
   $stream = $null
@@ -52,7 +53,9 @@ if (!$Receipt) {
       throw 'unsupported install receipt schema'
     }
     foreach ($Record in $Value.files) {
-      $Path = Get-SafeChild $CodexRoot ([string]$Record.path)
+      $Relative = ([string]$Record.path).Replace('\','/')
+      $ReceiptFiles[$Relative] = $true
+      $Path = Get-SafeChild $CodexRoot $Relative
       if (!(Test-Path -LiteralPath $Path)) {
         $Issues += @{code='FILE_MISSING'; path=$Record.path}
         continue
@@ -82,9 +85,8 @@ if (!$Node -or !$Npx) {
   try {
     $NodeVersion = (& $Node.Source --version).Trim().TrimStart('v')
     $NodeMajor = [int]($NodeVersion.Split('.')[0])
-    $NodeMinor = [int]($NodeVersion.Split('.')[1])
-    if ($NodeMajor -lt 22 -or $NodeMajor -ge 27 -or ($NodeMajor -eq 22 -and $NodeMinor -lt 19)) {
-      $Issues += @{code='DEVSPACE_NODE_VERSION_UNSUPPORTED'; actual=$NodeVersion; required='>=22.19 <27'}
+    if ($NodeMajor -lt 24 -or $NodeMajor -ge 27) {
+      $Issues += @{code='DEVSPACE_NODE_VERSION_UNSUPPORTED'; actual=$NodeVersion; required='>=24 <27'}
     }
   } catch {
     $Issues += @{code='NODE_VERSION_UNREADABLE'; detail=$_.Exception.Message}
@@ -93,10 +95,50 @@ if (!$Node -or !$Npx) {
 if (!$GitBash) {
   $Issues += @{code='DEVSPACE_GIT_BASH_MISSING'; detail='Windows DevSpace requires Git Bash'}
 }
-$Commands += 'npx -y @steipete/oracle --version'
+$Commands += 'npx -y @steipete/oracle@0.17.0 --version'
 $Commands += 'python .\skills\chatgpt-workspace-setup\scripts\devspace_tailscale_setup.py doctor --root C:\project --hostname your-device.your-tailnet.ts.net'
 
 $Python = Get-Command python.exe,python -ErrorAction SilentlyContinue | Select-Object -First 1
+$CompatibilityProbe = @'
+import ast,json,sys
+root=ast.parse(open(sys.argv[1],encoding='utf-8').read())
+values={}
+refs={}
+for node in root.body:
+    if not isinstance(node,ast.Assign) or len(node.targets)!=1 or not isinstance(node.targets[0],ast.Name):
+        continue
+    name=node.targets[0].id
+    try:
+        values[name]=ast.literal_eval(node.value)
+    except (ValueError,TypeError):
+        if isinstance(node.value,ast.Dict):
+            refs[name]={ast.literal_eval(key):value.id for key,value in zip(node.value.keys,node.value.values) if isinstance(value,ast.Name)}
+versions={version:values[name] for version,name in refs.get('VERSION_PATCHES',{}).items()} or {values['SUPPORTED_VERSION']:values['PATCHES']}
+print(json.dumps([{'version':str(version),'patch':str(contract['patch'])} for version,patches in versions.items() for contract in patches.values()]))
+'@
+if ($Python) {
+  foreach ($Compat in @(
+    @{module='bin/chatgpt_oracle_compat.py'; asset_root='bin/oracle-compat'},
+    @{module='bin/chatgpt_devspace_compat.py'; asset_root='bin/devspace-compat'}
+  )) {
+    if (!$ReceiptFiles.ContainsKey($Compat.module)) { continue }
+    try {
+      $ModulePath = Get-SafeChild $CodexRoot $Compat.module
+      $ProbeOutput = @(& $Python.Source -c $CompatibilityProbe $ModulePath)
+      if ($LASTEXITCODE) { throw "compatibility reference probe failed with exit code $LASTEXITCODE" }
+      $References = (($ProbeOutput -join [Environment]::NewLine) | ConvertFrom-Json)
+      foreach ($Reference in $References) {
+        $Relative = "$($Compat.asset_root)/$($Reference.version)/$($Reference.patch)"
+        $PatchPath = Get-SafeChild $CodexRoot $Relative
+        if (!$ReceiptFiles.ContainsKey($Relative) -or !(Test-Path -LiteralPath $PatchPath -PathType Leaf)) {
+          $Issues += @{code='COMPAT_PATCH_ASSET_MISSING'; module=$Compat.module; path=$Relative}
+        }
+      }
+    } catch {
+      $Issues += @{code='COMPAT_REFERENCE_INVALID'; module=$Compat.module; detail=$_.Exception.Message}
+    }
+  }
+}
 $UpdateReceiptPath = Join-Path $CodexRoot 'agbrowse-update-receipt.json'
 $UpdateReceipt = $null
 $SelectedVersion = '0.1.18'
@@ -166,8 +208,8 @@ if (!$Python) {
   warnings = $Warnings
   commands = $Commands
   agbrowse = @{selected_version=$SelectedVersion; contract=$Contract; update_receipt=$UpdateReceiptPath}
-  oracle = @{package='@steipete/oracle';tested_version='0.16.1';resolution='npx at explicit run time'}
-  devspace = @{package='@waishnav/devspace';tested_version='1.0.4';setup='explicit setup skill only'}
+  oracle = @{package='@steipete/oracle@0.17.0';tested_version='0.17.0';resolution='exact npx runtime pin'}
+  devspace = @{package='@waishnav/devspace';tested_version='1.0.5';setup='explicit setup skill only'}
   codexpro = @{
     installation = 'external'
     detail = 'CodexPro is not installed by install.ps1; app bootstrap scripts acquire the latest supported external runtime.'

@@ -19,6 +19,9 @@ from typing import Any, Sequence
 
 SCHEMA = "codex.chatgpt.oracle-run/v1"
 DEVSPACE_APP_NAME = "DevSpace"
+ORACLE_ACTIVE_VERSION = "0.17.0"
+ORACLE_RECOVERABLE_VERSIONS = ("0.16.1", ORACLE_ACTIVE_VERSION)
+ORACLE_PACKAGE = "@steipete/oracle"
 STATE_SCHEMA = "codex.chatgpt.oracle-run-state/v1"
 STATUSES = {"prepared", "running", "complete", "failed", "attention_required", "abandoned"}
 # One bounded lifecycle vocabulary.  The stored `status` values above remain the
@@ -65,7 +68,7 @@ SAFE_ORACLE_VALUE_OPTIONS = {
     "--heartbeat",
     "--timeout",
     "--zombie-timeout",
-    # Oracle 0.16.1 is compatibility-patched so this is one overall answer
+    # Tested Oracle versions are compatibility-patched so this is one overall answer
     # budget, including fallback capture.  The host also enforces the same
     # wall-clock deadline with a short grace if CDP evaluation itself wedges.
     "--browser-timeout",
@@ -88,6 +91,7 @@ ORACLE_NO_SESSION_RE = re.compile(
 ORACLE_PROMPT_NOT_OBSERVED_MARKER = (
     "Prompt did not appear in conversation before timeout (send may have failed)"
 )
+ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER = "APP_MENTION_ROUTE_UNCONFIRMED"
 ORACLE_NO_LIVE_TAB_MARKER = "No live ChatGPT tab matched session"
 ORACLE_NO_RECOVERABLE_URL_MARKER = (
     "session metadata has no recoverable ChatGPT conversation URL"
@@ -97,7 +101,7 @@ ORACLE_RECOVERY_STATE_RE = re.compile(r"(?im)^\s*State:\s*[a-z][a-z0-9_-]*\s*$")
 # Upstream Oracle copies a signed-in browser profile with rsync.  On POSIX
 # hosts without rsync the copy fails after launch, so feasibility is decided
 # while loading the manifest instead of crashing mid-launch.  The pinned
-# `oracle-compat/0.16.1/profileCopy.patch` replaces that spawn with Node's
+# The versioned `oracle-compat/*/profileCopy.patch` replaces that spawn with Node's
 # built-in recursive copy on Windows, so `nt` needs no external dependency.
 # Checking PATH there would drop per-run profile isolation and block every
 # parallel Web Multi lane, which is the exact failure this guard must avoid.
@@ -117,6 +121,7 @@ def profile_copy_is_supported(
 APP_RE = re.compile(r"^[^\r\n]+$")
 MODEL_RE = re.compile(r"^[a-zA-Z0-9._ -]+$")
 PARENT_ID_RE = re.compile(r"^[a-f0-9]{32,64}$")
+SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{7,95}$")
 _THREAD_MUTEXES: dict[str, threading.Lock] = {}
 _THREAD_MUTEXES_GUARD = threading.Lock()
@@ -142,6 +147,8 @@ class OracleConfig:
     transport: str
     attachments: tuple[Path, ...]
     attachment_sha256s: tuple[str, ...]
+    project_context_manifest_path: Path | None
+    project_context_manifest_sha256: str | None
     run_root: Path
     oracle_command: tuple[str, ...]
     oracle_args: tuple[str, ...]
@@ -155,6 +162,11 @@ class OracleConfig:
     task_outcome_contract: str
     parallel_parent_id: str | None
     requested_run_id: str | None
+    manifest_path: Path
+    manifest_sha256: str
+    expected_manifest_sha256: str | None
+    bound_inputs: tuple[Path, ...]
+    bound_input_sha256s: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -207,6 +219,42 @@ def exact_regular_file(value: Any, *, label: str) -> Path:
     return path
 
 
+def validate_bound_input(value: Any, expected_sha256: Any, project_root: Path) -> tuple[Path, str]:
+    raw = Path(str(value or "")).expanduser()
+    if not raw.is_absolute():
+        raise OracleStateError("BOUND_INPUT_PATH_ABSOLUTE_REQUIRED", "bound input path must be absolute")
+    if ".." in raw.parts:
+        raise OracleStateError("BOUND_INPUT_PATH_TRAVERSAL", "bound input must not contain parent traversal")
+    current = Path(raw.anchor)
+    for part in raw.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            raise OracleStateError(
+                "BOUND_INPUT_FILE_INVALID",
+                "bound input must not use symlink path components",
+                {"path": str(current)},
+            )
+    path = absolute_path(raw, label="bound_input_path", must_exist=True)
+    if not path.is_file():
+        raise OracleStateError("BOUND_INPUT_FILE_INVALID", "bound input must identify a regular file", {"path": str(path)})
+    if not is_within(project_root, path):
+        raise OracleStateError("BOUND_INPUT_OUTSIDE_PROJECT", "bound input must stay inside project_root", {"path": str(path)})
+    if not isinstance(expected_sha256, str) or SHA256_RE.fullmatch(expected_sha256) is None:
+        raise OracleStateError(
+            "BOUND_INPUT_SHA256_INVALID",
+            "bound input sha256 must be exactly 64 lowercase hexadecimal characters",
+            {"path": str(path)},
+        )
+    actual_sha256 = sha256_file(path)
+    if actual_sha256 != expected_sha256:
+        raise OracleStateError(
+            "BOUND_INPUT_SHA256_MISMATCH",
+            "bound input sha256 does not match the current file",
+            {"path": str(path), "expected": expected_sha256, "actual": actual_sha256},
+        )
+    return path, expected_sha256
+
+
 def is_within(root: Path, candidate: Path) -> bool:
     try:
         candidate.relative_to(root)
@@ -221,8 +269,27 @@ def oracle_state_root() -> Path:
 
 
 def default_oracle_command(platform_name: str | None = None) -> tuple[str, ...]:
+    return pinned_oracle_command(ORACLE_ACTIVE_VERSION, platform_name=platform_name)
+
+
+def normalize_oracle_version(value: Any) -> str:
+    return str(value or "").strip().removeprefix("oracle ").strip()
+
+
+def pinned_oracle_command(version: str, *, platform_name: str | None = None) -> tuple[str, ...]:
+    normalized = normalize_oracle_version(version)
+    if normalized not in ORACLE_RECOVERABLE_VERSIONS:
+        raise OracleStateError(
+            "ORACLE_VERSION_UNVALIDATED",
+            "Oracle version is not part of the active or recovery compatibility contract",
+            {"version": normalized, "supported": list(ORACLE_RECOVERABLE_VERSIONS)},
+        )
     platform = os.name if platform_name is None else platform_name
-    return ("npx.cmd" if platform == "nt" else "npx", "-y", "@steipete/oracle")
+    return (
+        "npx.cmd" if platform == "nt" else "npx",
+        "-y",
+        f"{ORACLE_PACKAGE}@{normalized}",
+    )
 
 
 def validate_oracle_command(values: Any) -> tuple[str, ...]:
@@ -230,17 +297,17 @@ def validate_oracle_command(values: Any) -> tuple[str, ...]:
         raise OracleStateError("ORACLE_COMMAND_INVALID", "oracle_command must be a nonempty list of strings")
     command = tuple(values)
     executable = Path(command[0]).name.casefold()
-    if executable in {"oracle", "oracle.cmd", "oracle.exe"} and len(command) == 1:
-        return command
-    if executable in {"npx", "npx.cmd", "npx.exe"} and command[1:] in {
-        ("-y", "@steipete/oracle"),
-        ("--yes", "@steipete/oracle"),
-        ("@steipete/oracle",),
-    }:
-        return command
+    if executable in {"npx", "npx.cmd", "npx.exe"}:
+        allowed_specs = {f"{ORACLE_PACKAGE}@{ORACLE_ACTIVE_VERSION}"}
+        if command[1:] in {
+            *(('-y', spec) for spec in allowed_specs),
+            *(('--yes', spec) for spec in allowed_specs),
+            *((spec,) for spec in allowed_specs),
+        }:
+            return command
     raise OracleStateError(
         "ORACLE_COMMAND_FORBIDDEN",
-        "oracle_command must resolve directly to Oracle or npx @steipete/oracle",
+        "oracle_command must use the exact active @steipete/oracle npx version",
         {"command": command_for_display(command)},
     )
 
@@ -275,10 +342,40 @@ def validate_oracle_args(values: Any) -> tuple[str, ...]:
     return tuple(values)
 
 
-def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConfig:
+def load_manifest(
+    path: Path,
+    *,
+    expected_manifest_sha256: str | None = None,
+    platform_name: str | None = None,
+) -> OracleConfig:
     manifest_path = absolute_path(path, label="manifest_path", must_exist=True)
     try:
-        payload = json.loads(read_utf8_strict(manifest_path))
+        manifest_bytes = manifest_path.read_bytes()
+    except OSError as exc:
+        raise OracleStateError("FILE_READ_FAILED", "file could not be read", {"path": str(manifest_path)}) from exc
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    if expected_manifest_sha256 is not None:
+        if not isinstance(expected_manifest_sha256, str) or SHA256_RE.fullmatch(expected_manifest_sha256) is None:
+            raise OracleStateError(
+                "MANIFEST_SHA256_INVALID",
+                "expected_manifest_sha256 must be exactly 64 lowercase hexadecimal characters",
+            )
+        if manifest_sha256 != expected_manifest_sha256:
+            raise OracleStateError(
+                "MANIFEST_SHA256_MISMATCH",
+                "expected_manifest_sha256 does not match the current Oracle manifest",
+                {"expected": expected_manifest_sha256, "actual": manifest_sha256},
+            )
+    try:
+        manifest_text = manifest_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise OracleStateError(
+            "UTF8_REQUIRED",
+            "file must be valid UTF-8",
+            {"path": str(manifest_path), "offset": exc.start},
+        ) from exc
+    try:
+        payload = json.loads(manifest_text)
     except json.JSONDecodeError as exc:
         raise OracleStateError("MANIFEST_JSON_INVALID", "manifest must contain one JSON object", {"line": exc.lineno, "column": exc.colno}) from exc
     if not isinstance(payload, dict) or payload.get("schema") != SCHEMA:
@@ -286,8 +383,37 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
     project_root = absolute_path(payload.get("project_root"), label="project_root", must_exist=True)
     if not project_root.is_dir():
         raise OracleStateError("PROJECT_ROOT_NOT_DIRECTORY", "project_root must identify a directory")
+    raw_bound_inputs = payload.get("bound_inputs", [])
+    if not isinstance(raw_bound_inputs, list):
+        raise OracleStateError("BOUND_INPUTS_INVALID", "bound_inputs must be a list")
+    validated_bound_inputs: list[tuple[Path, str]] = []
+    for index, item in enumerate(raw_bound_inputs):
+        if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
+            raise OracleStateError(
+                "BOUND_INPUT_INVALID",
+                "each bound input must contain only path and sha256",
+                {"index": index},
+            )
+        validated_bound_inputs.append(validate_bound_input(item["path"], item["sha256"], project_root))
+    bound_inputs = tuple(item[0] for item in validated_bound_inputs)
+    if len(set(bound_inputs)) != len(bound_inputs):
+        raise OracleStateError("BOUND_INPUTS_DUPLICATE", "bound input paths must be unique")
+    bound_input_sha256s = tuple(item[1] for item in validated_bound_inputs)
     mission_path = exact_regular_file(payload.get("mission_path"), label="mission_path")
     read_utf8_strict(mission_path)
+    mission_sha256 = sha256_file(mission_path)
+    expected_mission_sha256 = payload.get("mission_sha256")
+    if not isinstance(expected_mission_sha256, str) or SHA256_RE.fullmatch(expected_mission_sha256) is None:
+        raise OracleStateError(
+            "MISSION_SHA256_INVALID",
+            "mission_sha256 must be exactly 64 lowercase hexadecimal characters",
+        )
+    if expected_mission_sha256 != mission_sha256:
+        raise OracleStateError(
+            "MISSION_SHA256_MISMATCH",
+            "mission_sha256 does not match the current mission file",
+            {"expected": expected_mission_sha256, "actual": mission_sha256},
+        )
     mode = str(payload.get("mode") or "browser").strip().casefold()
     if mode != "browser":
         raise OracleStateError("MODE_INVALID", "Oracle foundation runner supports mode=browser only")
@@ -309,7 +435,25 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
         app_name: str | None = app_name_raw
         if payload.get("attachments"):
             raise OracleStateError("REGULAR_ATTACHMENTS_FORBIDDEN", "DevSpace runs must not attach files")
+        if payload.get("project_context_manifest_path") not in {None, ""}:
+            raise OracleStateError(
+                "CONTEXT_MANIFEST_FORBIDDEN",
+                "project_context_manifest_path is only valid for Pro attachment-only runs",
+            )
+        if "attachment_sha256s" in payload:
+            raise OracleStateError(
+                "ATTACHMENT_SHA256S_FORBIDDEN",
+                "attachment_sha256s is only valid for Pro attachment-only runs",
+            )
+        if "project_context_manifest_sha256" in payload:
+            raise OracleStateError(
+                "CONTEXT_MANIFEST_SHA256_FORBIDDEN",
+                "project_context_manifest_sha256 is only valid for Pro attachment-only runs",
+            )
         attachments: tuple[Path, ...] = ()
+        attachment_sha256s: tuple[str, ...] = ()
+        project_context_manifest_path: Path | None = None
+        project_context_manifest_sha256: str | None = None
     else:
         if app_name_raw:
             raise OracleStateError("PRO_APP_FORBIDDEN", "Pro attachment-only runs must not name an app")
@@ -325,6 +469,51 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
             raise OracleStateError("PRO_ATTACHMENTS_DUPLICATE", "Pro attachment paths must be unique")
         if mission_path not in attachments:
             raise OracleStateError("PRO_MISSION_ATTACHMENT_REQUIRED", "mission_path must be one of the Pro attachments")
+        raw_attachment_sha256s = payload.get("attachment_sha256s")
+        if (
+            not isinstance(raw_attachment_sha256s, list)
+            or len(raw_attachment_sha256s) != len(attachments)
+            or not all(isinstance(value, str) and SHA256_RE.fullmatch(value) is not None for value in raw_attachment_sha256s)
+        ):
+            raise OracleStateError(
+                "PRO_ATTACHMENT_SHA256S_INVALID",
+                "Pro attachment_sha256s must be an ordered lowercase SHA-256 list aligned with attachments",
+            )
+        attachment_sha256s = tuple(raw_attachment_sha256s)
+        for attachment, expected in zip(attachments, attachment_sha256s, strict=True):
+            actual = sha256_file(attachment)
+            if actual != expected:
+                raise OracleStateError(
+                    "PRO_ATTACHMENT_SHA256_MISMATCH",
+                    "declared Pro attachment sha256 does not match the current file",
+                    {"path": str(attachment), "expected": expected, "actual": actual},
+                )
+        project_context_manifest_path = exact_regular_file(
+            payload.get("project_context_manifest_path"),
+            label="project_context_manifest_path",
+        )
+        if not is_within(project_root, project_context_manifest_path):
+            raise OracleStateError(
+                "PRO_CONTEXT_MANIFEST_OUTSIDE_PROJECT",
+                "project_context_manifest_path must stay inside project_root",
+            )
+        raw_context_manifest_sha256 = payload.get("project_context_manifest_sha256")
+        if not isinstance(raw_context_manifest_sha256, str) or SHA256_RE.fullmatch(raw_context_manifest_sha256) is None:
+            raise OracleStateError(
+                "PRO_CONTEXT_MANIFEST_SHA256_INVALID",
+                "project_context_manifest_sha256 must be exactly 64 lowercase hexadecimal characters",
+            )
+        actual_context_manifest_sha256 = sha256_file(project_context_manifest_path)
+        if actual_context_manifest_sha256 != raw_context_manifest_sha256:
+            raise OracleStateError(
+                "PRO_CONTEXT_MANIFEST_SHA256_MISMATCH",
+                "declared Pro context manifest sha256 does not match the current file",
+                {
+                    "expected": raw_context_manifest_sha256,
+                    "actual": actual_context_manifest_sha256,
+                },
+            )
+        project_context_manifest_sha256 = raw_context_manifest_sha256
     state_root = oracle_state_root()
     if is_within(project_root, state_root) or is_within(state_root, project_root):
         raise OracleStateError(
@@ -427,12 +616,14 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
     return OracleConfig(
         project_root,
         mission_path,
-        sha256_file(mission_path),
+        mission_sha256,
         app_name,
         mode,
         transport,
         attachments,
-        tuple(sha256_file(item) for item in attachments),
+        attachment_sha256s,
+        project_context_manifest_path,
+        project_context_manifest_sha256,
         run_root,
         oracle_command,
         validate_oracle_args(payload.get("oracle_args")),
@@ -446,6 +637,11 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
         task_outcome_contract,
         parallel_parent_id,
         requested_run_id,
+        manifest_path,
+        manifest_sha256,
+        expected_manifest_sha256,
+        bound_inputs,
+        bound_input_sha256s,
     )
 
 
@@ -454,6 +650,7 @@ def composer_prompt(config: OracleConfig, mission_path: Path | None = None) -> s
         identity_material = "\0".join((
             str(config.project_root).casefold(),
             config.mission_sha256,
+            config.project_context_manifest_sha256 or "",
             *config.attachment_sha256s,
         ))
         identity = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()[:24]
@@ -514,6 +711,11 @@ def state_payload(config: OracleConfig, layout: RunLayout, *, status: str, resol
             "archive": config.archive,
         },
         "parallel_parent_id": config.parallel_parent_id,
+        "manifest": {
+            "path": str(config.manifest_path),
+            "actual_sha256": config.manifest_sha256,
+            "expected_sha256": config.expected_manifest_sha256,
+        },
         "transport_status": "prepared",
         "task_outcome_contract": config.task_outcome_contract,
         "task_outcome": "not_applicable" if config.transport == "pro-attachment-only" else "pending",
@@ -527,6 +729,18 @@ def state_payload(config: OracleConfig, layout: RunLayout, *, status: str, resol
             {"path": str(path), "sha256": digest, "size_bytes": path.stat().st_size}
             for path, digest in zip(config.attachments, config.attachment_sha256s, strict=True)
         ],
+        "bound_inputs": [
+            {"path": str(path), "sha256": digest}
+            for path, digest in zip(config.bound_inputs, config.bound_input_sha256s, strict=True)
+        ],
+        "project_context_manifest": (
+            {
+                "path": str(config.project_context_manifest_path),
+                "sha256": config.project_context_manifest_sha256,
+            }
+            if config.project_context_manifest_path is not None
+            else None
+        ),
         "oracle": {
             "resolved_version": resolved_version,
             "command": list(config.oracle_command),
@@ -747,12 +961,12 @@ def _artifact_bytes(state: dict[str, Any], name: str) -> tuple[Path, bytes] | No
 
 
 def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
-    """Return exact evidence for a user-adjudicable Oracle composer timeout.
+    """Return exact evidence for a user-adjudicable Oracle pre-submit failure.
 
-    The Oracle message is not mechanical proof of non-submission.  This helper
+    The accepted messages do not release ownership on their own.  This helper
     only proves that the run is eligible for an explicit user adjudication: no
-    output or conversation URL exists, Oracle reported that the prompt was not
-    observed, and exact recovery has neither a live tab nor a saved URL.
+    output or conversation URL exists, Oracle reported an eligible composer
+    failure, and exact recovery has neither a live tab nor a saved URL.
     """
     state = load_state(state_path)
     authority = str(state.get("session_authority") or "")
@@ -787,7 +1001,22 @@ def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any]
         return None
     oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
     locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
-    if not locator or ORACLE_PROMPT_NOT_OBSERVED_MARKER not in stdout_text:
+    stdout_lines = {line.strip() for line in stdout_text.splitlines()}
+    app_route_unconfirmed = (
+        str(state.get("transport") or "").casefold() == "devspace"
+        and str(state.get("app_name") or "").casefold() == "devspace"
+        and normalize_oracle_version(oracle.get("resolved_version")) == ORACLE_ACTIVE_VERSION
+        and {
+            f"ERROR: {ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER}",
+            (
+                "User error (browser-automation): "
+                f"{ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER}"
+            ),
+        }.issubset(stdout_lines)
+    )
+    if not locator or not (
+        ORACLE_PROMPT_NOT_OBSERVED_MARKER in stdout_text or app_route_unconfirmed
+    ):
         return None
     if f"Session: {locator}" not in stdout_text:
         return None
@@ -921,6 +1150,11 @@ def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any]
         "recovery_evidence": recovery_records,
         "output_absent": True,
         "conversation_url_absent": True,
+        "_task_outcome_reason": (
+            "user-confirmed-no-submission-after-app-route-unconfirmed"
+            if app_route_unconfirmed
+            else "user-confirmed-no-submission-after-prompt-timeout"
+        ),
         "_augmented_mission_path": str(source_mission),
         "_input_mission_path": str(input_mission),
         "_receipt_path": str(receipt_path),
@@ -1034,7 +1268,7 @@ def settle_user_confirmed_no_submission(
         "artifact_sha256": None,
         "transport_status": "not_submitted_user_confirmed",
         "task_outcome": "pending",
-        "task_outcome_reason": "user-confirmed-no-submission-after-prompt-timeout",
+        "task_outcome_reason": evidence["_task_outcome_reason"],
         "user_confirmed_no_submission": {
             "schema": "codex.chatgpt.oracle-settlement-reference/v1",
             "path": str(settlement_path),
@@ -1105,10 +1339,14 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
     normalized_error = stderr_text.lstrip()
     if not normalized_error.startswith("version resolution failed:"):
         return None
-    if not (
+    if "Oracle compatibility is validated only for tested versions" in normalized_error:
+        failure_reason = "compatibility-version-drift"
+    elif (
         "ORACLE_VERSION_TIMEOUT:" in normalized_error
-        or ("--version" in normalized_error and "timed out after 30 seconds" in normalized_error)
+        or ("--version" in normalized_error and "timed out after" in normalized_error)
     ):
+        failure_reason = "version-resolution-timeout"
+    else:
         return None
     return {
         "schema": "codex.chatgpt.oracle-pre-submit-host-failure/v1",
@@ -1118,6 +1356,7 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
         "output_absent": True,
         "conversation_url_absent": True,
         "resolved_version": "unresolved",
+        "failure_reason": failure_reason,
     }
 
 
@@ -1331,8 +1570,10 @@ def unresolved_project_sessions(
         settlement_derived = (
             "user_confirmed_no_submission" in payload
             or str(payload.get("transport_status") or "") == "not_submitted_user_confirmed"
-            or str(payload.get("task_outcome_reason") or "")
-            == "user-confirmed-no-submission-after-prompt-timeout"
+            or str(payload.get("task_outcome_reason") or "") in {
+                "user-confirmed-no-submission-after-prompt-timeout",
+                "user-confirmed-no-submission-after-app-route-unconfirmed",
+            }
             or settlement_artifact.exists()
         )
         invalid_settlement = False

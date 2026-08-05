@@ -21,10 +21,18 @@ def text(path: Path) -> str:
 def test_new_regular_modes_route_only_to_oracle_devspace() -> None:
     value = text(THINKING)
     assert "chatgpt_oracle_dispatch.py" in value
+    assert "--expected-manifest-sha256" in value
     assert "@DevSpace" in value
     assert "never attaches files" in value
     assert "create a new agbrowse run" in value
     assert "app picker" not in value.casefold()
+
+
+def test_readmes_pin_live_dispatch_to_the_preview_hash() -> None:
+    for path in (ROOT / "README.md", ROOT / "README.en.md"):
+        value = text(path)
+        assert "oracle_manifest_sha256" in value
+        assert "--expected-manifest-sha256" in value
 
 
 def test_pro_is_oracle_attachment_only_and_never_uses_devspace_or_codexpro() -> None:
@@ -69,12 +77,25 @@ def test_pro_requires_maximum_useful_project_specific_judgment_context() -> None
     assert "credentials, secrets, cookies, browser/profile state" in flat
     assert "volatile logs, caches, and unrelated bulk" in flat
     assert "Preflight fails closed" in flat
+    assert "Build and validate the attachment packet" in flat
+    assert "before every submission" in flat
+    assert "build_project_context_packet.py build" in flat
+    assert "build_project_context_packet.py validate" in flat
+
+
+def test_pro_packet_builder_matches_oracle_one_mib_attachment_contract() -> None:
+    builder = text(PRO.parent / "scripts" / "build_project_context_packet.py")
+    runner = text(ROOT / "bin" / "chatgpt_oracle_run.py")
+    assert "TOTAL_ENVELOPE_BYTES = 1 * 1024 * 1024" in builder
+    assert "MAX_PACKET_ZIP_BYTES = TOTAL_ENVELOPE_BYTES" in builder
+    assert "ORACLE_PRO_ATTACHMENT_MAX_BYTES = 1024 * 1024" in runner
 
 
 def test_deep_research_uses_oracle_deep_without_silent_fallback() -> None:
     value = text(RESEARCH)
     assert "chatgpt_oracle_dispatch.py" in value
     assert "--mode deep-research" in value
+    assert "--expected-manifest-sha256" in value
     assert "--browser-research deep" in value
     assert '--reasoning-level "Very High"' in value
     assert "visible `Extra High`" in value
@@ -93,6 +114,9 @@ def test_web_multi_is_genuine_sessions_with_wave_cap_and_worktrees() -> None:
 def test_comprehensive_is_web_native_relay_with_one_local_gate() -> None:
     value = text(HANDOFF)
     assert "chatgpt_oracle_comprehensive.py" in value
+    assert "initial_mission_sha256" in value
+    assert "manifest_sha256" in value
+    assert "--expected-manifest-sha256" in value
     assert "plan -> optional Pro or Oracle Web Multi -> review" in value
     assert "final web PASS plus a zero-exit local" in value
     assert "host validates" in value

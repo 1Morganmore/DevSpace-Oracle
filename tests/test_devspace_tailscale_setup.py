@@ -50,7 +50,7 @@ def test_setup_plan_has_no_secrets_and_is_explicit_only(tmp_path: Path, monkeypa
     assert plan["recommended_app_name"] == "DevSpace"
     assert plan["devspace_init"][1:3] == [
         "-lc",
-        "exec npx --yes @waishnav/devspace@1.0.4 init",
+        "exec npx --yes @waishnav/devspace@1.0.5 init",
     ]
 
 
@@ -198,12 +198,12 @@ def test_setup_applies_hash_validated_devspace_compat_before_service_start(
 
     assert calls[1][1:3] == [
         "-lc",
-        "exec npx --yes @waishnav/devspace@1.0.4 init",
+        "exec npx --yes @waishnav/devspace@1.0.5 init",
     ]
     assert calls[2] == module.devspace_compat_argv()
     assert calls[3] == module.devspace_compat_argv(stop_exact_service=True)
     assert calls[4] == module.devspace_compat_argv(confirm_restarted=True)
     assert launched and launched[0][1:3] == [
         "-lc",
-        "exec npx --yes @waishnav/devspace@1.0.4 serve",
+        "exec npx --yes @waishnav/devspace@1.0.5 serve",
     ]

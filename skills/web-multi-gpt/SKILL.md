@@ -9,8 +9,9 @@ Use `bin/chatgpt_oracle_multi.py` with schema
 `codex.chatgpt.oracle-multi/v1`. Required fields:
 
 - absolute `project_root`, project-contained `output_dir`
-- `solvers`: 2..25 unique safe lane IDs and absolute mission paths
-- `merger_mission_path`
+- `solvers`: 2..25 unique safe lane IDs, absolute mission paths, and exact
+  lowercase `mission_sha256` values for the authored bytes
+- `merger_mission_path` and its exact lowercase `merger_mission_sha256`
 - `max_concurrency`: 1..5
 - optional `next_stage_result_path` for comprehensive relay
 
@@ -22,10 +23,21 @@ the canonical root is forbidden for write lanes.
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_multi.py" --manifest C:\project\multi.json --dry-run
 ```
 
+Use the preview's exact `manifest_sha256` for the authorized live run:
+
+```powershell
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_multi.py" --manifest C:\project\multi.json --expected-manifest-sha256 <manifest_sha256>
+```
+
 Each lane receives its own Oracle slug/run/output and only `@DevSpace` plus its
 mission path. Lanes run in stable waves of at most five; a larger topology is
-not reduced. Successful handoffs are preserved and exactly one merger consumes
-their paths in lane order. The parent holds same-project exclusion while child
+not reduced. Successful handoffs are preserved with exact SHA-256 bindings and
+revalidated immediately before exactly one merger consumes them in lane order.
+The merger child manifest carries the same pairs as `bound_inputs` for one last
+runner check inside the submit mutex.
+A reduced topology preserves its partial artifacts, but returns `ok=false` and
+requires attention instead of advancing the comprehensive workflow. The parent
+holds same-project exclusion while child
 launches use a short parent-scoped mutex. On Windows each lane uses a separate
 throwaway copy of the signed-in Oracle profile, preventing one solver from
 closing or taking over another solver's Chrome session.

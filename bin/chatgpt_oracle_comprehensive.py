@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -28,6 +29,8 @@ PRO_OUTPUT_PREFIX_KEYS = (
 PRO_OUTPUT_RECOVERY_SCHEMA = "codex.chatgpt.oracle-pro-output-recovery/v1"
 STATE_SCHEMA = "codex.chatgpt.oracle-comprehensive-state/v1"
 SCOPE_SCHEMA = "codex.chatgpt.oracle-comprehensive-scope/v1"
+RETIREMENT_RECEIPT_SCHEMA = "codex.chatgpt.oracle-comprehensive-retirement/v1"
+RETIREMENT_CONFIRMATION_PREFIX = "retire-comprehensive-workflow:"
 MAX_PLAN_REVISIONS = 2
 REVIEW_STATUSES = {"PASS", "PASS_WITH_NOTES", "REVISE", "FAIL"}
 UNAMBIGUOUS_PRE_SUBMIT_MARKERS = (
@@ -74,6 +77,13 @@ def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _bound_source_bytes(source: Path, expected_sha: str) -> bytes:
+    source_bytes = source.read_bytes()
+    if hashlib.sha256(source_bytes).hexdigest() != expected_sha:
+        raise WorkflowError("stage transition source changed after validation")
+    return source_bytes
+
+
 def _json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -81,10 +91,25 @@ def _json(path: Path) -> dict[str, Any]:
     return value
 
 
+def _lexical_nonsymlink(path: Path) -> None:
+    if ".." in path.parts:
+        raise WorkflowError(f"path outside project: parent traversal is forbidden: {path}")
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            raise WorkflowError(f"workflow paths must use only non-symlink components: {current}")
+
+
 def _inside(root: Path, value: Any, *, exists: bool = True) -> Path:
     path = Path(str(value or "")).expanduser()
     if not path.is_absolute():
         raise WorkflowError("workflow paths must be absolute")
+    _lexical_nonsymlink(path)
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise WorkflowError(f"path outside project: {path}") from exc
     path = path.resolve(strict=exists)
     try:
         path.relative_to(root)
@@ -104,21 +129,86 @@ def _receipt_path(root: Path, value: Any, *, exists: bool = True) -> tuple[Path,
         if candidate.drive:
             raise WorkflowError("drive-relative workflow paths are forbidden")
         candidate = root / candidate
-    path = candidate.resolve(strict=exists)
+    return _inside(root, candidate, exists=exists), relative_compat
+
+
+def _legacy_initial_mission_binding(
+    root: Path,
+    workflow_id: str,
+    manifest_sha256: str,
+    mission: Path,
+) -> str | None:
+    """Recover a missing pre-hash manifest field from exact stage-zero host state."""
+    state_path = _state_path({"project_root": root}, workflow_id)
+    if not state_path.is_file():
+        return None
     try:
-        path.relative_to(root)
-    except ValueError as exc:
-        raise WorkflowError(f"path outside project: {path}") from exc
-    return path, relative_compat
+        stored = _json(state_path)
+        current_mission = _inside(root, stored.get("current_mission_path"))
+        binding_source = _inside(root, stored.get("current_binding_source_path"))
+        mission_sha256 = sha(mission)
+    except (OSError, ValueError, WorkflowError, json.JSONDecodeError):
+        return None
+    if all((
+        stored.get("schema") == STATE_SCHEMA,
+        stored.get("workflow_id") == workflow_id,
+        stored.get("manifest_sha256") == manifest_sha256,
+        stored.get("status") in {"running", "attention_required", "awaiting_receipt", "complete"},
+        stored.get("current_stage") == "plan",
+        type(stored.get("next_index")) is int and stored["next_index"] == 0,
+        current_mission == mission,
+        binding_source == mission,
+        stored.get("current_input_sha256") == mission_sha256,
+        stored.get("current_binding_source_sha256") == mission_sha256,
+    )):
+        return mission_sha256
+    return None
 
 
-def load_manifest(path: Path) -> dict[str, Any]:
-    value = _json(path.resolve(strict=True))
+def load_manifest(
+    path: Path,
+    *,
+    expected_manifest_sha256: str | None = None,
+) -> dict[str, Any]:
+    manifest_path = path.expanduser().resolve(strict=True)
+    manifest_bytes = manifest_path.read_bytes()
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    if expected_manifest_sha256 is not None:
+        if (
+            not isinstance(expected_manifest_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_manifest_sha256) is None
+        ):
+            raise WorkflowError("expected manifest SHA-256 must be exact lowercase hexadecimal")
+        if manifest_sha256 != expected_manifest_sha256:
+            raise WorkflowError("workflow manifest changed after dry-run preview")
+    try:
+        value = json.loads(manifest_bytes.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WorkflowError(f"invalid workflow manifest: {manifest_path}") from exc
+    if not isinstance(value, dict):
+        raise WorkflowError(f"JSON object required: {manifest_path}")
     if value.get("schema") != SCHEMA:
         raise WorkflowError(f"schema must be {SCHEMA}")
     root = Path(str(value.get("project_root") or "")).expanduser().resolve(strict=True)
     workflow_dir = _inside(root, value.get("workflow_dir"), exists=False)
     mission = _inside(root, value.get("initial_mission_path"))
+    workflow_id = str(value.get("workflow_id") or "").strip()
+    if not workflow_id or not all(character in "0123456789abcdef-" for character in workflow_id.casefold()):
+        raise WorkflowError("workflow_id must be stable hex/UUID text")
+    initial_mission_sha256 = value.get("initial_mission_sha256")
+    if (
+        not isinstance(initial_mission_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", initial_mission_sha256) is None
+    ):
+        initial_mission_sha256 = (
+            _legacy_initial_mission_binding(root, workflow_id, manifest_sha256, mission)
+            if initial_mission_sha256 is None and expected_manifest_sha256 is not None
+            else None
+        )
+        if initial_mission_sha256 is None:
+            raise WorkflowError("initial_mission_sha256 must be exact lowercase SHA-256")
+    if sha(mission) != initial_mission_sha256:
+        raise WorkflowError("initial mission changed after workflow authoring")
     maximum = int(value.get("max_stages", 8))
     if not 1 <= maximum <= 12:
         raise WorkflowError("max_stages must be within 1..12")
@@ -128,14 +218,12 @@ def load_manifest(path: Path) -> dict[str, Any]:
     state_root = RUNNER.STATE.oracle_state_root()
     if RUNNER.STATE.is_within(root, state_root) or RUNNER.STATE.is_within(state_root, root):
         raise WorkflowError("host state must be disjoint from project")
-    workflow_id = str(value.get("workflow_id") or "").strip()
-    if not workflow_id or not all(character in "0123456789abcdef-" for character in workflow_id.casefold()):
-        raise WorkflowError("workflow_id must be stable hex/UUID text")
     app_name = str(value.get("app_name") or "DevSpace").strip()
     if app_name != "DevSpace":
         raise WorkflowError("app_name must be exactly DevSpace")
     return {
         **value,
+        "manifest_path": manifest_path,
         "project_root": root,
         "workflow_dir": workflow_dir,
         "initial_mission_path": mission,
@@ -143,7 +231,8 @@ def load_manifest(path: Path) -> dict[str, Any]:
         "app_name": app_name,
         "model": str(value.get("model") or "gpt-5.6"),
         "local_gate_command": list(local_gate),
-        "manifest_sha256": sha(path.resolve(strict=True)),
+        "manifest_sha256": manifest_sha256,
+        "initial_mission_sha256": initial_mission_sha256,
         "workflow_id": workflow_id,
     }
 
@@ -236,13 +325,128 @@ def _scope_path(config: dict[str, Any]) -> Path:
     return RUNNER.STATE.oracle_state_root() / "comprehensive-scopes" / project_key / f"{scope_key}.json"
 
 
+def _retirement_receipt_path(config: dict[str, Any], workflow_id: str | None = None) -> Path:
+    scope = _scope_path(config)
+    return (
+        RUNNER.STATE.oracle_state_root()
+        / "comprehensive-retirements"
+        / scope.parent.name
+        / scope.stem
+        / f"{workflow_id or config['workflow_id']}.json"
+    )
+
+
+def _released_scope_is_valid(config: dict[str, Any], stored: dict[str, Any]) -> bool:
+    retired_id = str(stored.get("retired_workflow_id") or "")
+    if not retired_id or str(stored.get("active_workflow_id") or ""):
+        return False
+    receipt_path = _retirement_receipt_path(config, retired_id)
+    try:
+        if (
+            Path(str(stored.get("retirement_receipt_path") or "")).resolve() != receipt_path.resolve()
+            or receipt_path.is_symlink()
+            or not receipt_path.is_file()
+            or sha(receipt_path) != str(stored.get("retirement_receipt_sha256") or "")
+        ):
+            return False
+        receipt = _json(receipt_path)
+        retired_state_path = _state_path(config, retired_id)
+        recorded_state_path = Path(str(receipt.get("workflow_state_path") or ""))
+        recorded_manifest_path = Path(str(receipt.get("manifest_path") or ""))
+        if (
+            recorded_state_path.resolve() != retired_state_path.resolve()
+            or recorded_state_path.is_symlink()
+            or not recorded_state_path.is_file()
+            or recorded_manifest_path.is_symlink()
+            or not recorded_manifest_path.is_file()
+        ):
+            return False
+        recorded_state_sha256 = sha(recorded_state_path)
+        recorded_manifest_sha256 = sha(recorded_manifest_path)
+    except (OSError, ValueError, WorkflowError, json.JSONDecodeError):
+        return False
+    return all((
+        receipt.get("schema") == RETIREMENT_RECEIPT_SCHEMA,
+        receipt.get("status") == "workflow_retired_scope_released",
+        receipt.get("scientific_work_complete") is False,
+        receipt.get("workflow_id") == retired_id,
+        receipt.get("confirmation") == f"{RETIREMENT_CONFIRMATION_PREFIX}{retired_id}",
+        bool(str(receipt.get("reason") or "").strip()),
+        receipt.get("project_root") == str(config["project_root"]),
+        receipt.get("workflow_parent") == str(config["workflow_dir"].parent),
+        _retirement_attempts_are_current(config, retired_id, receipt.get("attempts")),
+        recorded_state_sha256 == receipt.get("workflow_state_sha256"),
+        recorded_manifest_sha256 == receipt.get("manifest_sha256"),
+        stored.get("project_root") == str(config["project_root"]),
+        stored.get("workflow_parent") == str(config["workflow_dir"].parent),
+    ))
+
+
+def _completed_scope_is_valid(config: dict[str, Any], stored: dict[str, Any]) -> bool:
+    active = str(stored.get("active_workflow_id") or "")
+    state_path = _state_path(config, active)
+    try:
+        recorded = Path(str(stored.get("workflow_state_path") or ""))
+        if (
+            not active
+            or recorded.resolve() != state_path.resolve()
+            or recorded.is_symlink()
+            or not recorded.is_file()
+        ):
+            return False
+        state = _json(recorded)
+        output = _inside(config["project_root"], state.get("final_output_path"))
+        output_bytes = output.read_bytes() if output.is_file() else b""
+    except (OSError, ValueError, WorkflowError, json.JSONDecodeError):
+        return False
+    gate = state.get("local_gate")
+    return all((
+        state.get("schema") == STATE_SCHEMA,
+        state.get("status") == "complete",
+        state.get("workflow_id") == active,
+        output.is_file(),
+        bool(output_bytes.strip()),
+        isinstance(gate, dict) and gate.get("exit_code") == 0,
+    ))
+
+
 def _claim_scope(config: dict[str, Any], workflow_id: str) -> None:
     path = _scope_path(config)
-    if path.is_file():
+    retired_receipt = _retirement_receipt_path(config, workflow_id)
+    if retired_receipt.exists() or retired_receipt.is_symlink():
+        raise WorkflowError(f"retired comprehensive workflow {workflow_id} cannot reclaim its scope")
+    if path.exists() or path.is_symlink():
+        if path.is_symlink() or not path.is_file():
+            raise WorkflowError("comprehensive scope authority is not a regular non-symlink file")
         stored = _json(path)
-        active = str(stored.get("active_workflow_id") or "")
-        status = str(stored.get("status") or "")
-        if active and active != workflow_id and status != "complete":
+        raw_active = stored.get("active_workflow_id")
+        active = raw_active if isinstance(raw_active, str) else ""
+        status = stored.get("status")
+        if not all((
+            stored.get("schema") == SCOPE_SCHEMA,
+            stored.get("project_root") == str(config["project_root"]),
+            stored.get("workflow_parent") == str(config["workflow_dir"].parent),
+            isinstance(status, str),
+            isinstance(raw_active, str),
+            active == active.strip(),
+        )):
+            raise WorkflowError("comprehensive scope authority is malformed or foreign")
+        if status == "released":
+            if not _released_scope_is_valid(config, stored):
+                raise WorkflowError("released comprehensive scope lacks a valid retirement receipt")
+        elif not active:
+            raise WorkflowError("nonreleased comprehensive scope lacks an exact owner")
+        elif active == workflow_id:
+            if status == "complete":
+                if not _completed_scope_is_valid(config, stored):
+                    raise WorkflowError("completed comprehensive scope lacks valid completion authority")
+                return
+            if status not in {"active", "attention_required", "failed"}:
+                raise WorkflowError("comprehensive scope authority has an invalid owner status")
+        elif status == "complete":
+            if not _completed_scope_is_valid(config, stored):
+                raise WorkflowError("completed comprehensive scope lacks valid completion authority")
+        else:
             raise WorkflowError(
                 f"comprehensive scope already belongs to active workflow {active}; recover that exact workflow"
             )
@@ -258,9 +462,9 @@ def _claim_scope(config: dict[str, Any], workflow_id: str) -> None:
 
 def _write_workflow_state(path: Path, config: dict[str, Any], value: dict[str, Any]) -> None:
     payload = {**value, "review_policy": dict(config["_review_policy"])}
-    _write(path, payload)
+    RUNNER.STATE.write_json_atomic(path, payload)
     scope_status = str(payload.get("status") or "active")
-    _write(_scope_path(config), {
+    RUNNER.STATE.write_json_atomic(_scope_path(config), {
         "schema": SCOPE_SCHEMA,
         "status": scope_status if scope_status in {"complete", "attention_required", "failed"} else "active",
         "active_workflow_id": config["workflow_id"],
@@ -278,13 +482,15 @@ def _stage_mission(
     stage: str,
     source: Path,
     attempt_id: str,
-) -> tuple[Path, Path, str]:
+    source_sha: str,
+    source_bytes: bytes,
+) -> tuple[Path, Path, str, str]:
     stage_dir = config["workflow_dir"] / "stages" / f"{index:02d}-{stage}-{attempt_id[:12]}"
     receipt = stage_dir / "stage-result.json"
     target = stage_dir / "mission.md"
     stage_dir.mkdir(parents=True, exist_ok=True)
-    body = source.read_text(encoding="utf-8")
-    input_sha = sha(source)
+    body = source_bytes.decode("utf-8")
+    input_sha = source_sha
     protocol = (
         "\n\n[HOST_STAGE_CONTRACT]\n"
         f"workflow_id={workflow_id}\nstage={stage}\nstage_index={index}\n"
@@ -324,6 +530,8 @@ def _stage_mission(
             f"{PRO_ATTACHMENT_END}\n"
             "Canonical plan receipt status is PLAN_READY. The legacy status completed is accepted only when the "
             "receipt is otherwise a complete, hash-valid, blocker-free ready transition to review, web-multi, or pro.\n"
+            "If next_stage=web-multi, every solver entry in the authored Multi manifest must include the exact "
+            "mission_sha256 for its mission_path, and merger_mission_sha256 must bind merger_mission_path.\n"
         )
     if stage == "review":
         config.setdefault("_review_policy", _review_policy_from_history(config))
@@ -352,8 +560,9 @@ def _stage_mission(
             f"baseline_critical_finding_ids={json.dumps(policy['baseline_critical_finding_ids'], ensure_ascii=False, separators=(',', ':'))}\n"
             f"baseline_critical_findings_sha256={policy['baseline_critical_findings_sha256'] or ''}\n"
         )
-    target.write_text(body.rstrip() + protocol, encoding="utf-8")
-    return target, receipt, input_sha
+    mission_bytes = (body.rstrip() + protocol).encode("utf-8")
+    target.write_bytes(mission_bytes)
+    return target, receipt, input_sha, hashlib.sha256(mission_bytes).hexdigest()
 
 
 def _pro_stage_mission(
@@ -362,13 +571,17 @@ def _pro_stage_mission(
     index: int,
     source: Path,
     attempt_id: str,
-) -> tuple[Path, Path, str]:
+    source_sha: str,
+    source_bytes: bytes,
+) -> tuple[Path, Path, str, str]:
     stage_dir = config["workflow_dir"] / "stages" / f"{index:02d}-pro-{attempt_id[:12]}"
     receipt = stage_dir / "stage-result.json"
     target = stage_dir / "mission.md"
     stage_dir.mkdir(parents=True, exist_ok=True)
-    input_sha = sha(source)
-    body = source.read_text(encoding="utf-8")
+    body = source_bytes.decode("utf-8")
+    if not body.strip():
+        raise WorkflowError("Pro transition source must be nonempty")
+    input_sha = source_sha
     protocol = (
         "\n\n[HOST_STAGE_CONTRACT]\n"
         f"workflow_id={workflow_id}\nstage=pro\nstage_index={index}\n"
@@ -383,8 +596,9 @@ def _pro_stage_mission(
         "next_mission_text. Never paste a nested JSON document into either string with raw, unescaped quotes; "
         "encode it as string content with JSON escaping.\n"
     )
-    target.write_text(body.rstrip() + protocol, encoding="utf-8")
-    return target, receipt, input_sha
+    mission_bytes = (body.rstrip() + protocol).encode("utf-8")
+    target.write_bytes(mission_bytes)
+    return target, receipt, input_sha, hashlib.sha256(mission_bytes).hexdigest()
 
 
 def _oracle_manifest(
@@ -394,13 +608,15 @@ def _oracle_manifest(
     run_id: str,
     *,
     stage: str,
-    pro_attachments: Iterable[Path] = (),
+    pro_attachments: Iterable[tuple[Path, str]] = (),
+    mission_sha: str,
 ) -> Path:
     path = stage_dir / "oracle.json"
     payload: dict[str, Any] = {
         "schema": RUNNER.STATE.SCHEMA,
         "project_root": str(config["project_root"]),
         "mission_path": str(mission),
+        "mission_sha256": mission_sha,
         "mode": "browser",
         "model": "gpt-5.5-pro" if stage == "pro" else config["model"],
         "model_strategy": "select",
@@ -411,8 +627,39 @@ def _oracle_manifest(
         "run_id": run_id,
     }
     if stage == "pro":
+        evidence = tuple(pro_attachments)
+        if not evidence:
+            raise WorkflowError("Pro context packet requires explicit project evidence")
+        builder = RUNNER.PRO_CONTEXT_BUILDER
+        context_manifest = stage_dir / "project-context-manifest.json"
+        packet = stage_dir / "project-context.zip"
+        category = "comprehensive-stage-evidence"
+        _write(context_manifest, {
+            "schema": builder.SCHEMA,
+            "project_root": str(config["project_root"]),
+            "question": "Complete the comprehensive Pro stage using the exact attached project evidence.",
+            "mission_path": str(mission),
+            "mission_sha256": mission_sha,
+            "required_categories": [category],
+            "category_omissions": [],
+            "local_transport_envelope_bytes": builder.TOTAL_ENVELOPE_BYTES,
+            "answer_headroom_bytes": builder.TRANSPORT_ANSWER_HEADROOM_BYTES,
+            "metadata_reserve_bytes": builder.METADATA_RESERVE_BYTES,
+            "packet_path": str(packet),
+            "evidence": [
+                {"path": str(item), "category": category, "priority": priority, "sha256": expected_sha}
+                for priority, (item, expected_sha) in enumerate(evidence)
+            ],
+        })
+        try:
+            context_receipt = builder.build(context_manifest)
+        except builder.PacketError as exc:
+            raise WorkflowError(f"Pro context packet invalid: {exc}") from exc
         payload["transport"] = "pro-attachment-only"
-        payload["attachments"] = [str(mission), *(str(item) for item in pro_attachments)]
+        payload["attachments"] = [str(mission), str(packet)]
+        payload["attachment_sha256s"] = [mission_sha, str(context_receipt["packet_sha256"])]
+        payload["project_context_manifest_path"] = str(context_manifest)
+        payload["project_context_manifest_sha256"] = sha(context_manifest)
     else:
         payload["transport"] = "devspace"
         payload["app_name"] = config["app_name"]
@@ -420,9 +667,14 @@ def _oracle_manifest(
     return path
 
 
-def _declared_pro_attachments(config: dict[str, Any], source: Path) -> tuple[Path, ...]:
+def _declared_pro_attachments(
+    config: dict[str, Any], source: Path, source_bytes: bytes
+) -> tuple[tuple[Path, str], ...]:
     """Return only packets declared in one closed machine-readable mission block."""
-    text = source.read_text(encoding="utf-8")
+    source = _inside(config["project_root"], source)
+    text = source_bytes.decode("utf-8")
+    if not text.strip():
+        raise WorkflowError("Pro transition source must be nonempty")
     begin_count = text.count(PRO_ATTACHMENT_BEGIN)
     end_count = text.count(PRO_ATTACHMENT_END)
     if begin_count == end_count == 0:
@@ -439,7 +691,7 @@ def _declared_pro_attachments(config: dict[str, Any], source: Path) -> tuple[Pat
         raise WorkflowError("Pro attachment contract has an invalid closed key set")
     if payload.get("schema") != PRO_ATTACHMENT_SCHEMA or not isinstance(payload.get("attachments"), list):
         raise WorkflowError("Pro attachment contract schema or attachments is invalid")
-    paths: list[Path] = []
+    paths: list[tuple[Path, str]] = []
     seen: set[Path] = set()
     for item in payload["attachments"]:
         if not isinstance(item, dict) or set(item) - {"path", "sha256"} or not isinstance(item.get("path"), str):
@@ -450,19 +702,24 @@ def _declared_pro_attachments(config: dict[str, Any], source: Path) -> tuple[Pat
         path = _inside(config["project_root"], raw)
         if path in seen:
             raise WorkflowError("Pro attachment contract contains a duplicate path")
+        actual_hash = sha(path)
         declared_hash = item.get("sha256")
         if declared_hash is not None:
-            if not isinstance(declared_hash, str) or len(declared_hash) != 64 or any(char not in "0123456789abcdef" for char in declared_hash.lower()):
-                raise WorkflowError("Pro attachment sha256 must be a 64-character hexadecimal digest")
-            if sha(path).lower() != declared_hash.lower():
+            if not isinstance(declared_hash, str) or re.fullmatch(r"[0-9a-f]{64}", declared_hash) is None:
+                raise WorkflowError("Pro attachment sha256 must be an exact lowercase 64-character hexadecimal digest")
+            if actual_hash != declared_hash:
                 raise WorkflowError("Pro attachment hash mismatch")
         seen.add(path)
-        paths.append(path)
+        paths.append((path, actual_hash))
     return tuple(paths)
 
 
-def _mission_contains_pro_attachment_contract(source: Path) -> bool:
-    text = source.read_text(encoding="utf-8")
+def _pro_attachment_state(attachments: Iterable[tuple[Path, str]]) -> list[dict[str, str]]:
+    return [{"path": str(path), "sha256": expected} for path, expected in attachments]
+
+
+def _mission_contains_pro_attachment_contract(source_bytes: bytes) -> bool:
+    text = source_bytes.decode("utf-8")
     return PRO_ATTACHMENT_BEGIN in text or PRO_ATTACHMENT_END in text
 
 
@@ -725,8 +982,23 @@ def _validate_receipt(
     stage: str,
     attempt_id: str,
     input_sha: str,
+    *,
+    expected_receipt_sha256: str | None = None,
+    receipt_bytes: bytes | None = None,
 ) -> dict[str, Any]:
-    value = _json(receipt_path)
+    if receipt_bytes is None:
+        receipt_bytes = receipt_path.read_bytes()
+    if expected_receipt_sha256 is not None:
+        if re.fullmatch(r"[0-9a-f]{64}", expected_receipt_sha256) is None:
+            raise WorkflowError("sealed stage receipt SHA-256 is invalid")
+        if hashlib.sha256(receipt_bytes).hexdigest() != expected_receipt_sha256:
+            raise WorkflowError("sealed stage receipt changed before advancement")
+    try:
+        value = json.loads(receipt_bytes.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WorkflowError("stage receipt must be strict UTF-8 JSON") from exc
+    if not isinstance(value, dict):
+        raise WorkflowError("stage receipt must be a JSON object")
     has_schema = "schema" in value
     has_legacy_schema = "schema_version" in value
     schema = value.get("schema")
@@ -864,6 +1136,225 @@ def _validate_receipt(
 def _state_path(config: dict[str, Any], workflow_id: str) -> Path:
     project_key = hashlib.sha256(str(config["project_root"]).casefold().encode("utf-8")).hexdigest()[:24]
     return RUNNER.STATE.oracle_state_root() / "workflows" / project_key / f"{workflow_id}.json"
+
+
+def _retirement_attempts_are_current(
+    config: dict[str, Any],
+    workflow_id: str,
+    attempts: Any,
+) -> bool:
+    """Require the sealed attempt ledger to equal every exact-workflow run state."""
+    if not isinstance(attempts, list) or not attempts or not all(isinstance(item, dict) for item in attempts):
+        return False
+    project_key = hashlib.sha256(str(config["project_root"]).casefold().encode("utf-8")).hexdigest()[:24]
+    run_root = RUNNER.STATE.oracle_state_root() / "projects" / project_key / "runs"
+    expected_parent = hashlib.sha256(workflow_id.encode("utf-8")).hexdigest()
+    sealed: dict[str, Path] = {}
+    for item in attempts:
+        run_id = item.get("run_id")
+        if (
+            not isinstance(run_id, str)
+            or re.fullmatch(r"[0-9a-f]{32}", run_id) is None
+            or run_id in sealed
+            or item.get("stage") != "plan"
+            or item.get("attempt_id") != run_id
+            or item.get("output_absent") is not True
+            or item.get("conversation_url_absent") is not True
+            or re.fullmatch(r"[0-9a-f]{64}", str(item.get("input_mission_sha256") or "")) is None
+            or re.fullmatch(r"[0-9a-f]{64}", str(item.get("mission_sha256") or "")) is None
+        ):
+            return False
+        run_dir = run_root / run_id
+        state_path = Path(str(item.get("state_path") or ""))
+        settlement_path = Path(str(item.get("settlement_path") or ""))
+        try:
+            _lexical_nonsymlink(state_path)
+            _lexical_nonsymlink(settlement_path)
+            if (
+                state_path != run_dir / "state.json"
+                or settlement_path != run_dir / "user-confirmed-no-submission.json"
+                or not state_path.is_file()
+                or not settlement_path.is_file()
+                or sha(state_path) != item.get("state_sha256")
+                or sha(settlement_path) != item.get("settlement_sha256")
+            ):
+                return False
+            state = RUNNER.STATE.load_state(state_path)
+            proof = RUNNER.STATE.proven_user_confirmed_no_submission(state_path)
+        except Exception:
+            return False
+        reference = state.get("user_confirmed_no_submission")
+        if not isinstance(reference, dict) or proof is None or not all((
+            state.get("run_id") == run_id,
+            state.get("project_root") == str(config["project_root"]),
+            state.get("parallel_parent_id") == expected_parent,
+            state.get("session_authority") == "pre_submit",
+            state.get("transport_status") == "not_submitted_user_confirmed",
+            state.get("terminal_harvested") is False,
+            state.get("artifact_sha256") is None,
+            Path(str(reference.get("path") or "")) == settlement_path,
+            reference.get("sha256") == item.get("settlement_sha256"),
+            proof.get("workflow_id") == workflow_id,
+            proof.get("stage") == "plan",
+            proof.get("attempt_id") == run_id,
+            proof.get("run_id") == run_id,
+            proof.get("input_mission_sha256") == item.get("input_mission_sha256"),
+            proof.get("mission_sha256") == item.get("mission_sha256"),
+            proof.get("output_absent") is True,
+            proof.get("conversation_url_absent") is True,
+            not Path(str(proof.get("_receipt_path") or "")).exists(),
+            sha(state_path) == item.get("state_sha256"),
+            sha(settlement_path) == item.get("settlement_sha256"),
+        )):
+            return False
+        sealed[run_id] = state_path
+
+    found: set[str] = set()
+    if run_root.is_dir():
+        for candidate in sorted(run_root.glob("*/state.json"), key=lambda item: str(item)):
+            try:
+                state = RUNNER.STATE.load_state(candidate)
+            except Exception:
+                return False
+            if (
+                state.get("project_root") != str(config["project_root"])
+                or state.get("parallel_parent_id") != expected_parent
+            ):
+                continue
+            run_id = state.get("run_id")
+            if (
+                not isinstance(run_id, str)
+                or run_id not in sealed
+                or candidate != sealed[run_id]
+                or candidate.parent.name != run_id
+            ):
+                return False
+            found.add(run_id)
+    return found == set(sealed)
+
+
+def _audit_retirable_workflow(config: dict[str, Any]) -> tuple[Path, dict[str, Any], list[dict[str, Any]]]:
+    workflow_id = config["workflow_id"]
+    state_path = _state_path(config, workflow_id)
+    if state_path.is_symlink() or not state_path.is_file():
+        raise WorkflowError("exact comprehensive workflow state is missing or symlinked")
+    state = _json(state_path)
+    if not all((
+        state.get("schema") == STATE_SCHEMA,
+        state.get("status") == "attention_required",
+        state.get("workflow_id") == workflow_id,
+        state.get("manifest_sha256") == config["manifest_sha256"],
+        state.get("current_stage") == "plan",
+        type(state.get("next_index")) is int and state["next_index"] == 0,
+        state.get("current_input_sha256") == config["initial_mission_sha256"],
+        Path(str(state.get("current_binding_source_path") or "")).resolve()
+        == config["initial_mission_path"],
+        state.get("current_binding_source_sha256") == config["initial_mission_sha256"],
+    )):
+        raise WorkflowError("workflow state is not the exact unsettled stage-zero plan authority")
+    if any(key in state for key in ("final_output_path", "local_gate")):
+        raise WorkflowError("workflow has terminal output or a local completion gate")
+    records = state.get("records")
+    if not isinstance(records, list) or not records or not all(isinstance(item, dict) for item in records):
+        raise WorkflowError("workflow retirement requires a nonempty exact Oracle attempt ledger")
+    project_key = hashlib.sha256(str(config["project_root"]).casefold().encode("utf-8")).hexdigest()[:24]
+    run_root = RUNNER.STATE.oracle_state_root() / "projects" / project_key / "runs"
+    owners = RUNNER.STATE.unresolved_project_sessions(run_root, config["project_root"])
+    if owners:
+        raise WorkflowError(f"workflow retirement refused: unresolved Oracle owners: {owners}")
+
+    attempts: dict[str, dict[str, Any]] = {}
+    for record in records:
+        raw_run_dir = str(record.get("run_dir") or "").strip()
+        if (
+            record.get("stage") != "plan"
+            or not raw_run_dir
+            or record.get("ok") is True
+            or any(key in record for key in ("result", "result_path", "receipt_path", "parent_id"))
+            or str(record.get("recovery_status") or "") in {
+                "session_live", "submitted_unknown", "terminal", "terminal_observed", "complete"
+            }
+        ):
+            raise WorkflowError("workflow ledger contains submitted, terminal, or non-plan activity")
+        run_dir = Path(raw_run_dir).expanduser()
+        try:
+            if not run_dir.is_absolute() or run_dir.is_symlink():
+                raise WorkflowError("recorded Oracle attempt path is not an exact host directory")
+            run_dir = run_dir.resolve(strict=True)
+        except OSError as exc:
+            raise WorkflowError("recorded Oracle attempt directory is missing") from exc
+        if run_dir.parent != run_root.resolve() or re.fullmatch(r"[0-9a-f]{32}", run_dir.name) is None:
+            raise WorkflowError("recorded Oracle attempt is foreign to the exact project run root")
+        run_id = run_dir.name
+        if run_id in attempts:
+            continue
+        run_state_path = run_dir / "state.json"
+        proof = RUNNER.STATE.proven_user_confirmed_no_submission(run_state_path)
+        run_state = RUNNER.STATE.load_state(run_state_path)
+        expected_stage_dir = config["workflow_dir"] / "stages" / f"00-plan-{run_id[:12]}"
+        expected_mission = expected_stage_dir / "mission.md"
+        expected_receipt = expected_stage_dir / "stage-result.json"
+        reference = run_state.get("user_confirmed_no_submission")
+        if proof is None or not isinstance(reference, dict):
+            raise WorkflowError("recorded Oracle attempt lacks user-confirmed no-submission settlement")
+        settlement_path = Path(str(reference.get("path") or ""))
+        if (
+            settlement_path.resolve() != (run_dir / "user-confirmed-no-submission.json").resolve()
+            or settlement_path.is_symlink()
+            or not settlement_path.is_file()
+        ):
+            raise WorkflowError("recorded Oracle attempt settlement path is missing or foreign")
+        if not all((
+            run_state.get("run_id") == run_id,
+            run_state.get("project_root") == str(config["project_root"]),
+            run_state.get("session_authority") == "pre_submit",
+            run_state.get("transport_status") == "not_submitted_user_confirmed",
+            run_state.get("terminal_harvested") is False,
+            run_state.get("artifact_sha256") is None,
+            proof.get("workflow_id") == workflow_id,
+            proof.get("stage") == "plan",
+            proof.get("attempt_id") == run_id,
+            proof.get("run_id") == run_id,
+            proof.get("input_mission_sha256") == config["initial_mission_sha256"],
+            proof.get("output_absent") is True,
+            proof.get("conversation_url_absent") is True,
+            Path(str(proof.get("_augmented_mission_path") or "")).resolve() == expected_mission.resolve(),
+            Path(str(proof.get("_input_mission_path") or "")).resolve()
+            == config["initial_mission_path"],
+            Path(str(proof.get("_receipt_path") or "")).resolve() == expected_receipt.resolve(),
+            not expected_receipt.exists(),
+            sha(settlement_path) == str(reference.get("sha256") or ""),
+        )):
+            raise WorkflowError("recorded Oracle attempt is submitted, terminal, mismatched, or unsettled")
+        attempts[run_id] = {
+            "run_id": run_id,
+            "state_path": str(run_state_path),
+            "state_sha256": sha(run_state_path),
+            "settlement_path": str(settlement_path.resolve()),
+            "settlement_sha256": sha(settlement_path),
+            "stage": "plan",
+            "attempt_id": run_id,
+            "input_mission_sha256": proof["input_mission_sha256"],
+            "mission_sha256": proof["mission_sha256"],
+            "output_absent": True,
+            "conversation_url_absent": True,
+        }
+    sealed_attempts = [attempts[key] for key in sorted(attempts)]
+    if not _retirement_attempts_are_current(config, workflow_id, sealed_attempts):
+        raise WorkflowError("workflow run states do not exactly match the settled retirement ledger")
+    current_attempt = str(state.get("current_attempt_id") or "")
+    if (
+        current_attempt not in attempts
+        or state.get("oracle_run_id") != current_attempt
+        or Path(str(state.get("oracle_run_dir") or "")).resolve()
+        != Path(attempts[current_attempt]["state_path"]).parent.resolve()
+        or Path(str(state.get("current_augmented_mission_path") or "")).resolve()
+        != (config["workflow_dir"] / "stages" / f"00-plan-{current_attempt[:12]}" / "mission.md").resolve()
+        or state.get("current_augmented_mission_sha256") != attempts[current_attempt]["mission_sha256"]
+        or Path(str(state.get("receipt_path") or "")).exists()
+    ):
+        raise WorkflowError("current Oracle attempt does not match the exact settled attempt ledger")
+    return state_path, state, sealed_attempts
 
 
 def _is_unambiguous_pre_submit_failure(run_dir: Path) -> bool:
@@ -1070,14 +1561,66 @@ def _recover_exact_oracle_stage(
     """Recover only the persisted Oracle run; this path never submits a prompt."""
     run_dir = Path(str(stored.get("oracle_run_dir") or "")).expanduser()
     expected_run_id = str(stored.get("oracle_run_id") or stored.get("current_attempt_id") or "")
-    if not run_dir.is_absolute() or not expected_run_id:
+    manifest_path = Path(str(stored.get("oracle_manifest_path") or "")).expanduser()
+    manifest_sha = str(stored.get("oracle_manifest_sha256") or "")
+    if not run_dir.is_absolute() or not expected_run_id or not manifest_path.is_absolute() or not manifest_sha:
         return {"ok": False, "error": "ORACLE_RECOVERY_IDENTITY_MISSING"}
     try:
+        if sha(manifest_path.resolve(strict=True)) != manifest_sha:
+            return {"ok": False, "error": "ORACLE_RECOVERY_MANIFEST_CHANGED"}
+        expected_config = RUNNER.STATE.load_manifest(
+            manifest_path.resolve(strict=True), expected_manifest_sha256=manifest_sha
+        )
         directory = run_dir.resolve(strict=True)
         run_state = RUNNER.STATE.load_state(directory / "state.json")
     except Exception as exc:
         return {"ok": False, "error": "ORACLE_RECOVERY_RUN_UNAVAILABLE", "detail": str(exc)}
-    if str(run_state.get("run_id") or "") != expected_run_id:
+    mission = run_state.get("mission") if isinstance(run_state.get("mission"), dict) else {}
+    run_manifest = run_state.get("manifest") if isinstance(run_state.get("manifest"), dict) else {}
+    run_attachments = run_state.get("attachments") if isinstance(run_state.get("attachments"), list) else []
+    run_bound_inputs = run_state.get("bound_inputs") if isinstance(run_state.get("bound_inputs"), list) else []
+    run_context = (
+        run_state.get("project_context_manifest")
+        if isinstance(run_state.get("project_context_manifest"), dict)
+        else {}
+    )
+    attachment_bindings = [
+        (str(item.get("path") or ""), str(item.get("sha256") or ""))
+        for item in run_attachments if isinstance(item, dict)
+    ]
+    expected_attachments = list(zip(
+        (str(path) for path in expected_config.attachments),
+        expected_config.attachment_sha256s,
+        strict=True,
+    ))
+    bound_input_bindings = [
+        (str(item.get("path") or ""), str(item.get("sha256") or ""))
+        for item in run_bound_inputs if isinstance(item, dict)
+    ]
+    expected_bound_inputs = list(zip(
+        (str(path) for path in expected_config.bound_inputs),
+        expected_config.bound_input_sha256s,
+        strict=True,
+    ))
+    expected_mission_path = str(stored.get("current_augmented_mission_path") or "")
+    expected_mission_sha = str(stored.get("current_augmented_mission_sha256") or "")
+    if any((
+        str(run_state.get("run_id") or "") != expected_run_id,
+        str(expected_config.requested_run_id or "") != expected_run_id,
+        str(run_manifest.get("path") or "") != str(manifest_path.resolve()),
+        str(run_manifest.get("actual_sha256") or "") != manifest_sha,
+        str(run_manifest.get("expected_sha256") or "") != manifest_sha,
+        str(expected_config.mission_path) != expected_mission_path,
+        expected_config.mission_sha256 != expected_mission_sha,
+        str(mission.get("path") or "") != expected_mission_path,
+        str(mission.get("sha256") or "") != expected_mission_sha,
+        len(attachment_bindings) != len(run_attachments),
+        attachment_bindings != expected_attachments,
+        len(bound_input_bindings) != len(run_bound_inputs),
+        bound_input_bindings != expected_bound_inputs,
+        str(run_context.get("path") or "") != str(expected_config.project_context_manifest_path or ""),
+        str(run_context.get("sha256") or "") != str(expected_config.project_context_manifest_sha256 or ""),
+    )):
         return {"ok": False, "error": "ORACLE_RECOVERY_IDENTITY_MISMATCH"}
     # Oracle harvest reports the exact saved conversation state.  The runner
     # discards a candidate when that state is still running and publishes it
@@ -1111,26 +1654,79 @@ def _recover_exact_multi_stage(stored: dict[str, Any]) -> dict[str, Any]:
     """Read a persisted Multi result only; absent identity is never a retry signal."""
     result_path = Path(str(stored.get("multi_result_path") or "")).expanduser()
     expected_manifest_sha = str(stored.get("multi_manifest_sha256") or "")
-    if not result_path.is_absolute() or not expected_manifest_sha:
+    expected_parent = str(stored.get("multi_execution_id") or "")
+    expected_receipt = Path(str(stored.get("multi_receipt_path") or "")).expanduser()
+    if not result_path.is_absolute() or not expected_manifest_sha or not expected_parent or not expected_receipt.is_absolute():
         return {"ok": False, "error": "MULTI_RECOVERY_IDENTITY_MISSING"}
+    terminal_status = str(stored.get("multi_terminal_status") or "")
+    terminal_sha = str(stored.get("multi_result_sha256") or "")
+    terminal_receipt_sha = str(stored.get("multi_receipt_sha256") or "")
+    if not terminal_status and not terminal_sha:
+        return {"ok": False, "error": "MULTI_TERMINAL_SEAL_MISSING"}
+    if terminal_status not in {"complete", "partial", "failed"} or re.fullmatch(r"[0-9a-f]{64}", terminal_sha) is None:
+        return {"ok": False, "error": "MULTI_TERMINAL_SEAL_INVALID"}
+    if (
+        terminal_status == "complete"
+        and re.fullmatch(r"[0-9a-f]{64}", terminal_receipt_sha) is None
+    ) or (terminal_status in {"partial", "failed"} and terminal_receipt_sha):
+        return {"ok": False, "error": "MULTI_TERMINAL_SEAL_INVALID"}
     try:
-        result = _json(result_path.resolve(strict=True))
+        resolved_result_path = result_path.resolve(strict=True)
+        result_bytes = resolved_result_path.read_bytes()
+        if hashlib.sha256(result_bytes).hexdigest() != terminal_sha:
+            return {"ok": False, "error": "MULTI_TERMINAL_RESULT_CHANGED"}
+        result = json.loads(result_bytes.decode("utf-8", errors="strict"))
+        if not isinstance(result, dict):
+            raise WorkflowError("web-multi result must be a JSON object")
     except Exception as exc:
         return {"ok": False, "error": "MULTI_RESULT_UNAVAILABLE", "detail": str(exc)}
-    if result.get("schema") != MULTI.RESULT_SCHEMA or not str(result.get("parent_id") or ""):
+    status = str(result.get("status") or "")
+    if (
+        result.get("schema") != MULTI.RESULT_SCHEMA
+        or str(result.get("parent_id") or "") != expected_parent
+        or str(result.get("manifest_sha256") or "") != expected_manifest_sha
+        or status != terminal_status
+    ):
         return {"ok": False, "error": "MULTI_RESULT_IDENTITY_INVALID"}
+    if status in {"partial", "failed"}:
+        return {
+            "ok": False,
+            "error": "MULTI_TERMINAL_SEALED",
+            "status": status,
+            "result_path": str(resolved_result_path),
+            "manifest_sha256": expected_manifest_sha,
+            "multi_terminal_status": status,
+            "multi_result_sha256": terminal_sha,
+        }
+    actual_receipt = Path(str(result.get("next_stage_result_path") or "")).expanduser()
+    if not actual_receipt.is_absolute() or actual_receipt != expected_receipt:
+        return {"ok": False, "error": "MULTI_RESULT_IDENTITY_INVALID"}
+    try:
+        _lexical_nonsymlink(actual_receipt)
+        _lexical_nonsymlink(expected_receipt)
+        resolved_receipt = expected_receipt.resolve(strict=True)
+        if not resolved_receipt.is_file():
+            return {"ok": False, "error": "MULTI_RECEIPT_UNAVAILABLE"}
+        receipt_bytes = resolved_receipt.read_bytes()
+    except Exception as exc:
+        return {"ok": False, "error": "MULTI_RECEIPT_UNAVAILABLE", "detail": str(exc)}
+    if hashlib.sha256(receipt_bytes).hexdigest() != terminal_receipt_sha:
+        return {"ok": False, "error": "MULTI_RECEIPT_CHANGED"}
     return {
-        "ok": result.get("status") in {"complete", "partial"},
+        "ok": True,
         "parent_id": str(result["parent_id"]),
         "next_stage_result_path": result.get("next_stage_result_path"),
-        "status": result.get("status"),
-        "result_path": str(result_path.resolve()),
+        "status": status,
+        "result_path": str(resolved_result_path),
         "manifest_sha256": expected_manifest_sha,
+        "multi_terminal_status": status,
+        "multi_result_sha256": terminal_sha,
+        "multi_receipt_sha256": terminal_receipt_sha,
     }
 
 
 def _run_workflow_locked(
-    manifest_path: Path,
+    config: dict[str, Any],
     *,
     dry_run: bool = False,
     oracle_execute: Callable[..., dict[str, Any]] = RUNNER.execute_run,
@@ -1138,23 +1734,31 @@ def _run_workflow_locked(
     multi_execute: Callable[..., dict[str, Any]] = MULTI.run_multi,
     local_gate_runner: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
-    config = load_manifest(manifest_path)
     workflow_id = config["workflow_id"]
     config["_review_policy"] = _review_policy_from_history(config)
     config["_parallel_parent_id"] = hashlib.sha256(workflow_id.encode("utf-8")).hexdigest()
     config["workflow_dir"].mkdir(parents=True, exist_ok=True)
     if dry_run:
         attempt_id = uuid.uuid4().hex
-        mission, receipt_path, input_sha = _stage_mission(
-            config, workflow_id, 0, "plan", config["initial_mission_path"], attempt_id
+        source_sha = config["initial_mission_sha256"]
+        source_bytes = _bound_source_bytes(config["initial_mission_path"], source_sha)
+        mission, receipt_path, input_sha, augmented_mission_sha = _stage_mission(
+            config, workflow_id, 0, "plan", config["initial_mission_path"], attempt_id,
+            source_sha, source_bytes,
         )
-        oracle_manifest = _oracle_manifest(config, mission, mission.parent, attempt_id, stage="plan")
-        preview = oracle_execute(oracle_manifest, dry_run=True)
+        oracle_manifest = _oracle_manifest(
+            config, mission, mission.parent, attempt_id, stage="plan", mission_sha=augmented_mission_sha
+        )
+        oracle_manifest_sha = sha(oracle_manifest)
+        preview = oracle_execute(
+            oracle_manifest, expected_manifest_sha256=oracle_manifest_sha, dry_run=True
+        )
         return {
             "ok": bool(preview.get("ok")),
             "schema": STATE_SCHEMA,
             "status": "dry-run",
             "workflow_id": workflow_id,
+            "manifest_sha256": config["manifest_sha256"],
             "stage": "plan",
             "attempt_id": attempt_id,
             "input_mission_sha256": input_sha,
@@ -1163,6 +1767,7 @@ def _run_workflow_locked(
         }
     _claim_scope(config, workflow_id)
     state_path = _state_path(config, workflow_id)
+    frozen_pro_attachments: tuple[tuple[Path, str], ...] | None = None
     if state_path.is_file():
         stored = _json(state_path)
         if stored.get("manifest_sha256") != config["manifest_sha256"]:
@@ -1199,6 +1804,7 @@ def _run_workflow_locked(
                 return {"ok": True, **complete}
             stage = str(receipt["next_stage"])
             source = receipt["_next_mission"]
+            source_sha = str(receipt["next_mission_sha256"])
             start_index = int(stored["next_index"]) + 1
             _write_workflow_state(state_path, config, {
                 "schema": STATE_SCHEMA, "status": "prepared", "workflow_id": workflow_id,
@@ -1220,6 +1826,7 @@ def _run_workflow_locked(
             )
             stage = str(receipt["next_stage"])
             source = receipt["_next_mission"]
+            source_sha = str(receipt["next_mission_sha256"])
             records = list(stored.get("records") or []) + [{"stage": "pro", "receipt_path": str(pro_receipt)}]
             start_index = int(stored["next_index"]) + 1
             _write_workflow_state(state_path, config, {
@@ -1238,6 +1845,14 @@ def _run_workflow_locked(
                     "blocker": "web-multi exact result is not ready; no retry was submitted",
                     "recovery": recovered,
                     "records": records,
+                    **(
+                        {
+                            "multi_terminal_status": recovered["multi_terminal_status"],
+                            "multi_result_sha256": recovered["multi_result_sha256"],
+                        }
+                        if recovered.get("multi_terminal_status")
+                        else {}
+                    ),
                 }
                 _write_workflow_state(state_path, config, blocked)
                 return {"ok": False, **blocked}
@@ -1253,7 +1868,11 @@ def _run_workflow_locked(
                 _write_workflow_state(state_path, config, blocked)
                 return {"ok": False, **blocked}
             attempt_id = str(recovered["parent_id"])
-            receipt = _validate_receipt(config, result_path, workflow_id, "web-multi", attempt_id, sha(Path(str(stored["current_mission_path"]))))
+            receipt = _validate_receipt(
+                config, result_path, workflow_id, "web-multi", attempt_id,
+                str(stored["multi_manifest_sha256"]),
+                expected_receipt_sha256=str(recovered["multi_receipt_sha256"]),
+            )
             records.append({"stage": "web-multi", "parent_id": attempt_id, "result_path": recovered["result_path"], "recovered": True})
             prepared = {
                 "schema": STATE_SCHEMA, "status": "prepared", "workflow_id": workflow_id,
@@ -1265,7 +1884,7 @@ def _run_workflow_locked(
             }
             _write_workflow_state(state_path, config, prepared)
             return _run_workflow_locked(
-                manifest_path, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
+                config, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
                 multi_execute=multi_execute, local_gate_runner=local_gate_runner,
             )
         elif stored.get("status") in {"running", "attention_required"} and stored.get("current_stage"):
@@ -1285,6 +1904,7 @@ def _run_workflow_locked(
                 ) < 1
                 and persisted_run_dir.is_dir()
                 and _is_unambiguous_pre_submit_failure(persisted_run_dir)
+                and (stored_stage != "pro" or bool(stored.get("pro_attachments")))
                 and _user_confirmed_retry_binding_matches(
                     persisted_run_dir,
                     config=config,
@@ -1297,7 +1917,7 @@ def _run_workflow_locked(
                     binding_source_path=Path(str(stored.get("current_binding_source_path") or "")),
                 )
             ):
-                source = Path(str(stored["current_mission_path"])).resolve(strict=True)
+                source, _ = _receipt_path(config["project_root"], stored["current_mission_path"])
                 retry_record = _pre_submit_retry_record(
                     persisted_run_dir,
                     stage=stored_stage,
@@ -1316,14 +1936,15 @@ def _run_workflow_locked(
                     "manifest_sha256": config["manifest_sha256"],
                     "next_stage": str(stored["current_stage"]),
                     "next_mission_path": str(source),
-                    "next_mission_sha256": sha(source),
+                    "next_mission_sha256": stored_input_sha,
+                    **({"pro_attachments": stored["pro_attachments"]} if stored_stage == "pro" else {}),
                     "next_index": int(stored["next_index"]),
                     "records": stored_records + [retry_record],
                     "pre_submit_retries": pre_submit_retries + 1,
                 }
                 _write_workflow_state(state_path, config, prepared)
                 return _run_workflow_locked(
-                    manifest_path, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
+                    config, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
                     multi_execute=multi_execute, local_gate_runner=local_gate_runner,
                 )
             recovered = _recover_exact_oracle_stage(stored, oracle_recover=oracle_recover)
@@ -1362,24 +1983,40 @@ def _run_workflow_locked(
             }
             _write_workflow_state(state_path, config, awaiting)
             return _run_workflow_locked(
-                manifest_path, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
+                config, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
                 multi_execute=multi_execute, local_gate_runner=local_gate_runner,
             )
         elif stored.get("status") in {"running", "attention_required"}:
             return {"ok": False, **stored}
         else:
             stage = str(stored["next_stage"])
-            source = Path(str(stored["next_mission_path"])).resolve(strict=True)
-            if str(stored.get("next_mission_sha256") or "") != sha(source):
+            source, _ = _receipt_path(config["project_root"], stored["next_mission_path"])
+            source_sha = str(stored.get("next_mission_sha256") or "")
+            if source_sha != sha(source):
                 raise WorkflowError("prepared next mission changed after receipt verification")
+            frozen = stored.get("pro_attachments")
+            if frozen is not None:
+                if stage != "pro" or not isinstance(frozen, list) or not frozen:
+                    raise WorkflowError("stored Pro attachment binding is invalid")
+                items: list[tuple[Path, str]] = []
+                for item in frozen:
+                    if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
+                        raise WorkflowError("stored Pro attachment binding is invalid")
+                    expected = str(item["sha256"])
+                    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+                        raise WorkflowError("stored Pro attachment hash is invalid")
+                    items.append((_inside(config["project_root"], item["path"]), expected))
+                frozen_pro_attachments = tuple(items)
             records = list(stored.get("records") or [])
             start_index = int(stored.get("next_index") or 0)
     else:
         stage, source, records, start_index = "plan", config["initial_mission_path"], [], 0
+        source_sha = config["initial_mission_sha256"]
+        _bound_source_bytes(source, source_sha)
         _write_workflow_state(state_path, config, {
             "schema": STATE_SCHEMA, "status": "prepared", "workflow_id": workflow_id,
             "manifest_sha256": config["manifest_sha256"], "next_stage": stage,
-            "next_mission_path": str(source), "next_mission_sha256": sha(source),
+            "next_mission_path": str(source), "next_mission_sha256": source_sha,
             "next_index": 0, "records": records,
         })
     for index in range(start_index, config["max_stages"]):
@@ -1387,35 +2024,121 @@ def _run_workflow_locked(
             # This complete preflight is intentionally before the send-boundary
             # state write.  An invalid Multi manifest is a retryable pre-submit
             # error, not an active/uncertain provider workflow.
-            multi_config = MULTI.load_manifest(source)
-            multi_source = _json(source)
-            binding = multi_source.get("next_stage_binding") if isinstance(multi_source.get("next_stage_binding"), dict) else {}
+            multi_manifest_sha = source_sha
+            multi_config = MULTI.load_manifest(source, expected_manifest_sha256=multi_manifest_sha)
+            binding = multi_config["next_stage_binding"]
             if binding.get("workflow_id") != workflow_id or binding.get("stage") != "web-multi":
                 raise WorkflowError("web-multi manifest is not bound to this workflow")
             multi_result_path = multi_config["output_dir"] / "result.json"
             multi_receipt_path = multi_config.get("next_stage_result_path")
+            if not isinstance(multi_receipt_path, Path) or not multi_receipt_path.is_absolute():
+                raise WorkflowError("web-multi manifest requires an absolute next_stage_result_path")
             multi_execution_id = hashlib.sha256(
-                f"{workflow_id}:{index}:{sha(source)}".encode("utf-8")
+                f"{workflow_id}:{index}:{multi_manifest_sha}".encode("utf-8")
             ).hexdigest()
             _write_workflow_state(state_path, config, {
                 "schema": STATE_SCHEMA, "status": "running", "workflow_id": workflow_id,
                 "manifest_sha256": config["manifest_sha256"], "current_stage": stage,
                 "current_mission_path": str(source), "next_index": index, "records": records,
-                "multi_execution_id": multi_execution_id, "multi_manifest_sha256": sha(source),
+                "multi_execution_id": multi_execution_id, "multi_manifest_sha256": multi_manifest_sha,
                 "multi_result_path": str(multi_result_path),
                 "multi_receipt_path": str(multi_receipt_path) if multi_receipt_path else None,
             })
-            multi_result = multi_execute(source, dry_run=False, parent_lock_held=True)
-            records.append({"stage": stage, "result": multi_result})
-            if not multi_result.get("ok"):
-                break
-            result_path = Path(str(multi_result.get("next_stage_result_path") or ""))
+
+            def seal_terminal_result(result_path: Path, result_bytes: bytes) -> None:
+                stored = _json(state_path)
+                try:
+                    terminal = json.loads(result_bytes.decode("utf-8", errors="strict"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise WorkflowError("web-multi terminal result must be strict UTF-8 JSON") from exc
+                if not isinstance(terminal, dict):
+                    raise WorkflowError("web-multi terminal result must be a JSON object")
+                terminal_status = str(terminal.get("status") or "")
+                terminal_sha = hashlib.sha256(result_bytes).hexdigest()
+                if any((
+                    stored.get("status") != "running",
+                    stored.get("current_stage") != "web-multi",
+                    stored.get("workflow_id") != workflow_id,
+                    stored.get("manifest_sha256") != config["manifest_sha256"],
+                    stored.get("multi_execution_id") != multi_execution_id,
+                    stored.get("multi_manifest_sha256") != multi_manifest_sha,
+                    not result_path.is_absolute(),
+                    Path(str(stored.get("multi_result_path") or "")).resolve() != result_path.resolve(),
+                    terminal.get("schema") != MULTI.RESULT_SCHEMA,
+                    terminal_status not in {"complete", "partial", "failed"},
+                    str(terminal.get("parent_id") or "") != multi_execution_id,
+                    str(terminal.get("manifest_sha256") or "") != multi_manifest_sha,
+                )):
+                    raise WorkflowError("web-multi terminal seal identity mismatch")
+                terminal_receipt_sha = ""
+                if terminal_status == "complete":
+                    declared_receipt = Path(
+                        str(terminal.get("next_stage_result_path") or "")
+                    ).expanduser()
+                    if not declared_receipt.is_absolute() or declared_receipt != multi_receipt_path:
+                        raise WorkflowError("web-multi complete receipt identity mismatch")
+                    receipt_path = _inside(config["project_root"], declared_receipt)
+                    if not receipt_path.is_file():
+                        raise WorkflowError("web-multi complete receipt identity mismatch")
+                    receipt_bytes = receipt_path.read_bytes()
+                    terminal_receipt_sha = hashlib.sha256(receipt_bytes).hexdigest()
+                    _validate_receipt(
+                        config,
+                        receipt_path,
+                        workflow_id,
+                        "web-multi",
+                        multi_execution_id,
+                        multi_manifest_sha,
+                        expected_receipt_sha256=terminal_receipt_sha,
+                        receipt_bytes=receipt_bytes,
+                    )
+                existing_status = str(stored.get("multi_terminal_status") or "")
+                existing_sha = str(stored.get("multi_result_sha256") or "")
+                existing_receipt_sha = str(stored.get("multi_receipt_sha256") or "")
+                if existing_status or existing_sha:
+                    if (
+                        existing_status == terminal_status
+                        and existing_sha == terminal_sha
+                        and existing_receipt_sha == terminal_receipt_sha
+                    ):
+                        return
+                    raise WorkflowError("web-multi terminal seal is immutable")
+                _write_workflow_state(state_path, config, {
+                    **stored,
+                    "multi_terminal_status": terminal_status,
+                    "multi_result_sha256": terminal_sha,
+                    **(
+                        {"multi_receipt_sha256": terminal_receipt_sha}
+                        if terminal_receipt_sha
+                        else {}
+                    ),
+                })
+
+            multi_execute(
+                source, expected_manifest_sha256=multi_manifest_sha, parent_id=multi_execution_id,
+                dry_run=False, parent_lock_held=True, terminal_seal=seal_terminal_result,
+            )
+            recovered = _recover_exact_multi_stage(_json(state_path))
+            records.append({"stage": stage, "result": recovered})
+            if not recovered.get("ok"):
+                blocked = {
+                    **_json(state_path), "status": "attention_required", "records": records,
+                    "blocker": "web-multi exact execution needs recovery; no replacement was submitted",
+                    "recovery": recovered,
+                }
+                _write_workflow_state(state_path, config, blocked)
+                return {"ok": False, **blocked}
+            result_path = Path(str(recovered.get("next_stage_result_path") or ""))
             if not result_path.is_file():
                 return {"ok": False, "status": "attention_required", "workflow_id": workflow_id,
-                        "error": "web-multi merger did not provide next_stage_result_path", "records": records}
-            attempt_id = str(multi_result.get("parent_id") or "")
-            receipt = _validate_receipt(config, result_path, workflow_id, "web-multi", attempt_id, sha(source))
+                        "error": "web-multi sealed result has no stage receipt", "records": records}
+            attempt_id = multi_execution_id
+            receipt = _validate_receipt(
+                config, result_path, workflow_id, "web-multi", attempt_id, multi_manifest_sha,
+                expected_receipt_sha256=str(recovered["multi_receipt_sha256"]),
+            )
             stage, source = str(receipt["next_stage"]), receipt["_next_mission"]
+            source_sha = str(receipt["next_mission_sha256"])
             _write_workflow_state(state_path, config, {
                 "schema": STATE_SCHEMA, "status": "prepared", "workflow_id": workflow_id,
                 "manifest_sha256": config["manifest_sha256"], "next_stage": stage,
@@ -1424,23 +2147,32 @@ def _run_workflow_locked(
             })
             continue
         attempt_id = uuid.uuid4().hex
+        source_bytes = _bound_source_bytes(source, source_sha)
         if stage == "pro":
-            pro_attachments = _declared_pro_attachments(config, source)
-            mission, receipt_path, input_sha = _pro_stage_mission(
-                config, workflow_id, index, source, attempt_id
+            pro_attachments = frozen_pro_attachments
+            if pro_attachments is None:
+                pro_attachments = _declared_pro_attachments(config, source, source_bytes)
+            if not pro_attachments:
+                pro_attachments = ((source, source_sha),)
+            mission, receipt_path, input_sha, augmented_mission_sha = _pro_stage_mission(
+                config, workflow_id, index, source, attempt_id, source_sha, source_bytes
             )
         else:
-            if _mission_contains_pro_attachment_contract(source):
+            if _mission_contains_pro_attachment_contract(source_bytes):
                 raise WorkflowError("Pro attachment contract is forbidden for regular DevSpace stages")
             pro_attachments = ()
-            mission, receipt_path, input_sha = _stage_mission(
-                config, workflow_id, index, stage, source, attempt_id
+            mission, receipt_path, input_sha, augmented_mission_sha = _stage_mission(
+                config, workflow_id, index, stage, source, attempt_id, source_sha, source_bytes
             )
         stage_dir = mission.parent
         oracle_manifest = _oracle_manifest(
-            config, mission, stage_dir, attempt_id, stage=stage, pro_attachments=pro_attachments
+            config, mission, stage_dir, attempt_id, stage=stage, pro_attachments=pro_attachments,
+            mission_sha=augmented_mission_sha,
         )
-        oracle_config = RUNNER.STATE.load_manifest(oracle_manifest)
+        oracle_manifest_sha = sha(oracle_manifest)
+        oracle_config = RUNNER.STATE.load_manifest(
+            oracle_manifest, expected_manifest_sha256=oracle_manifest_sha
+        )
         oracle_layout = RUNNER.STATE.create_layout(oracle_config, run_id=attempt_id)
         stage_pre_submit_retries = int(_json(state_path).get("pre_submit_retries") or 0)
         _write_workflow_state(state_path, config, {
@@ -1451,11 +2183,15 @@ def _run_workflow_locked(
             "current_binding_source_path": str(source),
             "current_binding_source_sha256": input_sha,
             "current_augmented_mission_path": str(mission),
-            "current_augmented_mission_sha256": sha(mission),
-            "oracle_run_id": attempt_id, "oracle_run_dir": str(oracle_layout.run_dir), "oracle_manifest_path": str(oracle_manifest),
+            "current_augmented_mission_sha256": augmented_mission_sha,
+            **({"pro_attachments": _pro_attachment_state(pro_attachments)} if stage == "pro" else {}),
+            "oracle_run_id": attempt_id, "oracle_run_dir": str(oracle_layout.run_dir),
+            "oracle_manifest_path": str(oracle_manifest), "oracle_manifest_sha256": oracle_manifest_sha,
             "next_index": index, "records": records, "pre_submit_retries": stage_pre_submit_retries,
         })
-        run = oracle_execute(oracle_manifest, dry_run=False)
+        run = oracle_execute(
+            oracle_manifest, expected_manifest_sha256=oracle_manifest_sha, dry_run=False
+        )
         records.append({"stage": stage, "run_dir": run.get("run_dir"), "ok": bool(run.get("ok"))})
         if stage == "pro" and run.get("ok") and not receipt_path.is_file():
             _materialize_pro_receipt(
@@ -1476,8 +2212,10 @@ def _run_workflow_locked(
                 "current_binding_source_path": str(source),
                 "current_binding_source_sha256": input_sha,
                 "current_augmented_mission_path": str(mission),
-                "current_augmented_mission_sha256": sha(mission),
-                "oracle_run_dir": run.get("run_dir"), "next_index": index, "records": records,
+                "current_augmented_mission_sha256": augmented_mission_sha,
+                **({"pro_attachments": _pro_attachment_state(pro_attachments)} if stage == "pro" else {}),
+                "oracle_run_dir": run.get("run_dir"), "oracle_manifest_path": str(oracle_manifest),
+                "oracle_manifest_sha256": oracle_manifest_sha, "next_index": index, "records": records,
             })
         if run.get("ok") and not receipt_path.is_file():
             return {"ok": False, **_json(state_path)}
@@ -1502,7 +2240,7 @@ def _run_workflow_locked(
                     attempt_id=attempt_id,
                     input_sha256=input_sha,
                     augmented_mission_path=mission,
-                    augmented_mission_sha256=sha(mission),
+                    augmented_mission_sha256=augmented_mission_sha,
                     binding_source_path=source,
                 )
             ):
@@ -1514,7 +2252,7 @@ def _run_workflow_locked(
                     workflow_id=workflow_id,
                     attempt_id=attempt_id,
                     augmented_mission_path=mission,
-                    augmented_mission_sha256=sha(mission),
+                    augmented_mission_sha256=augmented_mission_sha,
                     binding_source_path=source,
                 )
                 _write_workflow_state(state_path, config, {
@@ -1524,13 +2262,14 @@ def _run_workflow_locked(
                     "manifest_sha256": config["manifest_sha256"],
                     "next_stage": stage,
                     "next_mission_path": str(source),
-                    "next_mission_sha256": sha(source),
+                    "next_mission_sha256": input_sha,
+                    **({"pro_attachments": _pro_attachment_state(pro_attachments)} if stage == "pro" else {}),
                     "next_index": index,
                     "records": records + [retry_record],
                     "pre_submit_retries": pre_submit_retries + 1,
                 })
                 return _run_workflow_locked(
-                    manifest_path, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
+                    config, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
                     multi_execute=multi_execute, local_gate_runner=local_gate_runner,
                 )
             retained = {
@@ -1558,6 +2297,7 @@ def _run_workflow_locked(
             _write_workflow_state(state_path, config, result)
             return {"ok": True, **result}
         stage, source = str(receipt["next_stage"]), receipt["_next_mission"]
+        source_sha = str(receipt["next_mission_sha256"])
         _write_workflow_state(state_path, config, {
             "schema": STATE_SCHEMA, "status": "prepared", "workflow_id": workflow_id,
             "manifest_sha256": config["manifest_sha256"], "next_stage": stage,
@@ -1573,16 +2313,25 @@ def _run_workflow_locked(
 def run_workflow(
     manifest_path: Path,
     *,
+    expected_manifest_sha256: str | None,
     dry_run: bool = False,
     oracle_execute: Callable[..., dict[str, Any]] = RUNNER.execute_run,
     oracle_recover: Callable[..., dict[str, Any]] = _recover_oracle_under_workflow_mutex,
     multi_execute: Callable[..., dict[str, Any]] = MULTI.run_multi,
     local_gate_runner: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
-    config = load_manifest(manifest_path)
+    if not dry_run and expected_manifest_sha256 is None:
+        raise WorkflowError(
+            "MANIFEST_SHA256_REQUIRED: live Comprehensive runs require "
+            "--expected-manifest-sha256 from the exact dry-run preview"
+        )
+    config = load_manifest(
+        manifest_path,
+        expected_manifest_sha256=expected_manifest_sha256,
+    )
     if dry_run:
         return _run_workflow_locked(
-            manifest_path,
+            config,
             dry_run=True,
             oracle_execute=oracle_execute,
             oracle_recover=oracle_recover,
@@ -1591,7 +2340,7 @@ def run_workflow(
         )
     with RUNNER.STATE.project_submit_mutex(config["project_root"], timeout_seconds=30):
         return _run_workflow_locked(
-            manifest_path,
+            config,
             dry_run=False,
             oracle_execute=oracle_execute,
             oracle_recover=oracle_recover,
@@ -1600,13 +2349,165 @@ def run_workflow(
         )
 
 
+def retire_workflow(
+    manifest_path: Path,
+    *,
+    expected_manifest_sha256: str | None,
+    confirmation: str,
+    reason: str,
+) -> dict[str, Any]:
+    if expected_manifest_sha256 is None:
+        raise WorkflowError(
+            "MANIFEST_SHA256_REQUIRED: workflow retirement requires the exact old manifest SHA-256"
+        )
+    config = load_manifest(manifest_path, expected_manifest_sha256=expected_manifest_sha256)
+    expected_confirmation = f"{RETIREMENT_CONFIRMATION_PREFIX}{config['workflow_id']}"
+    if confirmation != expected_confirmation:
+        raise WorkflowError(f"retirement confirmation must be exactly {expected_confirmation}")
+    normalized_reason = reason.strip()
+    if not normalized_reason:
+        raise WorkflowError("workflow retirement reason is required")
+
+    with RUNNER.STATE.project_submit_mutex(config["project_root"], timeout_seconds=30):
+        scope_path = _scope_path(config)
+        state_path, _state, attempts = _audit_retirable_workflow(config)
+        if scope_path.is_symlink() or not scope_path.is_file():
+            raise WorkflowError("exact comprehensive scope authority is missing or symlinked")
+        scope = _json(scope_path)
+        receipt_path = _retirement_receipt_path(config)
+        stable_receipt = {
+            "schema": RETIREMENT_RECEIPT_SCHEMA,
+            "status": "workflow_retired_scope_released",
+            "scientific_work_complete": False,
+            "workflow_id": config["workflow_id"],
+            "project_root": str(config["project_root"]),
+            "workflow_parent": str(config["workflow_dir"].parent),
+            "manifest_path": str(config["manifest_path"]),
+            "manifest_sha256": config["manifest_sha256"],
+            "workflow_state_path": str(state_path),
+            "workflow_state_sha256": sha(state_path),
+            "scope_path": str(scope_path),
+            "confirmation": confirmation,
+            "reason": normalized_reason,
+            "attempts": attempts,
+        }
+        replayed = False
+        if receipt_path.exists():
+            if receipt_path.is_symlink():
+                raise WorkflowError("retirement receipt path is symlinked")
+            receipt = _json(receipt_path)
+            if any(receipt.get(key) != value for key, value in stable_receipt.items()):
+                raise WorkflowError("existing retirement receipt does not match the exact workflow evidence")
+            replayed = True
+        else:
+            if not all((
+                scope.get("schema") == SCOPE_SCHEMA,
+                scope.get("status") == "attention_required",
+                scope.get("active_workflow_id") == config["workflow_id"],
+                scope.get("project_root") == str(config["project_root"]),
+                scope.get("workflow_parent") == str(config["workflow_dir"].parent),
+                Path(str(scope.get("workflow_state_path") or "")).resolve() == state_path.resolve(),
+            )):
+                raise WorkflowError("scope does not belong to the exact attention-required workflow")
+            receipt = {
+                **stable_receipt,
+                "scope_before_sha256": sha(scope_path),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            RUNNER.STATE.write_json_atomic(receipt_path, receipt)
+
+        receipt_sha256 = sha(receipt_path)
+        active = str(scope.get("active_workflow_id") or "")
+        if scope.get("status") == "released":
+            if not _released_scope_is_valid(config, scope):
+                raise WorkflowError("scope release readback does not match the immutable retirement receipt")
+            return {
+                "ok": True,
+                "status": "workflow_retired_scope_released",
+                "replayed": True,
+                "workflow_id": config["workflow_id"],
+                "retirement_receipt_path": str(receipt_path),
+                "retirement_receipt_sha256": receipt_sha256,
+                "scope_path": str(scope_path),
+                "scope_readback": scope,
+            }
+        if active and active != config["workflow_id"]:
+            return {
+                "ok": True,
+                "status": "workflow_already_retired_scope_reclaimed",
+                "replayed": True,
+                "workflow_id": config["workflow_id"],
+                "active_workflow_id": active,
+                "retirement_receipt_path": str(receipt_path),
+                "retirement_receipt_sha256": receipt_sha256,
+                "scope_path": str(scope_path),
+                "scope_readback": scope,
+            }
+        if not all((
+            scope.get("schema") == SCOPE_SCHEMA,
+            scope.get("status") == "attention_required",
+            active == config["workflow_id"],
+            scope.get("project_root") == str(config["project_root"]),
+            scope.get("workflow_parent") == str(config["workflow_dir"].parent),
+            Path(str(scope.get("workflow_state_path") or "")).resolve() == state_path.resolve(),
+            receipt.get("scope_before_sha256") == sha(scope_path),
+        )):
+            raise WorkflowError("scope changed before retirement release")
+        released = {
+            "schema": SCOPE_SCHEMA,
+            "status": "released",
+            "active_workflow_id": "",
+            "retired_workflow_id": config["workflow_id"],
+            "project_root": str(config["project_root"]),
+            "workflow_parent": str(config["workflow_dir"].parent),
+            "workflow_state_path": str(state_path),
+            "retirement_receipt_path": str(receipt_path),
+            "retirement_receipt_sha256": receipt_sha256,
+            "review_policy": scope.get("review_policy") or _default_review_policy(),
+        }
+        RUNNER.STATE.write_json_atomic(scope_path, released)
+        readback = _json(scope_path)
+        if readback != released or not _released_scope_is_valid(config, readback):
+            raise WorkflowError("scope release authoritative readback failed")
+        return {
+            "ok": True,
+            "status": "workflow_retired_scope_released",
+            "replayed": replayed,
+            "workflow_id": config["workflow_id"],
+            "retirement_receipt_path": str(receipt_path),
+            "retirement_receipt_sha256": receipt_sha256,
+            "scope_path": str(scope_path),
+            "scope_readback": readback,
+        }
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a bounded Oracle comprehensive workflow.")
     parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--expected-manifest-sha256")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--retire-workflow", action="store_true")
+    parser.add_argument("--retirement-confirmation", default="")
+    parser.add_argument("--retirement-reason", default="")
     args = parser.parse_args(argv)
     try:
-        value = run_workflow(args.manifest, dry_run=args.dry_run)
+        if args.retire_workflow:
+            if args.dry_run:
+                raise WorkflowError("workflow retirement cannot be combined with --dry-run")
+            value = retire_workflow(
+                args.manifest,
+                expected_manifest_sha256=args.expected_manifest_sha256,
+                confirmation=args.retirement_confirmation,
+                reason=args.retirement_reason,
+            )
+        else:
+            if args.retirement_confirmation or args.retirement_reason:
+                raise WorkflowError("retirement arguments require --retire-workflow")
+            value = run_workflow(
+                args.manifest,
+                expected_manifest_sha256=args.expected_manifest_sha256,
+                dry_run=args.dry_run,
+            )
     except Exception as exc:
         value = {"ok": False, "error": {"code": "ORACLE_COMPREHENSIVE_FAILED", "message": str(exc)}}
     print(json.dumps(value, ensure_ascii=False, indent=2))

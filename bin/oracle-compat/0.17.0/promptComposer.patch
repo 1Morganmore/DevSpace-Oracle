@@ -1,0 +1,365 @@
+diff --git a/dist/src/browser/actions/promptComposer.js b/dist/src/browser/actions/promptComposer.js
+index c643386..c8e43bb 100644
+--- a/dist/src/browser/actions/promptComposer.js
++++ b/dist/src/browser/actions/promptComposer.js
+@@ -14,6 +14,10 @@ const ENTER_KEY_TEXT = "\r";
+ export async function submitPrompt(deps, prompt, logger) {
+     const { runtime, input } = deps;
+     await waitForDomReady(runtime, logger, deps.inputTimeoutMs ?? undefined);
++    // Failed app-mention attempts can leave a server-persisted draft in the
++    // root composer. Always begin this one-shot submission from an empty
++    // composer so the next run cannot duplicate the mention.
++    await clearPromptComposer(runtime, logger);
+     const encodedPrompt = JSON.stringify(prompt);
+     const focusResult = await runtime.evaluate({
+         expression: `(() => {
+@@ -67,7 +71,292 @@ export async function submitPrompt(deps, prompt, logger) {
+         await logDomFailure(runtime, logger, "focus-textarea");
+         throw new Error("Failed to focus prompt textarea");
+     }
+-    await input.insertText({ text: prompt });
++    // Use trusted editing keys as well as DOM clearing. ChatGPT can restore a
++    // stale Lexical draft after direct textContent mutation.
++    await input.dispatchKeyEvent({
++        type: "keyDown",
++        key: "a",
++        code: "KeyA",
++        windowsVirtualKeyCode: 65,
++        nativeVirtualKeyCode: 65,
++        modifiers: 2,
++    });
++    await input.dispatchKeyEvent({
++        type: "keyUp",
++        key: "a",
++        code: "KeyA",
++        windowsVirtualKeyCode: 65,
++        nativeVirtualKeyCode: 65,
++        modifiers: 2,
++    });
++    await input.dispatchKeyEvent({
++        type: "keyDown",
++        key: "Backspace",
++        code: "Backspace",
++        windowsVirtualKeyCode: 8,
++        nativeVirtualKeyCode: 8,
++    });
++    await input.dispatchKeyEvent({
++        type: "keyUp",
++        key: "Backspace",
++        code: "Backspace",
++        windowsVirtualKeyCode: 8,
++        nativeVirtualKeyCode: 8,
++    });
++    await delay(250);
++    // A literal @name is not routing authority. Select only an exact app
++    // identity, then require ChatGPT's semantic mention token before send.
++    const mentionMatch = prompt.match(/^(@[^\s]+)(\s+[\s\S]+)$/u);
++    let routedAppName = null;
++    let exactAppSuggestionSelected = false;
++    if (mentionMatch) {
++        const appName = mentionMatch[1].slice(1);
++        routedAppName = appName;
++        await input.insertText({ text: mentionMatch[1] });
++        // Discovery and click must resolve the same unique suggestion. Current
++        // ChatGPT app results use a role=group wrapper whose exact action is a
++        // nested span, so never widen discovery beyond the click authority.
++        const exactSuggestionExpression = (shouldClick) => `(() => {
++          const wanted = ${JSON.stringify(appName)};
++          const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
++          const exactIdentity = (node) => [
++            node?.getAttribute?.('data-app-name'),
++            node?.getAttribute?.('aria-label'),
++            node?.getAttribute?.('title'),
++            node?.innerText,
++            node?.textContent,
++          ].some((value) => normalize(value).replace(/^@/, '') === wanted);
++          const visible = (node) => {
++            const rect = node?.getBoundingClientRect?.();
++            if (!rect || rect.width <= 0 || rect.height <= 0) return false;
++            if (node?.hasAttribute?.('hidden') || node?.getAttribute?.('aria-hidden') === 'true') return false;
++            const style = window.getComputedStyle(node);
++            return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
++          };
++          const enabled = (node) => {
++            const style = window.getComputedStyle(node);
++            return !node?.hasAttribute?.('disabled') &&
++              node?.getAttribute?.('aria-disabled') !== 'true' &&
++              node?.getAttribute?.('data-disabled') !== 'true' &&
++              style.pointerEvents !== 'none';
++          };
++          const visibleLeafTexts = (root) => {
++            if (!visible(root)) return [];
++            const children = Array.from(root.children || []).filter(visible);
++            if (children.length === 0) {
++              const value = normalize(root.innerText || root.textContent);
++              return value ? [value] : [];
++            }
++            return children.flatMap(visibleLeafTexts);
++          };
++          const describe = (node) => ({
++            tag: node?.tagName || null,
++            role: node?.getAttribute?.('role') || null,
++            text: normalize(node?.innerText || node?.textContent).slice(0, 160),
++          });
++          const surfaceSelector =
++            '[role="option"],[role="menuitem"],[role="group"],[data-radix-collection-item]';
++          const actionSelector =
++            'button,[role="option"],[role="menuitem"],[data-radix-collection-item],[data-fill][tabindex]';
++          const candidates = [];
++          for (const surface of Array.from(document.querySelectorAll(surfaceSelector)).filter(visible)) {
++            const nodes = [surface, ...Array.from(surface.querySelectorAll('*'))];
++            const exactNodes = nodes.filter((node) => visible(node) && exactIdentity(node));
++            const exactLeaves = exactNodes.filter((node) => !exactNodes.some((other) =>
++              other !== node && node.contains?.(other)
++            ));
++            const textSegments = visibleLeafTexts(surface);
++            const pureExactSurface = textSegments.length > 0 && textSegments.every((value) =>
++              normalize(value).replace(/^@/, '') === wanted
++            );
++            if (!pureExactSurface) continue;
++            for (const label of exactLeaves) {
++              const action = label.closest?.(actionSelector);
++              const target = action && surface.contains(action) ? action : label;
++              if (!surface.contains(target) ||
++                  (target === surface && surface.getAttribute?.('role') === 'group') ||
++                  typeof target.click !== 'function' || !visible(target) || !enabled(target)) {
++                continue;
++              }
++              candidates.push({ surface, label, target });
++            }
++          }
++          const unique = candidates.filter((candidate, index, items) =>
++            items.findIndex((item) => item.target === candidate.target) === index
++          );
++          if (unique.length === 0) return { status: 'not-found' };
++          if (unique.length !== 1) return { status: 'ambiguous', count: unique.length };
++          const candidate = unique[0];
++          const authority = {
++            surface: describe(candidate.surface),
++            label: describe(candidate.label),
++            target: describe(candidate.target),
++          };
++          if (!${JSON.stringify(shouldClick)}) return { status: 'unique', authority };
++          candidate.target.click();
++          return { status: 'action-dispatched', actionDispatched: true, authority };
++        })()`;
++        const suggestionDeadline = Date.now() + 5_000;
++        let suggestionProbe = null;
++        while (Date.now() < suggestionDeadline) {
++            const probe = await runtime.evaluate({
++                expression: exactSuggestionExpression(false),
++                returnByValue: true,
++            });
++            suggestionProbe = probe.result?.value ?? null;
++            if (suggestionProbe?.status === 'unique' || suggestionProbe?.status === 'ambiguous') {
++                break;
++            }
++            await delay(100);
++        }
++        const clickResult = await runtime.evaluate({
++            expression: exactSuggestionExpression(true),
++            returnByValue: true,
++        });
++        const exactAppSuggestionActionDispatched =
++          clickResult.result?.value?.status === 'action-dispatched' &&
++          clickResult.result?.value?.actionDispatched === true;
++        if (!exactAppSuggestionActionDispatched) {
++            logger(`Exact ChatGPT app suggestion action was not uniquely dispatchable for @${appName}; status=${clickResult.result?.value?.status || suggestionProbe?.status || 'not-found'}.`);
++        }
++        const routeDeadline = Date.now() + 5_000;
++        let routeConfirmed = false;
++        while (Date.now() < routeDeadline) {
++            const probe = await runtime.evaluate({
++                expression: `(() => {
++                  const wanted = ${JSON.stringify(appName)};
++                  const exactAppIdentity = (node) => [
++                    node?.getAttribute?.('data-app-name'),
++                    node?.getAttribute?.('data-mention'),
++                  ].some((value) => typeof value === 'string' && value === wanted);
++                  const exactSelectedAppPill = (node, editor) => {
++                    if (!${JSON.stringify(exactAppSuggestionActionDispatched)}) return false;
++                    const pill = node?.closest?.('[contenteditable="false"]');
++                    if (!pill || !editor.contains(pill) || !visible(pill)) return false;
++                    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
++                    const exactVisibleLabel = Array.from(pill.querySelectorAll('*'))
++                      .some((child) => visible(child) &&
++                        normalize(child.innerText || child.textContent).replace(/^@/, '') === wanted);
++                    return exactVisibleLabel;
++                  };
++                  const visible = (node) => {
++                    const rect = node?.getBoundingClientRect?.();
++                    if (!rect || rect.width <= 0 || rect.height <= 0) return false;
++                    if (node?.hasAttribute?.('hidden') || node?.getAttribute?.('aria-hidden') === 'true') return false;
++                    const style = window.getComputedStyle(node);
++                    return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
++                  };
++                  const editors = Array.from(document.querySelectorAll(
++                    ${JSON.stringify(INPUT_SELECTORS.join(","))}
++                  ));
++                  const semanticMentionSelectors = '[data-app-name],[data-mention],[contenteditable="false"],[contenteditable="false"] *';
++                  return editors.filter(visible).some((editor) =>
++                    Array.from(editor.querySelectorAll(semanticMentionSelectors))
++                      .some((node) => visible(node) &&
++                        (exactAppIdentity(node) || exactSelectedAppPill(node, editor)))
++                  );
++                })()`,
++                returnByValue: true,
++            });
++            if (probe.result?.value === true) {
++                routeConfirmed = true;
++                break;
++            }
++            await delay(100);
++        }
++        // A dispatched DOM click is not an authoritative receipt. Promote it
++        // to selected only after ChatGPT exposes the exact semantic app pill.
++        exactAppSuggestionSelected = exactAppSuggestionActionDispatched && routeConfirmed;
++        const exactAppSuggestionClickReceipt = exactAppSuggestionSelected
++          ? { ...clickResult.result?.value?.authority, semanticRouteConfirmed: true }
++          : null;
++        if (!routeConfirmed) {
++            const diagnostic = await runtime.evaluate({
++                expression: `(() => {
++                  const describe = (node) => ({
++                    tag: node?.tagName || null,
++                    role: node?.getAttribute?.('role') || null,
++                    testid: node?.getAttribute?.('data-testid') || null,
++                    ariaLabel: node?.getAttribute?.('aria-label') || null,
++                    text: String(node?.innerText || node?.textContent || '').trim().slice(0, 240),
++                  });
++                  const editors = Array.from(document.querySelectorAll(
++                    ${JSON.stringify(INPUT_SELECTORS.join(","))}
++                  )).map(describe);
++                  return { editors, active: describe(document.activeElement) };
++                })()`,
++                returnByValue: true,
++            });
++            logger(`App mention route diagnostic: ${JSON.stringify(diagnostic.result?.value ?? null)}`);
++            await logDomFailure(runtime, logger, "app-mention-route-unconfirmed");
++            await clearPromptComposer(runtime, logger);
++            throw new BrowserAutomationError("APP_MENTION_ROUTE_UNCONFIRMED", {
++                stage: "submit-prompt",
++                code: "APP_MENTION_ROUTE_UNCONFIRMED",
++                appName,
++            });
++        }
++        logger(`Exact ChatGPT app suggestion receipt: ${JSON.stringify(exactAppSuggestionClickReceipt)}`);
++        await runtime.evaluate({
++            expression: `(() => {
++              const wanted = ${JSON.stringify(appName.toLowerCase())};
++              const watcherKey = '__oracleAppApprovalWatcher';
++              const existing = window[watcherKey];
++              if (existing?.wanted === wanted && existing?.timer) return true;
++              if (existing?.timer) clearInterval(existing.timer);
++              const normalize = (value) =>
++                String(value || '').toLowerCase().replace(/\\s+/g, ' ').trim();
++              const visible = (node) => {
++                const rect = node?.getBoundingClientRect?.();
++                if (!rect || rect.width <= 0 || rect.height <= 0) return false;
++                const style = window.getComputedStyle(node);
++                return style.display !== 'none' && style.visibility !== 'hidden';
++              };
++              const tick = () => {
++                const allowLabels = new Set(['allow', '허용하기']);
++                const button = Array.from(document.querySelectorAll('button'))
++                  .filter(visible)
++                  .find((node) => allowLabels.has(normalize(node.innerText || node.textContent)));
++                if (!button) return;
++                let scope = button;
++                for (let i = 0; i < 10 && scope; i += 1, scope = scope.parentElement) {
++                  if (!normalize(scope.innerText || scope.textContent).includes(wanted)) continue;
++                  const rememberLabels = ['이 대화에 기억', 'remember for this chat', 'remember in this chat'];
++                  const checkbox = Array.from(scope.querySelectorAll(
++                    'input[type="checkbox"],[role="checkbox"]'
++                  )).find(visible);
++                  const rememberLabel = Array.from(scope.querySelectorAll('label'))
++                    .filter(visible)
++                    .find((node) => rememberLabels.some((label) =>
++                      normalize(node.innerText || node.textContent).includes(label)
++                    ));
++                  const control = checkbox || rememberLabel?.querySelector(
++                    'input[type="checkbox"],[role="checkbox"]'
++                  ) || rememberLabel;
++                  const checked = checkbox instanceof HTMLInputElement
++                    ? checkbox.checked
++                    : checkbox?.getAttribute?.('aria-checked') === 'true';
++                  if (control && !checked) {
++                    control.click();
++                    return;
++                  }
++                  button.click();
++                  return;
++                }
++              };
++              const timer = setInterval(tick, 250);
++              window[watcherKey] = { wanted, timer };
++              tick();
++              return true;
++            })()`,
++            returnByValue: true,
++        });
++        await input.insertText({ text: mentionMatch[2] });
++        logger(`App mention @${appName} semantically confirmed in the composer.`);
++    }
++    else {
++        await input.insertText({ text: prompt });
++    }
+     // Some pages (notably ChatGPT when subscriptions/widgets load) need a brief settle
+     // before the send button becomes enabled; give it a short breather to avoid races.
+     await delay(500);
+@@ -167,4 +456,55 @@ export async function submitPrompt(deps, prompt, logger) {
+             observedLength,
+         });
+     }
++    // The empty-readback fallback can replace Lexical content with literal
++    // text. Revalidate the semantic token after every possible composer
++    // mutation and immediately before either send-button or Enter submission.
++    if (routedAppName) {
++        const finalRoute = await runtime.evaluate({
++            expression: `(() => {
++              const wanted = ${JSON.stringify(routedAppName)};
++              const exactAppIdentity = (node) => [
++                node?.getAttribute?.('data-app-name'),
++                node?.getAttribute?.('data-mention'),
++              ].some((value) => typeof value === 'string' && value === wanted);
++              const exactSelectedAppPill = (node, editor) => {
++                if (!${JSON.stringify(exactAppSuggestionSelected)}) return false;
++                const pill = node?.closest?.('[contenteditable="false"]');
++                if (!pill || !editor.contains(pill) || !visible(pill)) return false;
++                const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
++                const exactVisibleLabel = Array.from(pill.querySelectorAll('*'))
++                  .some((child) => visible(child) &&
++                    normalize(child.innerText || child.textContent).replace(/^@/, '') === wanted);
++                return exactVisibleLabel;
++              };
++              const visible = (node) => {
++                const rect = node?.getBoundingClientRect?.();
++                if (!rect || rect.width <= 0 || rect.height <= 0) return false;
++                if (node?.hasAttribute?.('hidden') || node?.getAttribute?.('aria-hidden') === 'true') return false;
++                const style = window.getComputedStyle(node);
++                return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
++              };
++              const editors = Array.from(document.querySelectorAll(
++                ${JSON.stringify(INPUT_SELECTORS.join(","))}
++              ));
++              const semanticMentionSelectors = '[data-app-name],[data-mention],[contenteditable="false"],[contenteditable="false"] *';
++              return editors.filter(visible).some((editor) =>
++                Array.from(editor.querySelectorAll(semanticMentionSelectors))
++                  .some((node) => visible(node) &&
++                    (exactAppIdentity(node) || exactSelectedAppPill(node, editor)))
++              );
++            })()`,
++            returnByValue: true,
++        });
++        if (finalRoute.result?.value !== true) {
++            logger(`Final app mention route validation failed for @${routedAppName}.`);
++            await logDomFailure(runtime, logger, "app-mention-route-lost-before-send");
++            await clearPromptComposer(runtime, logger);
++            throw new BrowserAutomationError("APP_MENTION_ROUTE_UNCONFIRMED", {
++                stage: "submit-prompt",
++                code: "APP_MENTION_ROUTE_UNCONFIRMED",
++                appName: routedAppName,
++            });
++        }
++    }
+     const clicked = await attemptSendButton(runtime, input, logger, deps?.attachmentNames, deps?.attachmentTimeoutMs);

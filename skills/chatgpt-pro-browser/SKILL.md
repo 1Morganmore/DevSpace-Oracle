@@ -51,7 +51,7 @@ headroom for the mission, evidence index, and final Pro answer; never pad with
 irrelevant files merely to increase byte count.
 
 The evidence index must record the effective attachment/context budget used for
-the run, included bytes or tokens when measurable, reserved answer headroom,
+the run, included bytes or tokens when measurable, transport answer headroom,
 and why any remaining capacity could not improve the decision. When evidence
 exceeds the boundary, allocate space deterministically in this order: governing
 rules and exact question; canonical current state and measured primary evidence;
@@ -85,6 +85,32 @@ leaving it out.
 - the arithmetic connecting the proposed decision to the user's real target,
   including capacity, cost, risk, and time-to-evidence where applicable.
 
+Build and validate the attachment packet with the bundled allowlist-only
+builder before every submission:
+
+```powershell
+python <skill-root>\scripts\build_project_context_packet.py build --manifest C:\project\.ai-bridge\pro-context-manifest.json
+python <skill-root>\scripts\build_project_context_packet.py validate --manifest C:\project\.ai-bridge\pro-context-manifest.json
+```
+
+The manifest schema is `codex.chatgpt.pro-project-context/v1`. It declares the
+absolute project root and packet path, question, exact `mission_path` and
+`mission_sha256`, required evidence categories, optional machine-readable
+`category_omissions`, the tested one-MiB local attachment profile, and an
+explicit evidence allowlist with category, priority, and frozen SHA-256. Each
+category omission requires `category`, `reason`, `coverage_boundary`, and
+`expected_decision_impact`; a required category must be included or explicitly
+omitted. The builder never scans the project tree. It rejects root escape,
+symlinks, stale mission or evidence hashes, credentials and volatile state,
+duplicate paths, invalid omissions, missing categories, and a packet larger
+than Oracle's tested one-MiB per-file attachment limit.
+
+The evidence index and receipt record
+`transport_answer_headroom_bytes: 0` for the tested attachment transport only.
+They separately record `model_context_budget_status: unverified` and
+`model_answer_headroom_tokens: null`; never present the transport byte envelope
+as a verified model-context or answer-token limit.
+
 Prefer one deterministic, path-preserved ZIP plus the short UTF-8 mission. The
 ZIP must contain a root mission/packet, an evidence index, original absolute and
 project-relative paths, per-entry SHA-256 and size, source qualification,
@@ -109,8 +135,8 @@ packet cannot be tied to the exact project root and question.
 
 1. Do not run the resource guard as a routine or pressure gate.
 2. Resolve and hash-validate the tested Oracle compatibility contract.
-3. Validate the short UTF-8 mission and the judgment-complete maximum-useful-
-   context packet, including its effective budget/use/headroom record,
+3. Build and validate the short UTF-8 mission and the judgment-complete
+   maximum-useful-context packet with `build_project_context_packet.py`, including its effective budget/use/headroom record,
    deterministic priority order, evidence index, frozen hashes, and omissions.
 4. Claim the same normalized-project mutex used by regular Oracle work.
 5. Use a fresh Oracle slug; do not reuse an unrelated tab or conversation.
@@ -123,8 +149,14 @@ Required fields:
 
 - `project_root`.
 - `task_kind: pro`.
-- `mission_path`: the short Pro instruction file.
-- `attachments`: one or more exact attachment paths.
+- `mission_path` and `mission_sha256`: the short Pro instruction file and its
+  caller-pinned exact bytes.
+- `project_context_manifest_path`: the validated packet manifest bound to that
+  exact mission and its SHA-256.
+- `project_context_manifest_sha256`: the caller-pinned exact context-manifest
+  bytes.
+- `attachments` and ordered `attachment_sha256s`: one or more exact attachment
+  paths and the caller-pinned hash aligned with each path.
 - `model_strategy: select`.
 
 Any app name, DevSpace mention, CodexPro field, or implicit model downgrade is a
@@ -133,7 +165,7 @@ hard error.
 Preview without launching a browser:
 
 ```powershell
-python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" --mode pro --project-root C:\project --mission-path C:\project\pro.md --attachment C:\project\packet.zip --manifest-output C:\project\.ai-bridge\pro.json --dry-run
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" --mode pro --project-root C:\project --mission-path C:\project\pro.md --context-manifest C:\project\.ai-bridge\pro-context-manifest.json --attachment C:\project\packet.zip --manifest-output C:\project\.ai-bridge\pro.json --dry-run
 ```
 
 The preview must show the exact Oracle command, attachment paths/hashes, model
@@ -144,7 +176,7 @@ selection, short prompt, output path, and slug without submitting.
 Execute the compiled manifest only after a live Pro run was authorized:
 
 ```powershell
-python "$env:USERPROFILE\.codex\skills\chatgpt-oracle-runtime\scripts\run_chatgpt_oracle.py" run --manifest C:\project\.ai-bridge\pro.json
+python "$env:USERPROFILE\.codex\skills\chatgpt-oracle-runtime\scripts\run_chatgpt_oracle.py" run --manifest C:\project\.ai-bridge\pro.json --expected-manifest-sha256 <oracle_manifest_sha256>
 ```
 
 Completion requires exact Oracle Pro model evidence, attachment evidence, exit

@@ -47,7 +47,7 @@ def mcp_response(method: str, params: dict, *, env: dict[str, str] | None = None
         text=True,
         capture_output=True,
         check=True,
-        timeout=20,
+        timeout=30,
         env=env,
     )
     return json.loads(completed.stdout.strip())

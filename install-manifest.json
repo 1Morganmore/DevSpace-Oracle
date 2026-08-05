@@ -1,6 +1,6 @@
 {
   "schema": "codexpro.install-manifest/v1",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "include": [
     "bin/chatgpt_agbrowse_bridge.py",
     "bin/chatgpt_agbrowse_composer.py",
@@ -12,7 +12,9 @@
     "bin/chatgpt_oracle_run.py",
     "bin/chatgpt_devspace_compat.py",
     "bin/devspace-compat/1.0.4/workspaces.patch",
+    "bin/devspace-compat/1.0.5/workspaces.patch",
     "bin/chatgpt_oracle_compat.py",
+    "bin/oracle-compat/0.16.1/assistantResponse.patch",
     "bin/oracle-compat/0.16.1/browserConfig.patch",
     "bin/oracle-compat/0.16.1/browserIndex.patch",
     "bin/oracle-compat/0.16.1/chromeLifecycle.patch",
@@ -20,6 +22,14 @@
     "bin/oracle-compat/0.16.1/profileCopy.patch",
     "bin/oracle-compat/0.16.1/promptComposer.patch",
     "bin/oracle-compat/0.16.1/recoverConversation.patch",
+    "bin/oracle-compat/0.17.0/assistantResponse.patch",
+    "bin/oracle-compat/0.17.0/browserConfig.patch",
+    "bin/oracle-compat/0.17.0/browserIndex.patch",
+    "bin/oracle-compat/0.17.0/chromeLifecycle.patch",
+    "bin/oracle-compat/0.17.0/profileCopy.patch",
+    "bin/oracle-compat/0.17.0/promptComposer.patch",
+    "bin/oracle-compat/0.17.0/recoverConversation.patch",
+    "bin/oracle-compat/0.17.0/thinkingTime.patch",
     "bin/chatgpt_oracle_state.py",
     "bin/chatgpt_oracle_profiles.py",
     "bin/chatgpt_oracle_dispatch.py",
@@ -50,6 +60,7 @@
     "skills/chatgpt-thinking-browser/scripts/run_thinking_browser.py",
     "skills/chatgpt-pro-browser/SKILL.md",
     "skills/chatgpt-pro-browser/agents/openai.yaml",
+    "skills/chatgpt-pro-browser/scripts/build_project_context_packet.py",
     "skills/chatgpt-pro-browser/scripts/run_chatgpt_pro.py",
     "skills/chatgpt-pro-browser/scripts/run_pro_browser.py",
     "skills/chatgpt-deep-research-browser/SKILL.md",
@@ -106,15 +117,16 @@
     },
     "oracle": {
       "package": "@steipete/oracle",
-      "tested_version": "0.16.1",
+      "tested_version": "0.17.0",
       "license": "MIT",
-      "integrity": "sha512-oJEAcWLvLihtSOGqznN4ErGIE7GEpVWpx02a5JUwoqeQql/lgWyc7ASnEegov3MGpGROF13CkgcISPgtw2INqg==",
-      "installation": "resolved by the invoking agent through npx; tested_version is not a permanent pin"
+      "integrity": "sha512-GOViubhL+fKaEGuyrmc9mDnDFPoKYoleYw85iiITFZu1QgcjDZzxKDycnFYSg+f2cAJ6h8RHEZqXSjSXuGJSxw==",
+      "installation": "npx -y @steipete/oracle@0.17.0"
     },
     "devspace": {
       "package": "@waishnav/devspace",
-      "tested_version": "1.0.4",
+      "tested_version": "1.0.5",
       "license": "MIT",
+      "integrity": "sha512-eloUu+bZoJsBFxaaSNK2/hegNApT+HAfu/vjYYhm/Etu3gwx+Z7tnboZfM9KAU/hvX44P40kzEHS6JBNRPGOlg==",
       "installation": "resolved by the explicit setup skill; exact workspaces.js hash is compatibility-patched to bound transient-tree discovery"
     },
     "codexpro": {

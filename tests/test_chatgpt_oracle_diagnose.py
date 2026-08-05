@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 MODULE_PATH = Path(__file__).resolve().parents[1] / "bin" / "chatgpt_oracle_diagnose.py"
 
 
@@ -86,25 +88,21 @@ def test_report_buckets_pre_submit_ui_and_host_causes_separately(tmp_path: Path)
     ]
 
 
-def test_pre_submit_signature_outranks_post_submit_interpretation(tmp_path: Path) -> None:
+def test_unsettled_app_route_marker_remains_submission_uncertain(tmp_path: Path) -> None:
     module = load()
     state_root = tmp_path / "oracle-state"
     write_run(
         state_root,
         "d" * 8,
         status="attention_required",
-        stdout=(
-            "ERROR: ChatGPT app mention suggestion did not appear.\n"
-            "note: ECONNREFUSED 127.0.0.1:1234\n"
-        ),
+        stdout="ERROR: APP_MENTION_ROUTE_UNCONFIRMED\n",
         session_authority="submitted_unknown",
     )
 
     report = module.diagnose(state_root)
-    run = report["unresolved_runs"][0]
 
-    assert run["bucket"] == "pre-submit-ui-contract"
-    assert run["signature"] == "app-mention-suggestion-absent"
+    assert report["bucket_counts"] == {"active-or-uncertain": 1}
+    assert report["unresolved_runs"] == []
 
 
 def test_durable_terminal_run_is_complete_and_not_executed_is_separated(tmp_path: Path) -> None:
@@ -252,29 +250,51 @@ def test_host_watchdog_transition_is_post_submit_and_never_retry_safe() -> None:
 
 def test_version_resolution_prelaunch_failure_is_host_safe_only_with_absence_proof() -> None:
     module = load()
-    verdict = module.classify_run(
-        {
-            "status": "attention_required",
-            "session_authority": "pre_submit",
-            "terminal_harvested": False,
-            "task_outcome": "pending",
-            "pre_submit_failure": {
+    state = {
+        "status": "attention_required",
+        "session_authority": "pre_submit",
+        "terminal_harvested": False,
+        "task_outcome": "pending",
+    }
+
+    for failure_reason, signature in (
+        ("version-resolution-timeout", "oracle-version-resolution-prelaunch-timeout"),
+        ("compatibility-version-drift", "oracle-version-resolution-prelaunch-compatibility-drift"),
+    ):
+        verdict = module.classify_run(
+            state,
+            stdout_text="",
+            has_output=False,
+            pre_submit_host_failure={
                 "code": "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED",
                 "output_absent": True,
                 "conversation_url_absent": True,
+                "failure_reason": failure_reason,
             },
-        },
-        stdout_text="",
-        has_output=False,
-    )
-
-    assert verdict == {
-        "bucket": "pre-submit-host-environment",
-        "signature": "oracle-version-resolution-prelaunch-timeout",
-    }
+        )
+        assert verdict == {
+            "bucket": "pre-submit-host-environment",
+            "signature": signature,
+        }
 
 
-def test_user_confirmed_no_submission_overrides_prompt_timeout_only_with_validated_proof() -> None:
+@pytest.mark.parametrize(
+    ("stdout_text", "signature"),
+    (
+        (
+            "ERROR: Prompt did not appear in conversation before timeout (send may have failed)\n",
+            "user-confirmed-no-submission-after-prompt-timeout",
+        ),
+        (
+            "ERROR: APP_MENTION_ROUTE_UNCONFIRMED\n",
+            "user-confirmed-no-submission-after-app-route-unconfirmed",
+        ),
+    ),
+)
+def test_user_confirmed_no_submission_overrides_eligible_failure_only_with_validated_proof(
+    stdout_text: str,
+    signature: str,
+) -> None:
     module = load()
     state = {
         "status": "attention_required",
@@ -284,14 +304,14 @@ def test_user_confirmed_no_submission_overrides_prompt_timeout_only_with_validat
     }
     verdict = module.classify_run(
         state,
-        stdout_text="ERROR: Prompt did not appear in conversation before timeout (send may have failed)\n",
+        stdout_text=stdout_text,
         has_output=False,
         user_confirmed_no_submission=True,
     )
 
     assert verdict == {
         "bucket": "pre-submit-ui-contract",
-        "signature": "user-confirmed-no-submission-after-prompt-timeout",
+        "signature": signature,
     }
 
 

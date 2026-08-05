@@ -5,6 +5,8 @@
 Codex가 웹 ChatGPT에 계획·리서치·검토·코드 구현을 맡기고, 로컬 Codex는
 제출·복구·해시·최종 테스트만 담당하도록 만드는 Windows용 자동화 도구입니다.
 
+현재 릴리스는 `1.8.0`입니다.
+
 이 프로젝트는 다음 두 도구를 연결합니다.
 
 - [Oracle](https://github.com/steipete/oracle): 로그인된 ChatGPT 브라우저
@@ -12,8 +14,9 @@ Codex가 웹 ChatGPT에 계획·리서치·검토·코드 구현을 맡기고, �
 - [DevSpace](https://github.com/Waishnav/devspace): 사용자가 허용한 로컬
   프로젝트의 파일 읽기·쓰기와 명령 실행
 
-일반 GPT 작업은 Oracle이 `@DevSpace`와 미션 파일 경로를 ChatGPT에
-전달합니다. Pro 작업은 DevSpace 없이 정확한 첨부 파일만 사용합니다.
+일반 GPT 작업은 Oracle이 `GPT-5.6 Sol`과 보이는 `Extra High` 등급을
+확인한 뒤 `@DevSpace`와 미션 파일 경로를 ChatGPT에 전달합니다. Pro 작업은
+`gpt-5.5-pro`와 정확한 첨부 파일만 사용하며 DevSpace를 사용하지 않습니다.
 
 ## 이 도구로 할 수 있는 일
 
@@ -60,12 +63,13 @@ Codex가 해시·상태·최종 결정론적 테스트만 확인
 | 심층 리서치 | `deep-research` / deep research | 공개 자료와 프로젝트 증거 조사 | Oracle Deep Research + DevSpace |
 | Web Multi-GPT | Web Multi-GPT | 여러 관점의 독립 탐색·검증 | 독립 Oracle 세션 2~25개 + merger |
 | Local Multi-GPT | Local Multi-GPT | 로컬 병렬 자문·반례 탐색 | `gpt-5.6-luna` + `max` 고정, 읽기 전용 |
-| 종합모드 | comprehensive mode | 계획부터 구현·최종 게이트까지 자동 연결 | plan → optional Pro/Multi → review → implementation → gate |
-| Pro | `pro` / Pro | 독립적인 최종 판단·설계 검토 후 결과만 반환 | Oracle 첨부 전용, DevSpace 없음 |
+| 종합모드 | comprehensive mode | 계획부터 구현·최종 게이트까지 자동 연결 | plan → 명시적으로 선택한 Pro/Web Multi → review → implementation → gate |
+| Pro | `pro` / Pro | 독립적인 최종 판단·설계 검토 후 결과만 반환 | Oracle `gpt-5.5-pro`, 첨부 전용, DevSpace 없음 |
 
 지휘는 웹 제출 한 번으로 끝나는 실행 모드입니다. 종합모드는 지휘와 같은
 구현 단계를 포함하면서 계획·독립 검토·선택적 Pro/Web Multi·최종 게이트를
-추가한 다단계 워크플로입니다.
+추가한 다단계 워크플로입니다. Web Multi는 명시적으로 선택한 경우에만
+실행하며 일반 작업이나 실패한 작업에서 자동으로 전환하지 않습니다.
 
 단순 Pro는 종합모드와 별개인 한 번짜리 검토 경로입니다. 첨부된 계획·코드·문서를
 검토하고 결과 파일을 반환하면 끝나며, 자동으로 구현이나 다음 단계로 넘어가지
@@ -89,14 +93,15 @@ SHA-256을 하위 프로세스 시작 전에 검사합니다. 작업 상태는 �
 
 - Windows 11
 - Python
-- Node.js 22.19 이상, 27 미만
+- Node.js 24 이상, 27 미만
 - Git for Windows / Git Bash
 - Tailscale
 - 브라우저에서 ChatGPT에 로그인된 Oracle 프로필
 - ChatGPT Developer Mode에 최초 한 번 수동 등록한 DevSpace 앱
 
-현재 검증된 조합은 Oracle `0.16.1`과 DevSpace `1.0.4`입니다. 설치기는
-정확한 파일 해시가 일치할 때만 Windows 호환 패치를 적용합니다.
+현재 검증된 조합은 Oracle `0.17.0`과 DevSpace `1.0.5`입니다. 설치기는
+정확한 파일 해시가 일치할 때만 Windows 호환 패치를 적용합니다. Oracle
+`0.16.1`은 이미 저장된 해당 버전 실행의 정확한 복구에만 사용할 수 있습니다.
 
 ## 설치
 
@@ -152,7 +157,9 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
   --dry-run
 ```
 
-실제 실행 승인이 있을 때만 `--dry-run`을 제거합니다.
+실제 실행 승인이 있을 때만 `--dry-run`을 제거하고, 같은 명령에 미리보기의
+최상위 `oracle_manifest_sha256`을
+`--expected-manifest-sha256 <oracle_manifest_sha256>`로 전달합니다.
 
 ## Pro 실행 예시
 
@@ -164,7 +171,8 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
   --mode pro `
   --project-root C:\project `
   --mission-path C:\project\pro.md `
-  --attachment C:\project\evidence.zip `
+  --context-manifest C:\project\.ai-bridge\pro-context-manifest.json `
+  --attachment C:\project\.ai-bridge\packet.zip `
   --manifest-output C:\project\.ai-bridge\pro.json `
   --dry-run
 ```

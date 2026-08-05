@@ -10,6 +10,9 @@
 - 신규 제출 경로는 Oracle뿐입니다. 일반·계획·검토·수정·지휘·심층
   리서치·종합모드·Web Multi는 Oracle + 수동 등록 DevSpace 앱을 쓰고,
   Pro는 Oracle 첨부 전용으로 앱을 쓰지 않습니다.
+- 일반 작업은 `GPT-5.6 Sol` + 보이는 `Extra High`, Pro는 첨부 전용
+  `gpt-5.5-pro`를 사용합니다. Web Multi는 명시적으로 선택한 경우에만
+  실행하며 자동 fallback으로 사용하지 않습니다.
 - Oracle 실패는 다른 백엔드로 전환할 권한을 만들지 않습니다.
   agbrowse·CodexPro·in-app Browser·`@chrome`·Playwright/CDP·Proxima는
   fallback이 아닙니다.
@@ -43,6 +46,8 @@
 | `bin/chatgpt_git_isolation.py` | 복구 전용 (v3 병렬 구현 host Git 격리) |
 | `bin/chatgpt_goal_contract.py` | 복구 전용 (v4 goal 사이클 계약) |
 | `bin/chatgpt_goal_supervisor.py` | 복구 전용 (v4 goal 사이클 감독기) |
+| `bin/oracle-compat/0.16.1/` | 해당 버전으로 저장된 Oracle 실행의 정확한 복구 전용 |
+| `bin/devspace-compat/1.0.4/` | 과거 패키징 호환 자료, 현행 설정 경로에서 선택하지 않음 |
 
 `bin/codexpro_windows_process_identity.py`, `bin/chatgpt_prompt_profiles.py`,
 `bin/mcp_resource_guard.py`는 동결 대상이 아닙니다. 각각 Windows 숨김 창
@@ -58,11 +63,11 @@
 | `bin/chatgpt_oracle_state.py` | 프로젝트 잠금·신원·상태 장부 |
 | `bin/chatgpt_oracle_comprehensive.py` | 종합모드 단계 실행기 |
 | `bin/chatgpt_oracle_multi.py` | 진짜 Web Multi-GPT wave 실행 |
-| `bin/chatgpt_oracle_compat.py` | Oracle 0.16.1 해시 검증 호환 패치 |
+| `bin/chatgpt_oracle_compat.py` | Oracle 0.17.0 현행 패치와 0.16.1 정확 복구 패치 |
 | `bin/chatgpt_oracle_profiles.py` | lane별 throwaway 프로필 |
 | `bin/chatgpt_oracle_diagnose.py` | 실패 서명 분류 |
 | `bin/chatgpt_oracle_incident.py` | 단일 수리 소유자 인계 패킷 |
-| `bin/chatgpt_devspace_compat.py` | DevSpace 1.0.4 호환 패치 |
+| `bin/chatgpt_devspace_compat.py` | DevSpace 1.0.5 해시 검증 호환 패치 |
 
 ## 레거시 스텁 문서
 

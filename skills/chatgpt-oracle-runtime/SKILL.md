@@ -7,7 +7,9 @@ description: "Current Oracle runtime path for new ChatGPT work: regular modes us
 
 This is the only active browser path for all new GPT work. CodexPro and
 agbrowse are frozen for exact legacy recovery only. Regular modes use DevSpace;
-Pro uses Oracle attachment transport without any app.
+Pro uses Oracle attachment transport without any app. New runs pin Oracle
+`0.17.0`; Oracle `0.16.1` is accepted only when recovering an exact run already
+persisted with that version.
 
 `chatgpt_oracle_dispatch.py` supports exactly `direct`, `plan`, `review`, `edit`,
 `orchestrator`, `deep-research`, `manual`, and `pro`. `manual` is a supported
@@ -19,19 +21,24 @@ path and a compact exact-workspace guard. The web GPT must use only the exact
 project root recorded in that mission, read the mission and applicable
 `AGENTS.md` completely first, and may retry that same root once after a timeout.
 It must not substitute a parent, child, active workspace, or shell boundary
-workaround. Pro selects the account-visible Pro model and sends one short instruction
-plus exact attachment files; it never mentions DevSpace.
+workaround. Pro selects `gpt-5.5-pro` and sends one short instruction plus exact
+attachment files; it never mentions DevSpace.
 Regular routes select `GPT-5.6 Sol` with `heavy` and require Oracle
 evidence for visible `Extra High`. Never invent xhigh or silently downgrade.
+Web Multi runs only when explicitly selected; it is never an automatic
+transition or fallback for a regular or failed run.
 
 ## Manifest
 
 Require schema `codex.chatgpt.oracle-run/v1` with:
 
 - `project_root`: absolute existing directory.
-- `mission_path`: absolute UTF-8 regular file inside the project.
+- `mission_path` plus caller-pinned `mission_sha256`: absolute UTF-8 regular
+  file inside the project and its exact bytes.
 - `app_name`: one-line app name, without a leading `@`, for regular routes.
-- `task_kind: pro` plus one or more exact `attachments` for Pro.
+- `task_kind: pro` plus one or more exact `attachments`, ordered
+  `attachment_sha256s`, `project_context_manifest_path`, and
+  `project_context_manifest_sha256` for Pro.
 - `mode`: `browser`.
 - Optional `run_root`, `oracle_command`, `oracle_args`, `thinking_time`,
   hash-validated `copy_profile`, and mutex timeout.
@@ -46,12 +53,12 @@ python skills/chatgpt-oracle-runtime/scripts/run_chatgpt_oracle.py run --manifes
 ```
 
 The preview must include final argv, prompt first line, absolute mission path, SHA-256, and artifact paths without launching Oracle or a browser.
-Use this wrapper preview only. Do not substitute Oracle's own browser `--dry-run`, because Oracle 0.16.1 may still enter browser preflight.
+Use this wrapper preview only. Do not substitute Oracle's own browser `--dry-run`.
 
 Execute only after an explicit live-run request:
 
 ```powershell
-python skills/chatgpt-oracle-runtime/scripts/run_chatgpt_oracle.py run --manifest C:\absolute\oracle-job.json
+python skills/chatgpt-oracle-runtime/scripts/run_chatgpt_oracle.py run --manifest C:\absolute\oracle-job.json --expected-manifest-sha256 <manifest.actual_sha256>
 ```
 
 Complete requires Oracle exit code zero, a nonempty `--write-output` artifact,
@@ -93,10 +100,12 @@ replace or resubmit it.
 Oracle's `Prompt did not appear in conversation before timeout (send may have
 failed)` message is likewise submission-uncertain. No-live-tab plus missing
 saved-URL recovery evidence does not mechanically prove non-submission. A
-maintenance owner may release that exact run only after explicit user
-confirmation through `chatgpt_oracle_run.py settle-no-submission` with the
-exact run directory, `--confirmation user-confirmed-no-submission`, and a
-concise reason. The settlement is hash-bound to
+validated Oracle 0.17.0 `APP_MENTION_ROUTE_UNCONFIRMED` rejection is also
+eligible because the compatibility contract clears the composer and throws
+before either send path. A maintenance owner may release either exact run only
+after explicit user confirmation through `chatgpt_oracle_run.py
+settle-no-submission` with the exact run directory, `--confirmation
+user-confirmed-no-submission`, and a concise reason. The settlement is hash-bound to
 project/workflow/stage/attempt/input evidence and does not launch Oracle;
 comprehensive mode may consume only one replacement for that binding.
 
@@ -108,7 +117,7 @@ Control state, Oracle output, and transcripts live under
 `%USERPROFILE%\.codex\state\chatgpt-oracle`, outside the DevSpace-writable
 project.
 
-Use `chatgpt_oracle_comprehensive.py` for the bounded plan → optional
+Use `chatgpt_oracle_comprehensive.py` for the bounded plan → explicitly selected
 Pro/Multi → review → implementation → final web gate flow. Each web stage
 writes the next mission; the host validates only UTF-8, identity, paths, and
 hashes. Use `chatgpt_oracle_multi.py` for independent solver sessions in waves

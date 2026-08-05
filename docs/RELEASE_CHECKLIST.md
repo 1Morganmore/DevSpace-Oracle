@@ -8,6 +8,14 @@ The default installer must leave both frozen dependencies untouched.
 `-InstallLegacyRecoveryDependency` is the only opt-in that may install or
 contract-validate agbrowse for an old persisted run.
 
+- Confirm the release metadata is `1.8.0` and the Node.js engine is `>=24 <27`.
+- Confirm new runs pin Oracle `0.17.0` and DevSpace `1.0.5`; Oracle `0.16.1`
+  remains accepted only for exact recovery of a run persisted with that version.
+- Confirm regular routes select `GPT-5.6 Sol` with visible `Extra High`, Pro
+  selects attachment-only `gpt-5.5-pro`, and no route enters Web Multi
+  automatically or treats it as a fallback.
+- Confirm third-party notices cover both active compatibility patch sets and
+  the retained recovery/history-only patch directories.
 - Run `python scripts/check_portability.py --root .`, `python scripts/run_v4_contract_tests.py --focused`, `python scripts/run_v3_contract_tests.py`, and `python scripts/run_v4_contract_tests.py --full`.
 - Confirm `install-manifest.json` and `package.json` inventory every shipped runtime/schema file, the v4 runner, and both v7/v8 quiescent app-trace incident fixtures.
 - Confirm MIT copyright is `2026 ventianima-lab` and third-party notices retain the multi-gpt commit/hash attribution.

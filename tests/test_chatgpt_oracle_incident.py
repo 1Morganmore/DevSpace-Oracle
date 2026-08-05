@@ -46,7 +46,11 @@ def write_run(
         "project_root": str(project_root),
         "session_authority": session_authority,
         "terminal_harvested": terminal_harvested,
-        "artifacts": {"output": str(output_path)},
+        "artifacts": {
+            "output": str(output_path),
+            "stdout": str(run_dir / "stdout.log"),
+            "stderr": str(run_dir / "stderr.log"),
+        },
         "oracle": {"slug": "oracle-project-abc", "conversation_url": "https://chatgpt.com/c/exact"},
     }), encoding="utf-8")
     return run_dir
@@ -72,22 +76,24 @@ def test_packet_carries_exact_run_bucket_and_evidence(tmp_path: Path) -> None:
     assert str(run_dir / "state.json") in packet["evidence_paths"]
 
 
-def test_version_resolution_prelaunch_incident_is_safe_to_retry(tmp_path: Path) -> None:
+def test_compatibility_version_drift_incident_is_safe_to_retry(tmp_path: Path) -> None:
     module = load()
     run_dir = write_run(tmp_path, "v" * 8, status="attention_required")
     state_path = run_dir / "state.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    state["pre_submit_failure"] = {
-        "code": "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED",
-        "output_absent": True,
-        "conversation_url_absent": True,
-    }
+    state["session_authority"] = "pre_submit"
+    state["oracle"]["resolved_version"] = "unresolved"
+    state["oracle"]["conversation_url"] = ""
     state_path.write_text(json.dumps(state), encoding="utf-8")
+    (run_dir / "stderr.log").write_text(
+        "version resolution failed: Oracle compatibility is validated only for tested versions\n",
+        encoding="utf-8",
+    )
 
     packet = module.build_packet(run_dir)
 
     assert packet["bucket"] == "pre-submit-host-environment"
-    assert packet["signature"] == "oracle-version-resolution-prelaunch-timeout"
+    assert packet["signature"] == "oracle-version-resolution-prelaunch-compatibility-drift"
     assert packet["safe_for_fresh_run"] is True
 
 
@@ -110,6 +116,22 @@ def test_packet_never_marks_fresh_run_safe_while_another_session_owns_project(tm
 
     assert packet["safe_for_fresh_run"] is False
     assert [item["run_id"] for item in packet["unresolved_owners"]] == [owner.name]
+
+
+def test_unsettled_app_route_marker_never_marks_fresh_run_safe(tmp_path: Path) -> None:
+    module = load()
+    run_dir = write_run(
+        tmp_path,
+        "u" * 8,
+        status="attention_required",
+        stdout="ERROR: APP_MENTION_ROUTE_UNCONFIRMED\n",
+        session_authority="submitted_unknown",
+    )
+
+    packet = module.build_packet(run_dir)
+
+    assert packet["bucket"] == "active-or-uncertain"
+    assert packet["safe_for_fresh_run"] is False
 
 
 def test_reporter_is_never_the_repair_owner(tmp_path: Path) -> None:

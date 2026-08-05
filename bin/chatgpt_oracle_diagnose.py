@@ -113,6 +113,7 @@ def classify_run(
     has_output: bool,
     transcript_text: str = "",
     user_confirmed_no_submission: bool = False,
+    pre_submit_host_failure: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Return the bucket and signature for one persisted run.
 
@@ -127,6 +128,22 @@ def classify_run(
     lifecycle = str(verdict["lifecycle"])
     source = str(verdict["authority_source"])
 
+    stored_failure = state.get("pre_submit_failure")
+    host_failure = stored_failure if isinstance(stored_failure, dict) else pre_submit_host_failure
+    if (
+        isinstance(host_failure, dict)
+        and host_failure.get("code") == "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED"
+        and host_failure.get("output_absent") is True
+        and host_failure.get("conversation_url_absent") is True
+    ):
+        return {
+            "bucket": PRE_SUBMIT_HOST,
+            "signature": (
+                "oracle-version-resolution-prelaunch-compatibility-drift"
+                if host_failure.get("failure_reason") == "compatibility-version-drift"
+                else "oracle-version-resolution-prelaunch-timeout"
+            ),
+        }
     if lifecycle == "complete":
         if source == "exact-terminal-evidence":
             return {"bucket": COMPLETE, "signature": "terminal-harvested-output"}
@@ -135,21 +152,14 @@ def classify_run(
         return {"bucket": ACTIVE, "signature": "explicitly-abandoned"}
     if outcome == "not_executed" and has_output:
         return {"bucket": TASK_NOT_EXECUTED, "signature": "durable-output-reports-no-execution"}
-    pre_submit_failure = state.get("pre_submit_failure")
-    if (
-        isinstance(pre_submit_failure, dict)
-        and pre_submit_failure.get("code") == "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED"
-        and pre_submit_failure.get("output_absent") is True
-        and pre_submit_failure.get("conversation_url_absent") is True
-    ):
-        return {
-            "bucket": PRE_SUBMIT_HOST,
-            "signature": "oracle-version-resolution-prelaunch-timeout",
-        }
     if user_confirmed_no_submission:
         return {
             "bucket": PRE_SUBMIT_UI,
-            "signature": "user-confirmed-no-submission-after-prompt-timeout",
+            "signature": (
+                "user-confirmed-no-submission-after-app-route-unconfirmed"
+                if STATE.ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER in stdout_text
+                else "user-confirmed-no-submission-after-prompt-timeout"
+            ),
         }
     if str(state.get("transport_status") or "") == "post_submit_watchdog_timeout":
         return {
@@ -206,6 +216,7 @@ def diagnose(state_root: Path | None = None) -> dict[str, Any]:
             user_confirmed_no_submission=(
                 STATE.proven_user_confirmed_no_submission(run_dir / "state.json") is not None
             ),
+            pre_submit_host_failure=STATE.proven_pre_submit_host_failure(run_dir / "state.json"),
         )
         runs.append({
             "run_dir": str(run_dir),

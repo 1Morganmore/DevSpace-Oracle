@@ -1,6 +1,6 @@
 {
   "name": "codexpro-automation",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "private": false,
   "description": "Windows orchestrator that delegates Codex planning, research, implementation, and review to web ChatGPT through Oracle and DevSpace",
   "license": "MIT",
@@ -67,6 +67,7 @@
     "skills/chatgpt-thinking-browser/scripts/run_thinking_browser.py",
     "skills/chatgpt-pro-browser/SKILL.md",
     "skills/chatgpt-pro-browser/agents/openai.yaml",
+    "skills/chatgpt-pro-browser/scripts/build_project_context_packet.py",
     "skills/chatgpt-pro-browser/scripts/run_chatgpt_pro.py",
     "skills/chatgpt-pro-browser/scripts/run_pro_browser.py",
     "skills/chatgpt-deep-research-browser/SKILL.md",
@@ -115,7 +116,7 @@
     "SECURITY.md"
   ],
   "engines": {
-    "node": ">=22.19 <27"
+    "node": ">=24 <27"
   },
   "dependencies": {}
 }

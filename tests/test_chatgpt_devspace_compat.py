@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -32,7 +33,7 @@ def test_exact_devspace_patch_is_hash_gated_idempotent_and_backed_up(
     compat = load_compat()
     package = tmp_path / "package"
     package.mkdir()
-    (package / "package.json").write_text(json.dumps({"version": "1.0.4"}), encoding="utf-8")
+    (package / "package.json").write_text(json.dumps({"version": "1.0.5"}), encoding="utf-8")
     target = package / "sample.txt"
     target.write_bytes(b"before\n")
     patches = tmp_path / "patches"
@@ -88,7 +89,7 @@ def test_restart_confirmation_rejects_old_or_foreign_listener(
     compat = load_compat()
     package = tmp_path / "package"
     package.mkdir()
-    (package / "package.json").write_text(json.dumps({"version": "1.0.4"}), encoding="utf-8")
+    (package / "package.json").write_text(json.dumps({"version": "1.0.5"}), encoding="utf-8")
     (package / "sample.txt").write_bytes(b"after\n")
     compat.PATCHES = {
         "sample.txt": {
@@ -158,6 +159,20 @@ def test_stop_service_requires_exact_devspace_identity() -> None:
     assert foreign.value.code == "DEVSPACE_SERVICE_IDENTITY_MISMATCH"
 
 
+def test_service_identity_normalizes_npx_bin_parent_path() -> None:
+    compat = load_compat()
+    package = Path(r"C:\cache\node_modules\@waishnav\devspace")
+    identity = {
+        "pid": 44,
+        "command_line": (
+            r'"node" "C:\cache\node_modules\.bin\\..\@waishnav\devspace\dist\cli.js" serve'
+        ),
+        "started_at_unix_ns": 1,
+    }
+
+    assert compat._assert_devspace_service_identity(identity, [package]) is identity
+
+
 def test_unknown_devspace_version_or_file_hash_fails_closed(tmp_path: Path) -> None:
     compat = load_compat()
     package = tmp_path / "package"
@@ -167,7 +182,7 @@ def test_unknown_devspace_version_or_file_hash_fails_closed(tmp_path: Path) -> N
         compat.ensure_devspace_compatibility(package_root=package)
     assert version.value.code == "DEVSPACE_VERSION_UNVALIDATED"
 
-    (package / "package.json").write_text(json.dumps({"version": "1.0.4"}), encoding="utf-8")
+    (package / "package.json").write_text(json.dumps({"version": "1.0.5"}), encoding="utf-8")
     (package / "sample.txt").write_bytes(b"unknown\n")
     compat.PATCHES = {
         "sample.txt": {
@@ -183,13 +198,28 @@ def test_unknown_devspace_version_or_file_hash_fails_closed(tmp_path: Path) -> N
 
 def test_bounded_workspace_patch_skips_transient_trees_and_batches_discovery() -> None:
     compat = load_compat()
-    patch = (
+    patch_path = (
         MODULE_PATH.parent
         / "devspace-compat"
         / compat.SUPPORTED_VERSION
         / "workspaces.patch"
-    ).read_text(encoding="utf-8")
+    )
+    patch = patch_path.read_text(encoding="utf-8")
+    parsed = subprocess.run(
+        ["git", "apply", "--numstat", "--", str(patch_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
+    assert parsed.returncode == 0, parsed.stderr
+    assert compat.SUPPORTED_VERSION == "1.0.5"
+    assert compat.PATCHES["dist/workspaces.js"]["pristine"] == (
+        "1c0556b8acc77d5811488212eaf3029eb2f622833dc69c18cf9db9eb6bafc761"
+    )
+    assert compat.PATCHES["dist/workspaces.js"]["patched"] == (
+        "72866ba652bb0a5846128b4f5cd5c69d9de0985eb26b88c137d8f734c2aa2fb1"
+    )
     assert 'entry.name.startsWith(".pytest-")' in patch
     assert '".tmp"' in patch
     assert '".venv"' in patch
