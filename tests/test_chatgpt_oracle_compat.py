@@ -39,6 +39,12 @@ def run_prompt_route_case(
     semantic_identity_attr: str | None = "data-app-name",
     semantic_marker: str = "data-lexical-decorator",
     semantic_identity_value: str | None = None,
+    semantic_layout: str = "flat",
+    pill_icon_text: str = "D",
+    pill_icon_visible: bool = False,
+    pill_editable: bool = False,
+    suggestion_case: str = "option",
+    diagnostic_stop_before_send: bool = False,
 ) -> tuple[dict[str, object], str]:
     compat = load_compat()
     relative = Path("dist/src/browser/actions/promptComposer.js")
@@ -50,6 +56,18 @@ def run_prompt_route_case(
     compat._apply_patch(package, compat.patch_root("0.17.0") / "promptComposer.patch")
     source = target.read_text(encoding="utf-8")
     source = source[source.index("const ENTER_KEY_EVENT") :]
+    if diagnostic_stop_before_send:
+        send_boundary = (
+            "    const clicked = await attemptSendButton(runtime, input, logger, "
+            "deps?.attachmentNames, deps?.attachmentTimeoutMs);"
+        )
+        assert source.count(send_boundary) == 1
+        source = source.replace(
+            send_boundary,
+            "    return { diagnosticStoppedBeforeSend: true, "
+            "exactAppSuggestionSelected };\n" + send_boundary,
+            1,
+        )
     stubs = """
 const INPUT_SELECTORS = ['#prompt-textarea'];
 const PROMPT_PRIMARY_SELECTOR = '#prompt-textarea';
@@ -81,6 +99,11 @@ class BrowserAutomationError extends Error {
             "semanticIdentityAttr": semantic_identity_attr,
             "semanticMarker": semantic_marker,
             "semanticIdentityValue": semantic_identity_value,
+            "semanticLayout": semantic_layout,
+            "pillIconText": pill_icon_text,
+            "pillIconVisible": pill_icon_visible,
+            "pillEditable": pill_editable,
+            "suggestionCase": suggestion_case,
         }
     )
     harness = f"""
@@ -91,7 +114,11 @@ let suggestionClicks = 0;
 let clearCount = 0;
 let sendAttempts = 0;
 let verificationCalls = 0;
-let semanticTokenPresent = true;
+let semanticTokenPresent = scenario.suggestion === null;
+let suggestionObserved = false;
+let initialRouteConfirmed = false;
+let finalRouteConfirmed = false;
+let routeChecks = 0;
 const inserted = [];
 
 class FakeNode {{
@@ -103,48 +130,135 @@ class FakeNode {{
     this.children = [];
     this.tagName = 'SPAN';
     this.parentElement = null;
+    this.suggestionAction = false;
   }}
   getAttribute(name) {{ return this.attrs[name] ?? null; }}
   hasAttribute(name) {{ return Object.hasOwn(this.attrs, name); }}
   getBoundingClientRect() {{ return {{ width: this.visible ? 10 : 0, height: this.visible ? 10 : 0 }}; }}
-  querySelectorAll() {{ return this.children; }}
-  closest() {{ return this; }}
-  click() {{ suggestionClicks += 1; }}
+  querySelectorAll() {{
+    return this.children.flatMap((child) => [child, ...child.querySelectorAll('*')]);
+  }}
+  closest(selector) {{
+    if (selector.includes('[contenteditable="false"]')) {{
+      let current = this;
+      while (current) {{
+        if (current.getAttribute?.('contenteditable') === 'false') return current;
+        current = current.parentElement;
+      }}
+      return null;
+    }}
+    let current = this;
+    while (current) {{
+      const role = current.getAttribute?.('role');
+      if (current.tagName === 'BUTTON' || role === 'option' || role === 'menuitem' ||
+          current.hasAttribute?.('data-radix-collection-item') ||
+          (current.hasAttribute?.('data-fill') && current.hasAttribute?.('tabindex'))) {{
+        return current;
+      }}
+      current = current.parentElement;
+    }}
+    return null;
+  }}
+  contains(node) {{ return node === this || this.querySelectorAll('*').includes(node); }}
+  click() {{
+    if (this.suggestionAction) {{
+      suggestionClicks += 1;
+      semanticTokenPresent = true;
+    }}
+  }}
 }}
 
-const suggestionNode = scenario.suggestion === null ? null : new FakeNode(scenario.suggestion);
+const liveGroup = (disabled = false) => {{
+  const group = new FakeNode(`${{scenario.suggestion}} ${{scenario.suggestion}}`, {{ role: 'group' }});
+  const action = new FakeNode(
+    `${{scenario.suggestion}} ${{scenario.suggestion}}`,
+    {{ 'data-fill': '', tabindex: '0', ...(disabled ? {{ 'aria-disabled': 'true' }} : {{}}) }},
+  );
+  action.tagName = 'DIV';
+  action.suggestionAction = !disabled;
+  const primary = new FakeNode(scenario.suggestion);
+  const secondary = new FakeNode(scenario.suggestion);
+  primary.parentElement = action;
+  secondary.parentElement = action;
+  action.children = [primary, secondary];
+  action.parentElement = group;
+  group.children = [action];
+  return group;
+}};
+
+let suggestionSurfaces = [];
+if (scenario.suggestion !== null && scenario.suggestionCase === 'option') {{
+  const option = new FakeNode(scenario.suggestion, {{ role: 'option' }});
+  option.suggestionAction = true;
+  suggestionSurfaces = [option];
+}} else if (scenario.suggestion !== null && scenario.suggestionCase !== 'outside-menu') {{
+  const group = liveGroup(scenario.suggestionCase === 'disabled');
+  if (scenario.suggestionCase === 'ambiguous') {{
+    suggestionSurfaces = [group, liveGroup()];
+  }} else if (scenario.suggestionCase === 'group-lookalike') {{
+    const lookalike = new FakeNode(`${{scenario.suggestion}} Helper`);
+    lookalike.parentElement = group;
+    group.children.push(lookalike);
+  }} else if (scenario.suggestionCase === 'nested-unrelated') {{
+    const unrelated = new FakeNode('Settings');
+    unrelated.parentElement = group;
+    group.children.push(unrelated);
+  }} else if (scenario.suggestionCase === 'hidden') {{
+    group.visible = false;
+  }}
+  if (suggestionSurfaces.length === 0) suggestionSurfaces = [group];
+}}
 const tokenAttrs = {{
   [scenario.semanticMarker]: scenario.semanticMarker === 'contenteditable' ? 'false' : 'true',
 }};
 if (scenario.semanticIdentityAttr !== null)
   tokenAttrs[scenario.semanticIdentityAttr] =
     scenario.semanticIdentityValue ?? scenario.semanticToken;
-const tokenNode = scenario.semanticToken === null
-  ? null
-  : new FakeNode(
-      scenario.semanticToken,
-      tokenAttrs,
-      scenario.semanticVisible,
-    );
+let tokenNode = null;
+let semanticNodes = [];
+if (scenario.semanticToken !== null && scenario.semanticLayout === 'pill') {{
+  const icon = new FakeNode(
+    scenario.pillIconText,
+    scenario.pillIconVisible ? {{}} : {{ 'aria-hidden': 'true' }},
+    true,
+  );
+  const label = new FakeNode(scenario.semanticToken, {{}}, scenario.semanticVisible);
+  tokenNode = new FakeNode(
+    `${{scenario.pillIconText}} ${{scenario.semanticToken}}`,
+    {{ contenteditable: scenario.pillEditable ? 'true' : 'false' }},
+    true,
+  );
+  tokenNode.children = [icon, label];
+  icon.parentElement = tokenNode;
+  label.parentElement = tokenNode;
+  semanticNodes = [tokenNode, icon, label];
+}} else if (scenario.semanticToken !== null) {{
+  tokenNode = new FakeNode(
+    scenario.semanticToken,
+    tokenAttrs,
+    scenario.semanticVisible,
+  );
+  semanticNodes = [tokenNode];
+}}
 const form = {{
-  querySelectorAll: () => tokenNode && scenario.semanticScope === 'form' ? [tokenNode] : [],
+  querySelectorAll: () => tokenNode && scenario.semanticScope === 'form' ? semanticNodes : [],
 }};
 const composer = new FakeNode('');
 composer.querySelectorAll = () =>
-  semanticTokenPresent && tokenNode && scenario.semanticScope === 'editor' ? [tokenNode] : [];
+  semanticTokenPresent && tokenNode && scenario.semanticScope === 'editor' ? semanticNodes : [];
 composer.closest = () => form;
 composer.parentElement = form;
 const document = {{
   activeElement: composer,
   querySelectorAll(selector) {{
-    if (selector.includes('[role="option"]')) return suggestionNode ? [suggestionNode] : [];
+    if (selector.includes('[role="option"]')) return suggestionSurfaces;
     if (selector.includes('#prompt-textarea')) return [composer];
     return [];
   }},
 }};
 const window = {{
   getComputedStyle(node) {{
-    return {{ display: node.visible ? 'block' : 'none', visibility: 'visible', opacity: '1' }};
+    return {{ display: node.visible ? 'block' : 'none', visibility: 'visible', opacity: '1', pointerEvents: 'auto' }};
   }},
 }};
 const execute = (expression) =>
@@ -159,9 +273,17 @@ const runtime = {{
     }}
     if (expression.includes('return {{ focused: true }}'))
       return {{ result: {{ value: {{ focused: true }} }} }};
-    if (expression.includes('semanticMentionSelectors') || expression.includes('const exact = candidates.find') ||
-        (expression.includes('[role="option"]') && expression.includes('.some((node) =>'))) {{
-      return {{ result: {{ value: execute(expression) }} }};
+    if (expression.includes('const surfaceSelector =')) {{
+      const value = execute(expression);
+      if (value?.status === 'unique') suggestionObserved = true;
+      return {{ result: {{ value }} }};
+    }}
+    if (expression.includes('semanticMentionSelectors')) {{
+      const value = execute(expression);
+      routeChecks += 1;
+      if (value === true && routeChecks === 1) initialRouteConfirmed = true;
+      if (value === true && routeChecks > 1) finalRouteConfirmed = true;
+      return {{ result: {{ value }} }};
     }}
     if (expression.includes('return {{ editors, active: describe(document.activeElement) }}'))
       return {{ result: {{ value: {{ editors: [], active: null }} }} }};
@@ -204,7 +326,18 @@ try {{
   }};
   process.stderr.write(`${{caught.message}}\n`);
 }}
-console.log(JSON.stringify({{ error, result, suggestionClicks, clearCount, sendAttempts, inserted }}));
+console.log(JSON.stringify({{
+  error,
+  result,
+  suggestionClicks,
+  suggestionObserved,
+  initialRouteConfirmed,
+  finalRouteConfirmed,
+  routeChecks,
+  clearCount,
+  sendAttempts,
+  inserted,
+}}));
 """
     completed = subprocess.run(
         ["node", "--input-type=module"],
@@ -387,28 +520,123 @@ def test_exact_semantic_devspace_token_proceeds_when_transient_ui_is_absent(
     assert "APP_MENTION_ROUTE_UNCONFIRMED" not in stderr
 
 
-@pytest.mark.parametrize(
-    ("semantic_marker", "semantic_token"),
-    [
-        pytest.param("data-lexical-decorator", "@DevSpace", id="lexical-decorator"),
-        pytest.param("contenteditable", "DevSpace", id="noneditable-pill"),
-    ],
-)
-def test_exact_clicked_app_accepts_current_semantic_decorator_variants(
-    tmp_path: Path, semantic_marker: str, semantic_token: str
+@pytest.mark.parametrize("pill_icon_visible", [False, True], ids=["hidden-icon", "visible-icon"])
+def test_exact_clicked_app_accepts_live_noneditable_pill_with_exact_visible_label(
+    tmp_path: Path, pill_icon_visible: bool,
 ) -> None:
     result, stderr = run_prompt_route_case(
         tmp_path,
         suggestion="DevSpace",
-        semantic_token=semantic_token,
+        semantic_token="DevSpace",
         semantic_identity_attr=None,
-        semantic_marker=semantic_marker,
+        semantic_layout="pill",
+        pill_icon_visible=pill_icon_visible,
+        suggestion_case="group",
     )
 
     assert result["error"] is None
     assert result["suggestionClicks"] == 1
     assert result["sendAttempts"] == 1
     assert "APP_MENTION_ROUTE_UNCONFIRMED" not in stderr
+
+
+def test_live_group_composer_sequence_stops_before_send_with_both_route_checks(
+    tmp_path: Path,
+) -> None:
+    result, stderr = run_prompt_route_case(
+        tmp_path,
+        suggestion="DevSpace",
+        semantic_token="DevSpace",
+        semantic_identity_attr=None,
+        semantic_layout="pill",
+        suggestion_case="group",
+        diagnostic_stop_before_send=True,
+    )
+
+    assert result["error"] is None
+    assert result["result"] == {
+        "diagnosticStoppedBeforeSend": True,
+        "exactAppSuggestionSelected": True,
+    }
+    assert result["suggestionObserved"] is True
+    assert result["suggestionClicks"] == 1
+    assert result["initialRouteConfirmed"] is True
+    assert result["finalRouteConfirmed"] is True
+    assert result["routeChecks"] == 2
+    assert result["sendAttempts"] == 0
+    assert "APP_MENTION_ROUTE_UNCONFIRMED" not in stderr
+
+
+@pytest.mark.parametrize(
+    ("suggestion", "suggestion_case"),
+    [
+        pytest.param("DevSpace", "ambiguous", id="ambiguous-exact-actions"),
+        pytest.param("DevSpace", "group-lookalike", id="group-with-lookalike"),
+        pytest.param("DevSpace", "nested-unrelated", id="nested-unrelated-label"),
+        pytest.param("DevSpace", "hidden", id="hidden-group"),
+        pytest.param("DevSpace", "disabled", id="disabled-exact-action"),
+        pytest.param("DevSpace", "outside-menu", id="outside-suggestion-surface"),
+        pytest.param("DevSpace Helper", "group", id="wrong-app"),
+    ],
+)
+def test_group_suggestion_resolver_refuses_non_authoritative_candidates_before_send(
+    tmp_path: Path, suggestion: str, suggestion_case: str
+) -> None:
+    result, stderr = run_prompt_route_case(
+        tmp_path,
+        suggestion=suggestion,
+        suggestion_case=suggestion_case,
+        semantic_token="DevSpace",
+        semantic_identity_attr=None,
+        semantic_layout="pill",
+    )
+
+    assert result["suggestionClicks"] == 0
+    assert result["sendAttempts"] == 0
+    assert result["error"]["code"] == "APP_MENTION_ROUTE_UNCONFIRMED"
+    assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param({"suggestion": "DevSpace", "semantic_token": "DevSpace Helper"}, id="lookalike-label"),
+        pytest.param({"suggestion": "DevSpace", "semantic_visible": False}, id="hidden-inner-label"),
+        pytest.param({"suggestion": "DevSpace", "pill_editable": True}, id="editable-wrapper"),
+        pytest.param({"suggestion": None}, id="no-exact-click"),
+        pytest.param({"suggestion": "DevSpace", "semantic_token": "OtherApp"}, id="wrong-app"),
+        pytest.param({"suggestion": "DevSpace", "semantic_scope": "form"}, id="outside-editor"),
+    ],
+)
+def test_live_pill_refusals_fail_before_send(tmp_path: Path, case: dict[str, object]) -> None:
+    options: dict[str, object] = {
+        "suggestion": "DevSpace",
+        "semantic_token": "DevSpace",
+        "semantic_identity_attr": None,
+        "semantic_layout": "pill",
+        **case,
+    }
+    result, stderr = run_prompt_route_case(tmp_path, **options)
+
+    assert result["sendAttempts"] == 0
+    assert result["error"]["code"] == "APP_MENTION_ROUTE_UNCONFIRMED"
+    assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
+
+
+def test_live_pill_lost_before_send_fails_closed(tmp_path: Path) -> None:
+    result, stderr = run_prompt_route_case(
+        tmp_path,
+        suggestion="DevSpace",
+        semantic_token="DevSpace",
+        semantic_identity_attr=None,
+        semantic_layout="pill",
+        fallback_overwrite=True,
+    )
+
+    assert result["suggestionClicks"] == 1
+    assert result["sendAttempts"] == 0
+    assert result["error"]["code"] == "APP_MENTION_ROUTE_UNCONFIRMED"
+    assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
 
 
 @pytest.mark.parametrize(
@@ -536,7 +764,7 @@ def test_oracle_0170_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "dist/src/cli/browserConfig.js": ("989f14399c8aa51913752306135e11d97e4f1c55b2baf984907f1b54959cc340", "bd18d11e4770fa5335c889b7856622f2da4199351ec65bc17a5ec1f472e2506f"),
         "dist/src/browser/index.js": ("335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11", "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895"),
         "dist/src/browser/actions/assistantResponse.js": ("0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d", "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4"),
-        "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "4da4b078cfba5c239b4cae55a58f4c831a48edb72e66286b63f86d6c9aa86594"),
+        "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f"),
         "dist/src/browser/actions/thinkingTime.js": ("9d0c8ae34d72c6ab5ca4176ba2ac2b8431fbb93d6d4e73c0cc02f5d2eb8863b7", "7d475ed81ccee29a5b4107ed166584bcd3b0266bfd25e02ca7743bf24301e7f0"),
     }
 
@@ -555,6 +783,7 @@ def test_oracle_0170_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "7523e315eb6c6f29e5567a994084a39b73adf0adc1aecb013831885a3474e9b8",
         "f34821a5c4ac51d55bf2da0e0b8c2a8a3b3cafd3b9b6b6010726f0b032a5ece8",
         "8bba8fd9a663c4c404ccf479a0193672624c0e42afb3a3e04edf832a4d9820f6",
+        "4da4b078cfba5c239b4cae55a58f4c831a48edb72e66286b63f86d6c9aa86594",
     ]
 
 
