@@ -118,6 +118,22 @@ def test_packet_never_marks_fresh_run_safe_while_another_session_owns_project(tm
     assert [item["run_id"] for item in packet["unresolved_owners"]] == [owner.name]
 
 
+def test_unsettled_app_route_marker_never_marks_fresh_run_safe(tmp_path: Path) -> None:
+    module = load()
+    run_dir = write_run(
+        tmp_path,
+        "u" * 8,
+        status="attention_required",
+        stdout="ERROR: APP_MENTION_ROUTE_UNCONFIRMED\n",
+        session_authority="submitted_unknown",
+    )
+
+    packet = module.build_packet(run_dir)
+
+    assert packet["bucket"] == "active-or-uncertain"
+    assert packet["safe_for_fresh_run"] is False
+
+
 def test_reporter_is_never_the_repair_owner(tmp_path: Path) -> None:
     module = load()
     run_dir = write_run(tmp_path, "b" * 8, status="failed", stdout="ERROR: unknown\n")

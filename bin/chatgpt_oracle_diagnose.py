@@ -63,11 +63,6 @@ BUCKETS = (
 SIGNATURE_RULES: tuple[tuple[str, str, str], ...] = (
     ("rsync", PRE_SUBMIT_HOST, "oracle-profile-copy-requires-rsync"),
     ("cannot be combined with", PRE_SUBMIT_HOST, "oracle-launch-flags-mutually-exclusive"),
-    (
-        "APP_MENTION_ROUTE_UNCONFIRMED",
-        PRE_SUBMIT_UI,
-        "app-mention-route-unconfirmed-before-send",
-    ),
     ("app mention suggestion did not appear", PRE_SUBMIT_UI, "app-mention-suggestion-absent"),
     ("app mention was not confirmed", PRE_SUBMIT_UI, "app-mention-not-confirmed"),
     ("Unable to find model option", PRE_SUBMIT_UI, "model-option-label-missing"),

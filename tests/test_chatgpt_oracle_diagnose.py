@@ -88,25 +88,21 @@ def test_report_buckets_pre_submit_ui_and_host_causes_separately(tmp_path: Path)
     ]
 
 
-def test_pre_submit_signature_outranks_post_submit_interpretation(tmp_path: Path) -> None:
+def test_unsettled_app_route_marker_remains_submission_uncertain(tmp_path: Path) -> None:
     module = load()
     state_root = tmp_path / "oracle-state"
     write_run(
         state_root,
         "d" * 8,
         status="attention_required",
-        stdout=(
-            "ERROR: APP_MENTION_ROUTE_UNCONFIRMED\n"
-            "note: ECONNREFUSED 127.0.0.1:1234\n"
-        ),
+        stdout="ERROR: APP_MENTION_ROUTE_UNCONFIRMED\n",
         session_authority="submitted_unknown",
     )
 
     report = module.diagnose(state_root)
-    run = report["unresolved_runs"][0]
 
-    assert run["bucket"] == "pre-submit-ui-contract"
-    assert run["signature"] == "app-mention-route-unconfirmed-before-send"
+    assert report["bucket_counts"] == {"active-or-uncertain": 1}
+    assert report["unresolved_runs"] == []
 
 
 def test_durable_terminal_run_is_complete_and_not_executed_is_separated(tmp_path: Path) -> None:
