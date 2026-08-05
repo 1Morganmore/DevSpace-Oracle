@@ -483,7 +483,7 @@ def test_web_multi_branch_is_bound_and_resumes_at_review(tmp_path: Path) -> None
 
     def fake_multi(
         path: Path, *, expected_manifest_sha256: str, parent_id: str,
-        dry_run: bool, parent_lock_held: bool,
+        dry_run: bool, parent_lock_held: bool, terminal_seal,
     ):
         assert parent_lock_held is True
         workflow_config = module.load_manifest(workflow_path)
@@ -511,6 +511,15 @@ def test_web_multi_branch_is_bound_and_resumes_at_review(tmp_path: Path) -> None
             "ready_for_next": True,
             "blocker": "",
         }), encoding="utf-8")
+        terminal = {
+            "schema": module.MULTI.RESULT_SCHEMA,
+            "status": "complete",
+            "parent_id": parent_id,
+            "manifest_sha256": expected_manifest_sha256,
+            "lanes": [],
+            "next_stage_result_path": str(receipt),
+        }
+        module.MULTI._publish_result(Path(stored["multi_result_path"]), terminal, terminal_seal)
         return {
             "ok": True, "parent_id": parent_id, "manifest_sha256": expected_manifest_sha256,
             "next_stage_result_path": str(receipt),
@@ -575,8 +584,7 @@ def test_failed_web_multi_preserves_exact_execution_identity(tmp_path: Path) -> 
             "next_stage_result_path": None,
         }
         result_path = tmp_path / "bound-multi-output" / "result.json"
-        result_path.parent.mkdir(parents=True, exist_ok=True)
-        result_path.write_text(json.dumps(terminal), encoding="utf-8")
+        module.MULTI._publish_result(result_path, terminal, kwargs["terminal_seal"])
         return {"ok": False, **terminal}
 
     result = module.run_workflow(workflow, multi_execute=partial_multi)
@@ -1644,6 +1652,7 @@ def test_running_web_multi_rebinds_only_persisted_parent_result(tmp_path: Path) 
         "current_mission_path": str(multi_source), "next_index": 0, "records": [],
         "multi_execution_id": parent_id, "multi_manifest_sha256": module.sha(multi_source),
         "multi_result_path": str(result_path), "multi_receipt_path": str(receipt),
+        "multi_terminal_status": "complete", "multi_result_sha256": module.sha(result_path),
     })
     calls = 0
 
@@ -1662,7 +1671,7 @@ def test_running_web_multi_rebinds_only_persisted_parent_result(tmp_path: Path) 
     assert result["records"][0]["parent_id"] == parent_id
 
 
-def test_running_web_multi_seals_first_failed_result_before_later_recovery(tmp_path: Path) -> None:
+def test_running_web_multi_preserves_producer_sealed_failure(tmp_path: Path) -> None:
     module = load()
     path = manifest(tmp_path)
     config = module.load_manifest(path)
@@ -1694,6 +1703,8 @@ def test_running_web_multi_seals_first_failed_result_before_later_recovery(tmp_p
         "multi_manifest_sha256": module.sha(multi_source),
         "multi_result_path": str(result_path),
         "multi_receipt_path": str(receipt),
+        "multi_terminal_status": "failed",
+        "multi_result_sha256": terminal_sha,
     })
 
     def never_submit(*args, **kwargs):
@@ -1739,6 +1750,87 @@ def test_running_web_multi_seals_first_failed_result_before_later_recovery(tmp_p
     assert second["multi_result_sha256"] == terminal_sha
 
 
+def test_web_multi_crash_after_host_seal_rejects_replacement_result(tmp_path: Path) -> None:
+    module = load()
+    workflow = manifest(tmp_path)
+    config = module.load_manifest(workflow)
+    source = _bound_multi_manifest(module, tmp_path, with_receipt=True)
+    source_sha = module.sha(source)
+    state_path = module._state_path(config, config["workflow_id"])
+    module._write(state_path, {
+        "schema": module.STATE_SCHEMA,
+        "status": "prepared",
+        "workflow_id": config["workflow_id"],
+        "manifest_sha256": config["manifest_sha256"],
+        "next_stage": "web-multi",
+        "next_mission_path": str(source),
+        "next_mission_sha256": source_sha,
+        "next_index": 1,
+        "records": [],
+    })
+
+    def crashing_multi(path: Path, **kwargs):
+        stored = module._json(state_path)
+        receipt = Path(stored["multi_receipt_path"])
+        output = tmp_path / "replacement-output.md"
+        review = tmp_path / "replacement-review.md"
+        output.write_text("replacement", encoding="utf-8")
+        review.write_text("replacement review", encoding="utf-8")
+        receipt.write_text(json.dumps({
+            "schema": module.RECEIPT_SCHEMA,
+            "workflow_id": config["workflow_id"],
+            "stage": "web-multi",
+            "attempt_id": kwargs["parent_id"],
+            "input_mission_sha256": source_sha,
+            "status": "PASS",
+            "output_path": str(output),
+            "output_sha256": module.sha(output),
+            "next_stage": "review",
+            "next_mission_path": str(review),
+            "next_mission_sha256": module.sha(review),
+            "ready_for_next": True,
+            "blocker": "",
+        }), encoding="utf-8")
+        terminal = {
+            "schema": module.MULTI.RESULT_SCHEMA,
+            "status": "complete",
+            "parent_id": kwargs["parent_id"],
+            "manifest_sha256": kwargs["expected_manifest_sha256"],
+            "lanes": [],
+            "next_stage_result_path": str(receipt),
+        }
+        raw = (json.dumps(terminal, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        result_path = Path(stored["multi_result_path"])
+        kwargs["terminal_seal"](result_path, raw)
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(json.dumps({**terminal, "lanes": [{"id": "replacement"}]}), encoding="utf-8")
+        raise RuntimeError("simulated crash after host seal")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        module.run_workflow(workflow, multi_execute=crashing_multi)
+
+    sealed = module._json(state_path)
+    assert sealed["multi_terminal_status"] == "complete"
+    assert sealed["multi_result_sha256"] != module.sha(Path(sealed["multi_result_path"]))
+    calls = {"multi": 0, "oracle": 0}
+
+    def never_multi(*args, **kwargs):
+        calls["multi"] += 1
+        raise AssertionError("sealed Multi must not resubmit")
+
+    def never_oracle(*args, **kwargs):
+        calls["oracle"] += 1
+        raise AssertionError("replacement result must not advance")
+
+    recovered = module.run_workflow(
+        workflow, multi_execute=never_multi, oracle_execute=never_oracle
+    )
+    assert recovered["status"] == "attention_required"
+    assert recovered["recovery"]["error"] == "MULTI_TERMINAL_RESULT_CHANGED"
+    assert recovered["multi_result_sha256"] == sealed["multi_result_sha256"]
+    assert calls == {"multi": 0, "oracle": 0}
+
+
 @pytest.mark.parametrize("mutation", ["parent", "manifest", "receipt"])
 def test_web_multi_recovery_rejects_persisted_identity_drift(tmp_path: Path, mutation: str) -> None:
     module = load()
@@ -1761,6 +1853,7 @@ def test_web_multi_recovery_rejects_persisted_identity_drift(tmp_path: Path, mut
     recovered = module._recover_exact_multi_stage({
         "multi_result_path": str(result_path), "multi_execution_id": parent_id,
         "multi_manifest_sha256": manifest_sha, "multi_receipt_path": str(receipt),
+        "multi_terminal_status": "complete", "multi_result_sha256": module.sha(result_path),
     })
     assert recovered == {"ok": False, "error": "MULTI_RESULT_IDENTITY_INVALID"}
 

@@ -14,7 +14,9 @@ resolve the requested mode through:
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" --mode <direct|plan|review|edit|orchestrator> --project-root C:\project --mission-path C:\project\mission.md --manifest-output C:\project\.ai-bridge\oracle.json --reasoning-level "Very High" --dry-run
 ```
 
-Remove `--dry-run` only for an explicitly authorized live web run. The runtime
+For an explicitly authorized live web run, replace `--dry-run` with
+`--expected-manifest-sha256 <oracle_manifest_sha256>` using the exact top-level
+hash from that preview. The runtime
 sends plain `@DevSpace` plus the absolute mission path. It never attaches files,
 opens ChatGPT settings, inspects/selects/deletes an app, or falls back to
 agbrowse, Playwright, in-app Browser, or Chrome.

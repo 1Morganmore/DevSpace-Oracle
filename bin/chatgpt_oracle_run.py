@@ -359,6 +359,11 @@ def dry_run_payload(config, layout, argv: Sequence[str], prompt: str) -> dict[st
         "prompt_first_line": prompt.splitlines()[0],
         "mission_path": str(config.mission_path),
         "mission_sha256": config.mission_sha256,
+        "manifest": {
+            "path": str(config.manifest_path),
+            "actual_sha256": config.manifest_sha256,
+            "expected_sha256": config.expected_manifest_sha256,
+        },
         "transport": config.transport,
         "attachments": [
             {"path": str(path), "sha256": digest}
@@ -1357,6 +1362,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     run_parser = commands.add_parser("run")
     run_parser.add_argument("--manifest", type=Path, required=True)
+    run_parser.add_argument("--expected-manifest-sha256")
     run_parser.add_argument("--dry-run", action="store_true")
     recover_parser = commands.add_parser("recover")
     recover_parser.add_argument("--run-dir", type=Path, required=True)
@@ -1398,7 +1404,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "run":
-            payload = execute_run(args.manifest, dry_run=args.dry_run)
+            if not args.dry_run and args.expected_manifest_sha256 is None:
+                raise OracleRunError(
+                    "MANIFEST_SHA256_REQUIRED",
+                    "live Oracle runs require --expected-manifest-sha256 from the exact dry-run preview",
+                )
+            payload = execute_run(
+                args.manifest,
+                expected_manifest_sha256=args.expected_manifest_sha256,
+                dry_run=args.dry_run,
+            )
         elif args.command == "recover":
             payload = recover_run(
                 args.run_dir,

@@ -21,10 +21,18 @@ def text(path: Path) -> str:
 def test_new_regular_modes_route_only_to_oracle_devspace() -> None:
     value = text(THINKING)
     assert "chatgpt_oracle_dispatch.py" in value
+    assert "--expected-manifest-sha256" in value
     assert "@DevSpace" in value
     assert "never attaches files" in value
     assert "create a new agbrowse run" in value
     assert "app picker" not in value.casefold()
+
+
+def test_readmes_pin_live_dispatch_to_the_preview_hash() -> None:
+    for path in (ROOT / "README.md", ROOT / "README.en.md"):
+        value = text(path)
+        assert "oracle_manifest_sha256" in value
+        assert "--expected-manifest-sha256" in value
 
 
 def test_pro_is_oracle_attachment_only_and_never_uses_devspace_or_codexpro() -> None:
@@ -87,6 +95,7 @@ def test_deep_research_uses_oracle_deep_without_silent_fallback() -> None:
     value = text(RESEARCH)
     assert "chatgpt_oracle_dispatch.py" in value
     assert "--mode deep-research" in value
+    assert "--expected-manifest-sha256" in value
     assert "--browser-research deep" in value
     assert '--reasoning-level "Very High"' in value
     assert "visible `Extra High`" in value

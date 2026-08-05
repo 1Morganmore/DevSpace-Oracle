@@ -288,3 +288,54 @@ def test_multi_accepts_bound_manifest_and_missions(tmp_path: Path) -> None:
     assert result["status"] == "complete"
     assert result["parent_id"] == "a" * 64
     assert result["manifest_sha256"] == expected
+
+
+def test_terminal_seal_precedes_result_publish(tmp_path: Path) -> None:
+    module = load()
+    job = make_manifest(tmp_path, 2)
+    result_path = tmp_path / "out" / "result.json"
+    sealed = {}
+
+    def fake_execute(path: Path, *, expected_manifest_sha256: str, dry_run: bool):
+        assert expected_manifest_sha256 == digest(path)
+        return {"ok": True}
+
+    def terminal_seal(path: Path, raw: bytes) -> None:
+        assert path == result_path
+        assert not path.exists()
+        sealed["raw"] = raw
+
+    result = module.run_multi(
+        job,
+        expected_manifest_sha256=digest(job),
+        parent_id="a" * 64,
+        dry_run=True,
+        execute=fake_execute,
+        terminal_seal=terminal_seal,
+    )
+
+    assert result["ok"] is True
+    assert result_path.read_bytes() == sealed["raw"]
+
+
+def test_live_cli_requires_and_propagates_manifest_hash(monkeypatch, capsys, tmp_path: Path) -> None:
+    module = load()
+    job = make_manifest(tmp_path, 2)
+    expected = digest(job)
+    calls = []
+
+    monkeypatch.setattr(module, "run_multi", lambda *args, **kwargs: calls.append((args, kwargs)))
+    assert module.main(["--manifest", str(job)]) == 1
+    assert "MANIFEST_SHA256_REQUIRED" in json.loads(capsys.readouterr().out)["error"]["message"]
+    assert calls == []
+
+    monkeypatch.setattr(
+        module,
+        "run_multi",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {"ok": True},
+    )
+    assert module.main([
+        "--manifest", str(job), "--expected-manifest-sha256", expected,
+    ]) == 0
+    capsys.readouterr()
+    assert calls == [((job,), {"expected_manifest_sha256": expected, "dry_run": False})]

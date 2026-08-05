@@ -58,7 +58,7 @@ Use this wrapper preview only. Do not substitute Oracle's own browser `--dry-run
 Execute only after an explicit live-run request:
 
 ```powershell
-python skills/chatgpt-oracle-runtime/scripts/run_chatgpt_oracle.py run --manifest C:\absolute\oracle-job.json
+python skills/chatgpt-oracle-runtime/scripts/run_chatgpt_oracle.py run --manifest C:\absolute\oracle-job.json --expected-manifest-sha256 <manifest.actual_sha256>
 ```
 
 Complete requires Oracle exit code zero, a nonempty `--write-output` artifact,

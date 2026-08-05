@@ -182,6 +182,20 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _publish_result(
+    path: Path,
+    value: dict[str, Any],
+    terminal_seal: Callable[[Path, bytes], None] | None,
+) -> None:
+    raw = (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    if terminal_seal is not None:
+        terminal_seal(path, raw)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp.{uuid.uuid4().hex}")
+    temporary.write_bytes(raw)
+    temporary.replace(path)
+
+
 def _child_manifest(config: dict[str, Any], lane: dict[str, Any], parent_id: str) -> Path:
     lane_root = config["output_dir"] / "lanes" / lane["id"]
     manifest = lane_root / "oracle.json"
@@ -284,6 +298,7 @@ def run_multi(
     dry_run: bool = False,
     execute: Callable[..., dict[str, Any]] = RUNNER.execute_run,
     parent_lock_held: bool = False,
+    terminal_seal: Callable[[Path, bytes], None] | None = None,
 ) -> dict[str, Any]:
     config = load_manifest(manifest_path, expected_manifest_sha256=expected_manifest_sha256)
     parent_id = (
@@ -313,7 +328,7 @@ def run_multi(
                 "manifest_sha256": config["manifest_sha256"],
                 "lanes": lanes,
             }
-            _write_json(config["output_dir"] / "result.json", result)
+            _publish_result(config["output_dir"] / "result.json", result, terminal_seal)
             return {"ok": False, **result}
         merger_mission = _merger_transport(config, successful, parent_id) if not dry_run else config["merger_mission_path"]
         merger_lane = {
@@ -357,17 +372,27 @@ def run_multi(
             else None
         ),
     }
-    _write_json(config["output_dir"] / "result.json", result)
+    _publish_result(config["output_dir"] / "result.json", result, terminal_seal)
     return {"ok": status == "complete", **result}
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run independent Oracle browser sessions in waves and merge handoffs.")
     parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--expected-manifest-sha256")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     try:
-        result = run_multi(args.manifest, dry_run=args.dry_run)
+        if not args.dry_run and args.expected_manifest_sha256 is None:
+            raise MultiError(
+                "MANIFEST_SHA256_REQUIRED: live Multi runs require "
+                "--expected-manifest-sha256 from the exact dry-run preview"
+            )
+        result = run_multi(
+            args.manifest,
+            expected_manifest_sha256=args.expected_manifest_sha256,
+            dry_run=args.dry_run,
+        )
     except Exception as exc:
         result = {"ok": False, "error": {"code": "ORACLE_MULTI_FAILED", "message": str(exc)}}
     print(json.dumps(result, ensure_ascii=False, indent=2))

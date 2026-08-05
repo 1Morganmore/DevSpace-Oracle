@@ -105,3 +105,64 @@ def test_context_manifest_is_required_for_pro_and_forbidden_for_regular_modes(tm
             output_path=tmp_path / "direct.json",
             context_manifest_path=context_manifest,
         )
+
+
+def test_live_dispatch_requires_and_propagates_preview_hash(monkeypatch, capsys, tmp_path: Path) -> None:
+    module = load()
+    mission = tmp_path / "mission.md"
+    target = tmp_path / "oracle.json"
+    mission.write_text("work", encoding="utf-8")
+    preview = module.compile_manifest(
+        mode="direct", project_root=tmp_path, mission_path=mission, output_path=target
+    )
+    expected = preview["oracle_manifest_sha256"]
+    args = [
+        "--mode", "direct",
+        "--project-root", str(tmp_path),
+        "--mission-path", str(mission),
+        "--manifest-output", str(target),
+    ]
+    calls = []
+    monkeypatch.setattr(module.RUNNER, "execute_run", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    assert module.main(args) == 1
+    assert "MANIFEST_SHA256_REQUIRED" in json.loads(capsys.readouterr().out)["error"]["message"]
+    assert calls == []
+
+    monkeypatch.setattr(
+        module.RUNNER,
+        "execute_run",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {"ok": True},
+    )
+    assert module.main([*args, "--expected-manifest-sha256", expected]) == 0
+    capsys.readouterr()
+    assert calls == [((target,), {"expected_manifest_sha256": expected, "dry_run": False})]
+
+
+def test_live_dispatch_rejects_mission_change_after_preview(monkeypatch, capsys, tmp_path: Path) -> None:
+    module = load()
+    mission = tmp_path / "mission.md"
+    target = tmp_path / "oracle.json"
+    mission.write_text("previewed", encoding="utf-8")
+    expected = module.compile_manifest(
+        mode="direct", project_root=tmp_path, mission_path=mission, output_path=target
+    )["oracle_manifest_sha256"]
+    mission.write_text("changed", encoding="utf-8")
+
+    def validate_only(path: Path, *, expected_manifest_sha256: str, dry_run: bool):
+        module.RUNNER.STATE.load_manifest(
+            path, expected_manifest_sha256=expected_manifest_sha256
+        )
+        return {"ok": True}
+
+    monkeypatch.setattr(module.RUNNER, "execute_run", validate_only)
+    assert module.main([
+        "--mode", "direct",
+        "--project-root", str(tmp_path),
+        "--mission-path", str(mission),
+        "--manifest-output", str(target),
+        "--expected-manifest-sha256", expected,
+    ]) == 1
+    assert "does not match the current Oracle manifest" in json.loads(
+        capsys.readouterr().out
+    )["error"]["message"]

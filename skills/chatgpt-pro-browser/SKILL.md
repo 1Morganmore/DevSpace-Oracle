@@ -176,7 +176,7 @@ selection, short prompt, output path, and slug without submitting.
 Execute the compiled manifest only after a live Pro run was authorized:
 
 ```powershell
-python "$env:USERPROFILE\.codex\skills\chatgpt-oracle-runtime\scripts\run_chatgpt_oracle.py" run --manifest C:\project\.ai-bridge\pro.json
+python "$env:USERPROFILE\.codex\skills\chatgpt-oracle-runtime\scripts\run_chatgpt_oracle.py" run --manifest C:\project\.ai-bridge\pro.json --expected-manifest-sha256 <oracle_manifest_sha256>
 ```
 
 Completion requires exact Oracle Pro model evidence, attachment evidence, exit

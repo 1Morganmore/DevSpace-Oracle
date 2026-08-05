@@ -157,7 +157,9 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
   --dry-run
 ```
 
-실제 실행 승인이 있을 때만 `--dry-run`을 제거합니다.
+실제 실행 승인이 있을 때만 `--dry-run`을 제거하고, 같은 명령에 미리보기의
+최상위 `oracle_manifest_sha256`을
+`--expected-manifest-sha256 <oracle_manifest_sha256>`로 전달합니다.
 
 ## Pro 실행 예시
 

@@ -14,7 +14,8 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" --mode deep-rese
 The compiled Oracle manifest uses `gpt-5.6`, model strategy `select`, Oracle
 `heavy`, visible `Extra High`, and `--browser-research deep`. It sends no
 attachment and performs no app picker or settings action. Remove `--dry-run`
-only for an explicitly authorized live run.
+only for an explicitly authorized live run and replace it with
+`--expected-manifest-sha256 <oracle_manifest_sha256>` from that exact preview.
 
 Do not silently replace Deep Research with ordinary search or Pro. Existing
 agbrowse Deep Research records may be recovered only by their exact old run

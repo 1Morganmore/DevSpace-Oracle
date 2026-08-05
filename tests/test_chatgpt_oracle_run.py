@@ -335,11 +335,17 @@ def test_dry_run_never_executes_and_has_no_file_flag(tmp_path: Path) -> None:
     def forbidden(*args, **kwargs):
         calls.append(1)
         raise AssertionError
-    result = execute_run(runner, manifest(tmp_path), dry_run=True, run_factory=forbidden, popen_factory=forbidden)
+    job = manifest(tmp_path)
+    result = execute_run(runner, job, dry_run=True, run_factory=forbidden, popen_factory=forbidden)
     assert result["ok"] is True
     assert result["prompt_first_line"].startswith("@DevSpace ")
     assert str((tmp_path / "mission.md").resolve()) in result["prompt_first_line"]
     assert result["mission_sha256"]
+    assert result["manifest"] == {
+        "path": str(job),
+        "actual_sha256": hashlib.sha256(job.read_bytes()).hexdigest(),
+        "expected_sha256": None,
+    }
     assert Path(result["mission_path"]).is_absolute()
     assert str((tmp_path / "mission.md").resolve()) in result["argv"][result["argv"].index("--prompt") + 1]
     assert "--file" not in result["argv"]
@@ -349,6 +355,29 @@ def test_dry_run_never_executes_and_has_no_file_flag(tmp_path: Path) -> None:
     assert result["argv"].count("--browser-hide-window") == 1
     assert calls == []
     assert not (tmp_path / "runs").exists()
+
+
+def test_live_cli_requires_and_propagates_manifest_hash(monkeypatch, capsys, tmp_path: Path) -> None:
+    runner = load_runner()
+    job = manifest(tmp_path)
+    expected = hashlib.sha256(job.read_bytes()).hexdigest()
+    calls = []
+
+    monkeypatch.setattr(runner, "execute_run", lambda *args, **kwargs: calls.append((args, kwargs)))
+    assert runner.main(["run", "--manifest", str(job)]) == 1
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "MANIFEST_SHA256_REQUIRED"
+    assert calls == []
+
+    monkeypatch.setattr(
+        runner,
+        "execute_run",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {"ok": True},
+    )
+    assert runner.main([
+        "run", "--manifest", str(job), "--expected-manifest-sha256", expected,
+    ]) == 0
+    capsys.readouterr()
+    assert calls == [((job,), {"expected_manifest_sha256": expected, "dry_run": False})]
 
 
 def test_copy_profile_is_first_class_and_outside_project(

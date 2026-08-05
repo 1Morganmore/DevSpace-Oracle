@@ -161,7 +161,9 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
   --dry-run
 ```
 
-Remove `--dry-run` only when the run is authorized.
+Only when the run is authorized, remove `--dry-run` and pass the preview's
+top-level `oracle_manifest_sha256` in the same command as
+`--expected-manifest-sha256 <oracle_manifest_sha256>`.
 
 ## Pro example
 

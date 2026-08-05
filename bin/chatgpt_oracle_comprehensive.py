@@ -282,9 +282,9 @@ def _claim_scope(config: dict[str, Any], workflow_id: str) -> None:
 
 def _write_workflow_state(path: Path, config: dict[str, Any], value: dict[str, Any]) -> None:
     payload = {**value, "review_policy": dict(config["_review_policy"])}
-    _write(path, payload)
+    RUNNER.STATE.write_json_atomic(path, payload)
     scope_status = str(payload.get("status") or "active")
-    _write(_scope_path(config), {
+    RUNNER.STATE.write_json_atomic(_scope_path(config), {
         "schema": SCOPE_SCHEMA,
         "status": scope_status if scope_status in {"complete", "attention_required", "failed"} else "active",
         "active_workflow_id": config["workflow_id"],
@@ -1246,18 +1246,15 @@ def _recover_exact_multi_stage(stored: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "MULTI_RECOVERY_IDENTITY_MISSING"}
     terminal_status = str(stored.get("multi_terminal_status") or "")
     terminal_sha = str(stored.get("multi_result_sha256") or "")
-    if terminal_status:
-        if terminal_status not in {"partial", "failed"} or re.fullmatch(r"[0-9a-f]{64}", terminal_sha) is None:
-            return {"ok": False, "error": "MULTI_TERMINAL_SEAL_INVALID"}
-        try:
-            if sha(result_path.resolve(strict=True)) != terminal_sha:
-                return {"ok": False, "error": "MULTI_TERMINAL_RESULT_CHANGED"}
-        except Exception as exc:
-            return {"ok": False, "error": "MULTI_RESULT_UNAVAILABLE", "detail": str(exc)}
-        return {"ok": False, "error": "MULTI_TERMINAL_SEALED", "status": terminal_status}
+    if not terminal_status and not terminal_sha:
+        return {"ok": False, "error": "MULTI_TERMINAL_SEAL_MISSING"}
+    if terminal_status not in {"complete", "partial", "failed"} or re.fullmatch(r"[0-9a-f]{64}", terminal_sha) is None:
+        return {"ok": False, "error": "MULTI_TERMINAL_SEAL_INVALID"}
     try:
         resolved_result_path = result_path.resolve(strict=True)
         result_bytes = resolved_result_path.read_bytes()
+        if hashlib.sha256(result_bytes).hexdigest() != terminal_sha:
+            return {"ok": False, "error": "MULTI_TERMINAL_RESULT_CHANGED"}
         result = json.loads(result_bytes.decode("utf-8", errors="strict"))
         if not isinstance(result, dict):
             raise WorkflowError("web-multi result must be a JSON object")
@@ -1268,18 +1265,18 @@ def _recover_exact_multi_stage(stored: dict[str, Any]) -> dict[str, Any]:
         result.get("schema") != MULTI.RESULT_SCHEMA
         or str(result.get("parent_id") or "") != expected_parent
         or str(result.get("manifest_sha256") or "") != expected_manifest_sha
-        or status not in {"complete", "partial", "failed"}
+        or status != terminal_status
     ):
         return {"ok": False, "error": "MULTI_RESULT_IDENTITY_INVALID"}
     if status in {"partial", "failed"}:
-        result_sha = hashlib.sha256(result_bytes).hexdigest()
         return {
             "ok": False,
+            "error": "MULTI_TERMINAL_SEALED",
             "status": status,
             "result_path": str(resolved_result_path),
             "manifest_sha256": expected_manifest_sha,
             "multi_terminal_status": status,
-            "multi_result_sha256": result_sha,
+            "multi_result_sha256": terminal_sha,
         }
     actual_receipt = Path(str(result.get("next_stage_result_path") or "")).expanduser()
     if (
@@ -1294,6 +1291,8 @@ def _recover_exact_multi_stage(stored: dict[str, Any]) -> dict[str, Any]:
         "status": status,
         "result_path": str(resolved_result_path),
         "manifest_sha256": expected_manifest_sha,
+        "multi_terminal_status": status,
+        "multi_result_sha256": terminal_sha,
     }
 
 
@@ -1613,45 +1612,62 @@ def _run_workflow_locked(
                 "multi_result_path": str(multi_result_path),
                 "multi_receipt_path": str(multi_receipt_path) if multi_receipt_path else None,
             })
-            multi_result = multi_execute(
-                source, expected_manifest_sha256=multi_manifest_sha, parent_id=multi_execution_id,
-                dry_run=False, parent_lock_held=True,
-            )
-            records.append({"stage": stage, "result": multi_result})
-            if not multi_result.get("ok"):
-                terminal_status = str(multi_result.get("status") or "")
-                if terminal_status not in {"partial", "failed"} or not multi_result_path.is_file():
-                    raise WorkflowError("web-multi terminal result is unavailable or invalid")
-                terminal_bytes = multi_result_path.read_bytes()
-                terminal_result = json.loads(terminal_bytes.decode("utf-8"))
-                if not isinstance(terminal_result, dict):
+
+            def seal_terminal_result(result_path: Path, result_bytes: bytes) -> None:
+                stored = _json(state_path)
+                try:
+                    terminal = json.loads(result_bytes.decode("utf-8", errors="strict"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise WorkflowError("web-multi terminal result must be strict UTF-8 JSON") from exc
+                if not isinstance(terminal, dict):
                     raise WorkflowError("web-multi terminal result must be a JSON object")
+                terminal_status = str(terminal.get("status") or "")
+                terminal_sha = hashlib.sha256(result_bytes).hexdigest()
                 if any((
-                    terminal_result.get("schema") != MULTI.RESULT_SCHEMA,
-                    str(terminal_result.get("status") or "") != terminal_status,
-                    str(terminal_result.get("parent_id") or "") != multi_execution_id,
-                    str(terminal_result.get("manifest_sha256") or "") != multi_manifest_sha,
-                    str(multi_result.get("parent_id") or "") != multi_execution_id,
-                    str(multi_result.get("manifest_sha256") or "") != multi_manifest_sha,
+                    stored.get("status") != "running",
+                    stored.get("current_stage") != "web-multi",
+                    stored.get("workflow_id") != workflow_id,
+                    stored.get("manifest_sha256") != config["manifest_sha256"],
+                    stored.get("multi_execution_id") != multi_execution_id,
+                    stored.get("multi_manifest_sha256") != multi_manifest_sha,
+                    not result_path.is_absolute(),
+                    Path(str(stored.get("multi_result_path") or "")).resolve() != result_path.resolve(),
+                    terminal.get("schema") != MULTI.RESULT_SCHEMA,
+                    terminal_status not in {"complete", "partial", "failed"},
+                    str(terminal.get("parent_id") or "") != multi_execution_id,
+                    str(terminal.get("manifest_sha256") or "") != multi_manifest_sha,
                 )):
-                    raise WorkflowError("web-multi terminal result identity mismatch")
+                    raise WorkflowError("web-multi terminal seal identity mismatch")
+                existing_status = str(stored.get("multi_terminal_status") or "")
+                existing_sha = str(stored.get("multi_result_sha256") or "")
+                if existing_status or existing_sha:
+                    if existing_status == terminal_status and existing_sha == terminal_sha:
+                        return
+                    raise WorkflowError("web-multi terminal seal is immutable")
+                _write_workflow_state(state_path, config, {
+                    **stored,
+                    "multi_terminal_status": terminal_status,
+                    "multi_result_sha256": terminal_sha,
+                })
+
+            multi_execute(
+                source, expected_manifest_sha256=multi_manifest_sha, parent_id=multi_execution_id,
+                dry_run=False, parent_lock_held=True, terminal_seal=seal_terminal_result,
+            )
+            recovered = _recover_exact_multi_stage(_json(state_path))
+            records.append({"stage": stage, "result": recovered})
+            if not recovered.get("ok"):
                 blocked = {
                     **_json(state_path), "status": "attention_required", "records": records,
                     "blocker": "web-multi exact execution needs recovery; no replacement was submitted",
-                    "multi_terminal_status": terminal_status,
-                    "multi_result_sha256": hashlib.sha256(terminal_bytes).hexdigest(),
+                    "recovery": recovered,
                 }
                 _write_workflow_state(state_path, config, blocked)
                 return {"ok": False, **blocked}
-            result_path = Path(str(multi_result.get("next_stage_result_path") or ""))
-            if (
-                str(multi_result.get("parent_id") or "") != multi_execution_id
-                or str(multi_result.get("manifest_sha256") or "") != multi_manifest_sha
-                or result_path.resolve() != multi_receipt_path.resolve()
-                or not result_path.is_file()
-            ):
+            result_path = Path(str(recovered.get("next_stage_result_path") or ""))
+            if not result_path.is_file():
                 return {"ok": False, "status": "attention_required", "workflow_id": workflow_id,
-                        "error": "web-multi result identity did not match its persisted execution", "records": records}
+                        "error": "web-multi sealed result has no stage receipt", "records": records}
             attempt_id = multi_execution_id
             receipt = _validate_receipt(
                 config, result_path, workflow_id, "web-multi", attempt_id, multi_manifest_sha

@@ -101,6 +101,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--reasoning-level")
     parser.add_argument("--attachment", type=Path, action="append", default=[])
     parser.add_argument("--context-manifest", type=Path)
+    parser.add_argument("--expected-manifest-sha256")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -114,9 +115,18 @@ def main(argv: Iterable[str] | None = None) -> int:
             context_manifest_path=args.context_manifest,
         )
         if compiled["oracle_manifest_path"]:
+            if not args.dry_run and args.expected_manifest_sha256 is None:
+                raise ValueError(
+                    "MANIFEST_SHA256_REQUIRED: live dispatch requires "
+                    "--expected-manifest-sha256 from the exact dry-run preview"
+                )
             run = RUNNER.execute_run(
                 Path(compiled["oracle_manifest_path"]),
-                expected_manifest_sha256=str(compiled["oracle_manifest_sha256"]),
+                expected_manifest_sha256=(
+                    str(compiled["oracle_manifest_sha256"])
+                    if args.dry_run
+                    else args.expected_manifest_sha256
+                ),
                 dry_run=args.dry_run,
             )
             value = {**compiled, "run": run, "ok": bool(run.get("ok"))}

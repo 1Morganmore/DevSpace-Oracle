@@ -23,6 +23,12 @@ the canonical root is forbidden for write lanes.
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_multi.py" --manifest C:\project\multi.json --dry-run
 ```
 
+Use the preview's exact `manifest_sha256` for the authorized live run:
+
+```powershell
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_multi.py" --manifest C:\project\multi.json --expected-manifest-sha256 <manifest_sha256>
+```
+
 Each lane receives its own Oracle slug/run/output and only `@DevSpace` plus its
 mission path. Lanes run in stable waves of at most five; a larger topology is
 not reduced. Successful handoffs are preserved with exact SHA-256 bindings and
