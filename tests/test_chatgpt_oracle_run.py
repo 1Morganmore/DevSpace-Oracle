@@ -58,9 +58,20 @@ def manifest(tmp_path: Path, **extra) -> Path:
         ],
     }
     payload.update(extra)
+    payload["mission_sha256"] = hashlib.sha256(
+        Path(payload["mission_path"]).read_bytes()
+    ).hexdigest()
     path.write_text(json.dumps(payload), encoding="utf-8")
     os.environ["CODEX_ORACLE_STATE_ROOT"] = str((tmp_path.parent / f"{tmp_path.name}-host-state").resolve())
     return path.resolve()
+
+
+def rebind_manifest_mission(path: Path) -> None:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["mission_sha256"] = hashlib.sha256(
+        Path(payload["mission_path"]).read_bytes()
+    ).hexdigest()
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def pro_manifest(tmp_path: Path, **extra) -> Path:
@@ -90,7 +101,7 @@ def pro_manifest(tmp_path: Path, **extra) -> Path:
             "sha256": builder.sha256_file(evidence),
         }],
     }), encoding="utf-8")
-    builder.build(context_manifest)
+    receipt = builder.build(context_manifest)
     return manifest(
         tmp_path,
         transport="pro-attachment-only",
@@ -99,7 +110,9 @@ def pro_manifest(tmp_path: Path, **extra) -> Path:
         model_strategy="select",
         thinking_time="heavy",
         attachments=[str(prompt.resolve()), str(packet.resolve())],
+        attachment_sha256s=[builder.sha256_file(prompt), str(receipt["packet_sha256"])],
         project_context_manifest_path=str(context_manifest.resolve()),
+        project_context_manifest_sha256=builder.sha256_file(context_manifest),
         mission_path=str(prompt.resolve()),
         **extra,
     )
@@ -531,13 +544,14 @@ def test_pro_attachment_preflight_accepts_one_mib_and_rejects_one_byte_more(tmp_
 def test_pro_runner_rejects_an_unvalidated_packet_before_layout(tmp_path: Path) -> None:
     runner = load_runner()
     job = pro_manifest(tmp_path)
+    run_root = runner.STATE.load_manifest(job).run_root
     (tmp_path / "packet.zip").write_bytes(b"not-a-validated-packet")
 
-    with pytest.raises(runner.OracleRunError) as exc:
+    with pytest.raises(runner.STATE.OracleStateError) as exc:
         execute_run(runner, job, dry_run=True)
 
-    assert exc.value.code == "PRO_CONTEXT_PREFLIGHT_FAILED"
-    assert not runner.STATE.load_manifest(job).run_root.exists()
+    assert exc.value.code == "PRO_ATTACHMENT_SHA256_MISMATCH"
+    assert not run_root.exists()
 
 
 def test_pro_runner_revalidates_nonattachment_evidence_before_popen(tmp_path: Path) -> None:
@@ -1175,6 +1189,36 @@ def test_pro_attachment_change_blocks_before_submit(tmp_path: Path) -> None:
     assert launched == []
 
 
+@pytest.mark.parametrize("mutation", ["packet", "context"])
+def test_caller_pinned_pro_files_reject_preparse_replacement(tmp_path: Path, mutation: str) -> None:
+    runner = load_runner()
+    job = pro_manifest(tmp_path)
+    expected_manifest_sha256 = runner.STATE.sha256_file(job)
+    payload = json.loads(job.read_text(encoding="utf-8"))
+    target = (
+        Path(payload["attachments"][1])
+        if mutation == "packet"
+        else Path(payload["project_context_manifest_path"])
+    )
+    target.write_bytes(target.read_bytes() + b"changed")
+    launched = []
+
+    with pytest.raises(runner.STATE.OracleStateError) as caught:
+        execute_run(
+            runner,
+            job,
+            expected_manifest_sha256=expected_manifest_sha256,
+            run_factory=version_runner,
+            popen_factory=lambda *args, **kwargs: launched.append(True),
+        )
+
+    assert caught.value.code in {
+        "PRO_ATTACHMENT_SHA256_MISMATCH",
+        "PRO_CONTEXT_MANIFEST_SHA256_MISMATCH",
+    }
+    assert launched == []
+
+
 def test_bound_input_change_inside_submit_mutex_blocks_before_popen(tmp_path: Path) -> None:
     runner = load_runner()
     bound = tmp_path / "handoff.md"
@@ -1415,6 +1459,7 @@ def test_user_confirmed_no_submission_is_hash_bound_idempotent_and_fail_closed(t
         )),
         encoding="utf-8",
     )
+    rebind_manifest_mission(manifest_path)
 
     def prompt_not_observed(command, **kwargs):
         slug = command[command.index("--slug") + 1]
@@ -1546,6 +1591,7 @@ def test_user_confirmation_rejects_bare_bindings_without_host_contract(tmp_path:
         )),
         encoding="utf-8",
     )
+    rebind_manifest_mission(manifest_path)
 
     def prompt_not_observed(command, **kwargs):
         slug = command[command.index("--slug") + 1]

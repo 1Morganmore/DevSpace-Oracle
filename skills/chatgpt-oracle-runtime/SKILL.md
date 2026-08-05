@@ -33,9 +33,12 @@ transition or fallback for a regular or failed run.
 Require schema `codex.chatgpt.oracle-run/v1` with:
 
 - `project_root`: absolute existing directory.
-- `mission_path`: absolute UTF-8 regular file inside the project.
+- `mission_path` plus caller-pinned `mission_sha256`: absolute UTF-8 regular
+  file inside the project and its exact bytes.
 - `app_name`: one-line app name, without a leading `@`, for regular routes.
-- `task_kind: pro` plus one or more exact `attachments` for Pro.
+- `task_kind: pro` plus one or more exact `attachments`, ordered
+  `attachment_sha256s`, `project_context_manifest_path`, and
+  `project_context_manifest_sha256` for Pro.
 - `mode`: `browser`.
 - Optional `run_root`, `oracle_command`, `oracle_args`, `thinking_time`,
   hash-validated `copy_profile`, and mutex timeout.

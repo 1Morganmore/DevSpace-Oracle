@@ -55,6 +55,7 @@ def compile_manifest(
         "schema": RUNNER.STATE.SCHEMA,
         "project_root": str(root),
         "mission_path": contract["mission_path"],
+        "mission_sha256": RUNNER.STATE.sha256_file(Path(contract["mission_path"]).resolve(strict=True)),
         "mode": "browser",
         "transport": "pro-attachment-only" if contract["mode"] == "pro" else "devspace",
         "model": contract.get("model") or "gpt-5.6",
@@ -76,12 +77,18 @@ def compile_manifest(
         except ValueError as exc:
             raise ValueError("PRO_CONTEXT_MANIFEST_ROOT_ESCAPE: --context-manifest must be inside project_root") from exc
         manifest["attachments"] = contract["attachments"]
+        manifest["attachment_sha256s"] = [
+            RUNNER.STATE.sha256_file(Path(value).expanduser().resolve(strict=True))
+            for value in contract["attachments"]
+        ]
         manifest["project_context_manifest_path"] = str(context_manifest)
+        manifest["project_context_manifest_sha256"] = RUNNER.STATE.sha256_file(context_manifest)
     else:
         manifest["app_name"] = "DevSpace"
         manifest["task_outcome_contract"] = "v1"
     target.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     result["oracle_manifest_path"] = str(target)
+    result["oracle_manifest_sha256"] = RUNNER.STATE.sha256_file(target)
     return result
 
 
@@ -107,7 +114,11 @@ def main(argv: Iterable[str] | None = None) -> int:
             context_manifest_path=args.context_manifest,
         )
         if compiled["oracle_manifest_path"]:
-            run = RUNNER.execute_run(Path(compiled["oracle_manifest_path"]), dry_run=args.dry_run)
+            run = RUNNER.execute_run(
+                Path(compiled["oracle_manifest_path"]),
+                expected_manifest_sha256=str(compiled["oracle_manifest_sha256"]),
+                dry_run=args.dry_run,
+            )
             value = {**compiled, "run": run, "ok": bool(run.get("ok"))}
         else:
             value = compiled

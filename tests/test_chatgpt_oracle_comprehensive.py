@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -45,13 +46,18 @@ def assert_pro_context(module, payload: dict, mission: Path, evidence: tuple[Pat
     context = json.loads(context_manifest.read_text(encoding="utf-8"))
     packet = Path(context["packet_path"])
     assert payload["attachments"] == [str(mission), str(packet)]
+    assert payload["attachment_sha256s"] == [module.sha(mission), module.sha(packet)]
+    assert payload["project_context_manifest_sha256"] == module.sha(context_manifest)
     assert context["mission_path"] == str(mission)
     assert context["mission_sha256"] == module.sha(mission)
     assert [item["path"] for item in context["evidence"]] == [str(item) for item in evidence]
     receipt = module.RUNNER.PRO_CONTEXT_BUILDER.validate(context_manifest)
     assert receipt["packet_sha256"] == module.sha(packet)
     binding = module.RUNNER.validate_pro_context_preflight(
-        module.RUNNER.STATE.load_manifest(context_manifest.parent / "oracle.json")
+        module.RUNNER.STATE.load_manifest(
+            context_manifest.parent / "oracle.json",
+            expected_manifest_sha256=module.sha(context_manifest.parent / "oracle.json"),
+        )
     )
     assert binding["packet_path"] == str(packet.resolve())
     return packet
@@ -66,6 +72,57 @@ def test_manifest_rejects_non_devspace_app_before_workflow_creation(tmp_path: Pa
 
     with pytest.raises(module.WorkflowError, match="exactly DevSpace"):
         module.load_manifest(path)
+
+
+def test_manifest_snapshot_remains_authoritative_across_mutex_entry(monkeypatch, tmp_path: Path) -> None:
+    module = load()
+    path = manifest(tmp_path)
+    original_bytes = path.read_bytes()
+    config = module.load_manifest(path)
+    state_path = module._state_path(config, config["workflow_id"])
+    module._write(state_path, {
+        "schema": module.STATE_SCHEMA,
+        "status": "complete",
+        "workflow_id": config["workflow_id"],
+        "manifest_sha256": hashlib.sha256(original_bytes).hexdigest(),
+        "records": [],
+    })
+    other_root = tmp_path / "other-project"
+    other_root.mkdir()
+    other_mission = other_root / "initial.md"
+    other_mission.write_text("different authority", encoding="utf-8")
+    locked_roots = []
+
+    class MutatingMutex:
+        def __enter__(self):
+            locked_roots.append(config["project_root"])
+            path.write_text(json.dumps({
+                "schema": module.SCHEMA,
+                "workflow_id": "b" * 32,
+                "project_root": str(other_root.resolve()),
+                "workflow_dir": str((other_root / "workflow").resolve()),
+                "initial_mission_path": str(other_mission.resolve()),
+                "app_name": "DevSpace",
+                "model": "gpt-5.6",
+                "local_gate_command": ["python", "-c", "raise SystemExit(0)"],
+            }), encoding="utf-8")
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(module.RUNNER.STATE, "project_submit_mutex", lambda *args, **kwargs: MutatingMutex())
+
+    result = module.run_workflow(
+        path,
+        oracle_execute=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("the swapped manifest must never submit")
+        ),
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "complete"
+    assert result["manifest_sha256"] == hashlib.sha256(original_bytes).hexdigest()
+    assert locked_roots == [config["project_root"]]
 
 
 def test_web_authored_relay_reaches_complete_without_host_semantic_rewrite(tmp_path: Path) -> None:
@@ -120,9 +177,17 @@ def test_web_authored_relay_reaches_complete_without_host_semantic_rewrite(tmp_p
     assert result["status"] == "complete"
 
 
-def test_pro_stage_runs_oracle_attachment_only_and_materializes_bound_receipt(tmp_path: Path) -> None:
+def test_pro_stage_runs_oracle_attachment_only_and_materializes_bound_receipt(monkeypatch, tmp_path: Path) -> None:
     module = load()
     stages = []
+    real_load_manifest = module.RUNNER.STATE.load_manifest
+
+    def exact_child_load(path: Path, **kwargs):
+        if path.name == "oracle.json":
+            assert kwargs.get("expected_manifest_sha256") == module.sha(path)
+        return real_load_manifest(path, **kwargs)
+
+    monkeypatch.setattr(module.RUNNER.STATE, "load_manifest", exact_child_load)
 
     def regular_receipt(mission: Path, stage: str, next_stage: str, next_mission: Path) -> None:
         text = mission.read_text(encoding="utf-8")
@@ -1595,6 +1660,83 @@ def test_running_web_multi_rebinds_only_persisted_parent_result(tmp_path: Path) 
     assert result["current_stage"] == "review"
     assert calls == 1
     assert result["records"][0]["parent_id"] == parent_id
+
+
+def test_running_web_multi_seals_first_failed_result_before_later_recovery(tmp_path: Path) -> None:
+    module = load()
+    path = manifest(tmp_path)
+    config = module.load_manifest(path)
+    multi_source = tmp_path / "multi.json"
+    multi_source.write_text("{}", encoding="utf-8")
+    receipt = tmp_path / "multi-receipt.json"
+    result_path = tmp_path / "multi-result.json"
+    parent_id = "b" * 64
+    terminal = {
+        "schema": module.MULTI.RESULT_SCHEMA,
+        "status": "failed",
+        "parent_id": parent_id,
+        "manifest_sha256": module.sha(multi_source),
+        "lanes": [],
+    }
+    result_path.write_text(json.dumps(terminal), encoding="utf-8")
+    terminal_sha = module.sha(result_path)
+    state_path = module._state_path(config, config["workflow_id"])
+    module._write(state_path, {
+        "schema": module.STATE_SCHEMA,
+        "status": "running",
+        "workflow_id": config["workflow_id"],
+        "manifest_sha256": config["manifest_sha256"],
+        "current_stage": "web-multi",
+        "current_mission_path": str(multi_source),
+        "next_index": 0,
+        "records": [],
+        "multi_execution_id": parent_id,
+        "multi_manifest_sha256": module.sha(multi_source),
+        "multi_result_path": str(result_path),
+        "multi_receipt_path": str(receipt),
+    })
+
+    def never_submit(*args, **kwargs):
+        raise AssertionError("terminal Multi recovery must never resubmit")
+
+    first = module.run_workflow(path, oracle_execute=never_submit, multi_execute=never_submit)
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert first["status"] == "attention_required"
+    assert persisted["multi_terminal_status"] == "failed"
+    assert persisted["multi_result_sha256"] == terminal_sha
+
+    output = tmp_path / "multi-output.md"
+    review = tmp_path / "review.md"
+    output.write_text("merged", encoding="utf-8")
+    review.write_text("review", encoding="utf-8")
+    receipt.write_text(json.dumps({
+        "schema": module.RECEIPT_SCHEMA,
+        "workflow_id": config["workflow_id"],
+        "stage": "web-multi",
+        "attempt_id": parent_id,
+        "input_mission_sha256": module.sha(multi_source),
+        "status": "PASS",
+        "output_path": str(output),
+        "output_sha256": module.sha(output),
+        "next_stage": "review",
+        "next_mission_path": str(review),
+        "next_mission_sha256": module.sha(review),
+        "ready_for_next": True,
+        "blocker": "",
+    }), encoding="utf-8")
+    result_path.write_text(json.dumps({
+        "schema": module.MULTI.RESULT_SCHEMA,
+        "status": "complete",
+        "parent_id": parent_id,
+        "manifest_sha256": module.sha(multi_source),
+        "next_stage_result_path": str(receipt),
+    }), encoding="utf-8")
+
+    second = module.run_workflow(path, oracle_execute=never_submit, multi_execute=never_submit)
+    assert second["status"] == "attention_required"
+    assert second["recovery"]["error"] == "MULTI_TERMINAL_RESULT_CHANGED"
+    assert second["multi_terminal_status"] == "failed"
+    assert second["multi_result_sha256"] == terminal_sha
 
 
 @pytest.mark.parametrize("mutation", ["parent", "manifest", "receipt"])

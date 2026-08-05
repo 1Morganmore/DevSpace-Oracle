@@ -130,7 +130,14 @@ def _receipt_path(root: Path, value: Any, *, exists: bool = True) -> tuple[Path,
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
-    value = _json(path.resolve(strict=True))
+    manifest_path = path.expanduser().resolve(strict=True)
+    manifest_bytes = manifest_path.read_bytes()
+    try:
+        value = json.loads(manifest_bytes.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WorkflowError(f"invalid workflow manifest: {manifest_path}") from exc
+    if not isinstance(value, dict):
+        raise WorkflowError(f"JSON object required: {manifest_path}")
     if value.get("schema") != SCHEMA:
         raise WorkflowError(f"schema must be {SCHEMA}")
     root = Path(str(value.get("project_root") or "")).expanduser().resolve(strict=True)
@@ -160,7 +167,7 @@ def load_manifest(path: Path) -> dict[str, Any]:
         "app_name": app_name,
         "model": str(value.get("model") or "gpt-5.6"),
         "local_gate_command": list(local_gate),
-        "manifest_sha256": sha(path.resolve(strict=True)),
+        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "workflow_id": workflow_id,
     }
 
@@ -465,12 +472,14 @@ def _oracle_manifest(
             ],
         })
         try:
-            builder.build(context_manifest)
+            context_receipt = builder.build(context_manifest)
         except builder.PacketError as exc:
             raise WorkflowError(f"Pro context packet invalid: {exc}") from exc
         payload["transport"] = "pro-attachment-only"
         payload["attachments"] = [str(mission), str(packet)]
+        payload["attachment_sha256s"] = [mission_sha, str(context_receipt["packet_sha256"])]
         payload["project_context_manifest_path"] = str(context_manifest)
+        payload["project_context_manifest_sha256"] = sha(context_manifest)
     else:
         payload["transport"] = "devspace"
         payload["app_name"] = config["app_name"]
@@ -1247,30 +1256,49 @@ def _recover_exact_multi_stage(stored: dict[str, Any]) -> dict[str, Any]:
             return {"ok": False, "error": "MULTI_RESULT_UNAVAILABLE", "detail": str(exc)}
         return {"ok": False, "error": "MULTI_TERMINAL_SEALED", "status": terminal_status}
     try:
-        result = _json(result_path.resolve(strict=True))
+        resolved_result_path = result_path.resolve(strict=True)
+        result_bytes = resolved_result_path.read_bytes()
+        result = json.loads(result_bytes.decode("utf-8", errors="strict"))
+        if not isinstance(result, dict):
+            raise WorkflowError("web-multi result must be a JSON object")
     except Exception as exc:
         return {"ok": False, "error": "MULTI_RESULT_UNAVAILABLE", "detail": str(exc)}
-    actual_receipt = Path(str(result.get("next_stage_result_path") or "")).expanduser()
+    status = str(result.get("status") or "")
     if (
         result.get("schema") != MULTI.RESULT_SCHEMA
         or str(result.get("parent_id") or "") != expected_parent
         or str(result.get("manifest_sha256") or "") != expected_manifest_sha
-        or not actual_receipt.is_absolute()
+        or status not in {"complete", "partial", "failed"}
+    ):
+        return {"ok": False, "error": "MULTI_RESULT_IDENTITY_INVALID"}
+    if status in {"partial", "failed"}:
+        result_sha = hashlib.sha256(result_bytes).hexdigest()
+        return {
+            "ok": False,
+            "status": status,
+            "result_path": str(resolved_result_path),
+            "manifest_sha256": expected_manifest_sha,
+            "multi_terminal_status": status,
+            "multi_result_sha256": result_sha,
+        }
+    actual_receipt = Path(str(result.get("next_stage_result_path") or "")).expanduser()
+    if (
+        not actual_receipt.is_absolute()
         or actual_receipt.resolve() != expected_receipt.resolve()
     ):
         return {"ok": False, "error": "MULTI_RESULT_IDENTITY_INVALID"}
     return {
-        "ok": result.get("status") == "complete",
+        "ok": True,
         "parent_id": str(result["parent_id"]),
         "next_stage_result_path": result.get("next_stage_result_path"),
-        "status": result.get("status"),
-        "result_path": str(result_path.resolve()),
+        "status": status,
+        "result_path": str(resolved_result_path),
         "manifest_sha256": expected_manifest_sha,
     }
 
 
 def _run_workflow_locked(
-    manifest_path: Path,
+    config: dict[str, Any],
     *,
     dry_run: bool = False,
     oracle_execute: Callable[..., dict[str, Any]] = RUNNER.execute_run,
@@ -1278,7 +1306,6 @@ def _run_workflow_locked(
     multi_execute: Callable[..., dict[str, Any]] = MULTI.run_multi,
     local_gate_runner: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
-    config = load_manifest(manifest_path)
     workflow_id = config["workflow_id"]
     config["_review_policy"] = _review_policy_from_history(config)
     config["_parallel_parent_id"] = hashlib.sha256(workflow_id.encode("utf-8")).hexdigest()
@@ -1389,6 +1416,14 @@ def _run_workflow_locked(
                     "blocker": "web-multi exact result is not ready; no retry was submitted",
                     "recovery": recovered,
                     "records": records,
+                    **(
+                        {
+                            "multi_terminal_status": recovered["multi_terminal_status"],
+                            "multi_result_sha256": recovered["multi_result_sha256"],
+                        }
+                        if recovered.get("multi_terminal_status")
+                        else {}
+                    ),
                 }
                 _write_workflow_state(state_path, config, blocked)
                 return {"ok": False, **blocked}
@@ -1419,7 +1454,7 @@ def _run_workflow_locked(
             }
             _write_workflow_state(state_path, config, prepared)
             return _run_workflow_locked(
-                manifest_path, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
+                config, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
                 multi_execute=multi_execute, local_gate_runner=local_gate_runner,
             )
         elif stored.get("status") in {"running", "attention_required"} and stored.get("current_stage"):
@@ -1479,7 +1514,7 @@ def _run_workflow_locked(
                 }
                 _write_workflow_state(state_path, config, prepared)
                 return _run_workflow_locked(
-                    manifest_path, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
+                    config, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
                     multi_execute=multi_execute, local_gate_runner=local_gate_runner,
                 )
             recovered = _recover_exact_oracle_stage(stored, oracle_recover=oracle_recover)
@@ -1518,7 +1553,7 @@ def _run_workflow_locked(
             }
             _write_workflow_state(state_path, config, awaiting)
             return _run_workflow_locked(
-                manifest_path, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
+                config, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
                 multi_execute=multi_execute, local_gate_runner=local_gate_runner,
             )
         elif stored.get("status") in {"running", "attention_required"}:
@@ -1654,7 +1689,9 @@ def _run_workflow_locked(
             mission_sha=augmented_mission_sha,
         )
         oracle_manifest_sha = sha(oracle_manifest)
-        oracle_config = RUNNER.STATE.load_manifest(oracle_manifest)
+        oracle_config = RUNNER.STATE.load_manifest(
+            oracle_manifest, expected_manifest_sha256=oracle_manifest_sha
+        )
         oracle_layout = RUNNER.STATE.create_layout(oracle_config, run_id=attempt_id)
         stage_pre_submit_retries = int(_json(state_path).get("pre_submit_retries") or 0)
         _write_workflow_state(state_path, config, {
@@ -1751,7 +1788,7 @@ def _run_workflow_locked(
                     "pre_submit_retries": pre_submit_retries + 1,
                 })
                 return _run_workflow_locked(
-                    manifest_path, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
+                    config, oracle_execute=oracle_execute, oracle_recover=oracle_recover,
                     multi_execute=multi_execute, local_gate_runner=local_gate_runner,
                 )
             retained = {
@@ -1804,7 +1841,7 @@ def run_workflow(
     config = load_manifest(manifest_path)
     if dry_run:
         return _run_workflow_locked(
-            manifest_path,
+            config,
             dry_run=True,
             oracle_execute=oracle_execute,
             oracle_recover=oracle_recover,
@@ -1813,7 +1850,7 @@ def run_workflow(
         )
     with RUNNER.STATE.project_submit_mutex(config["project_root"], timeout_seconds=30):
         return _run_workflow_locked(
-            manifest_path,
+            config,
             dry_run=False,
             oracle_execute=oracle_execute,
             oracle_recover=oracle_recover,

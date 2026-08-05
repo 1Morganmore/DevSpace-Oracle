@@ -149,10 +149,14 @@ Required fields:
 
 - `project_root`.
 - `task_kind: pro`.
-- `mission_path`: the short Pro instruction file.
+- `mission_path` and `mission_sha256`: the short Pro instruction file and its
+  caller-pinned exact bytes.
 - `project_context_manifest_path`: the validated packet manifest bound to that
   exact mission and its SHA-256.
-- `attachments`: one or more exact attachment paths.
+- `project_context_manifest_sha256`: the caller-pinned exact context-manifest
+  bytes.
+- `attachments` and ordered `attachment_sha256s`: one or more exact attachment
+  paths and the caller-pinned hash aligned with each path.
 - `model_strategy: select`.
 
 Any app name, DevSpace mention, CodexPro field, or implicit model downgrade is a

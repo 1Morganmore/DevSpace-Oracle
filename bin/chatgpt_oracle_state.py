@@ -401,19 +401,18 @@ def load_manifest(
     mission_path = exact_regular_file(payload.get("mission_path"), label="mission_path")
     read_utf8_strict(mission_path)
     mission_sha256 = sha256_file(mission_path)
-    if "mission_sha256" in payload:
-        expected_mission_sha256 = payload["mission_sha256"]
-        if not isinstance(expected_mission_sha256, str) or SHA256_RE.fullmatch(expected_mission_sha256) is None:
-            raise OracleStateError(
-                "MISSION_SHA256_INVALID",
-                "mission_sha256 must be exactly 64 lowercase hexadecimal characters",
-            )
-        if expected_mission_sha256 != mission_sha256:
-            raise OracleStateError(
-                "MISSION_SHA256_MISMATCH",
-                "mission_sha256 does not match the current mission file",
-                {"expected": expected_mission_sha256, "actual": mission_sha256},
-            )
+    expected_mission_sha256 = payload.get("mission_sha256")
+    if not isinstance(expected_mission_sha256, str) or SHA256_RE.fullmatch(expected_mission_sha256) is None:
+        raise OracleStateError(
+            "MISSION_SHA256_INVALID",
+            "mission_sha256 must be exactly 64 lowercase hexadecimal characters",
+        )
+    if expected_mission_sha256 != mission_sha256:
+        raise OracleStateError(
+            "MISSION_SHA256_MISMATCH",
+            "mission_sha256 does not match the current mission file",
+            {"expected": expected_mission_sha256, "actual": mission_sha256},
+        )
     mode = str(payload.get("mode") or "browser").strip().casefold()
     if mode != "browser":
         raise OracleStateError("MODE_INVALID", "Oracle foundation runner supports mode=browser only")
@@ -440,7 +439,18 @@ def load_manifest(
                 "CONTEXT_MANIFEST_FORBIDDEN",
                 "project_context_manifest_path is only valid for Pro attachment-only runs",
             )
+        if "attachment_sha256s" in payload:
+            raise OracleStateError(
+                "ATTACHMENT_SHA256S_FORBIDDEN",
+                "attachment_sha256s is only valid for Pro attachment-only runs",
+            )
+        if "project_context_manifest_sha256" in payload:
+            raise OracleStateError(
+                "CONTEXT_MANIFEST_SHA256_FORBIDDEN",
+                "project_context_manifest_sha256 is only valid for Pro attachment-only runs",
+            )
         attachments: tuple[Path, ...] = ()
+        attachment_sha256s: tuple[str, ...] = ()
         project_context_manifest_path: Path | None = None
         project_context_manifest_sha256: str | None = None
     else:
@@ -458,6 +468,25 @@ def load_manifest(
             raise OracleStateError("PRO_ATTACHMENTS_DUPLICATE", "Pro attachment paths must be unique")
         if mission_path not in attachments:
             raise OracleStateError("PRO_MISSION_ATTACHMENT_REQUIRED", "mission_path must be one of the Pro attachments")
+        raw_attachment_sha256s = payload.get("attachment_sha256s")
+        if (
+            not isinstance(raw_attachment_sha256s, list)
+            or len(raw_attachment_sha256s) != len(attachments)
+            or not all(isinstance(value, str) and SHA256_RE.fullmatch(value) is not None for value in raw_attachment_sha256s)
+        ):
+            raise OracleStateError(
+                "PRO_ATTACHMENT_SHA256S_INVALID",
+                "Pro attachment_sha256s must be an ordered lowercase SHA-256 list aligned with attachments",
+            )
+        attachment_sha256s = tuple(raw_attachment_sha256s)
+        for attachment, expected in zip(attachments, attachment_sha256s, strict=True):
+            actual = sha256_file(attachment)
+            if actual != expected:
+                raise OracleStateError(
+                    "PRO_ATTACHMENT_SHA256_MISMATCH",
+                    "declared Pro attachment sha256 does not match the current file",
+                    {"path": str(attachment), "expected": expected, "actual": actual},
+                )
         project_context_manifest_path = exact_regular_file(
             payload.get("project_context_manifest_path"),
             label="project_context_manifest_path",
@@ -467,7 +496,23 @@ def load_manifest(
                 "PRO_CONTEXT_MANIFEST_OUTSIDE_PROJECT",
                 "project_context_manifest_path must stay inside project_root",
             )
-        project_context_manifest_sha256 = sha256_file(project_context_manifest_path)
+        raw_context_manifest_sha256 = payload.get("project_context_manifest_sha256")
+        if not isinstance(raw_context_manifest_sha256, str) or SHA256_RE.fullmatch(raw_context_manifest_sha256) is None:
+            raise OracleStateError(
+                "PRO_CONTEXT_MANIFEST_SHA256_INVALID",
+                "project_context_manifest_sha256 must be exactly 64 lowercase hexadecimal characters",
+            )
+        actual_context_manifest_sha256 = sha256_file(project_context_manifest_path)
+        if actual_context_manifest_sha256 != raw_context_manifest_sha256:
+            raise OracleStateError(
+                "PRO_CONTEXT_MANIFEST_SHA256_MISMATCH",
+                "declared Pro context manifest sha256 does not match the current file",
+                {
+                    "expected": raw_context_manifest_sha256,
+                    "actual": actual_context_manifest_sha256,
+                },
+            )
+        project_context_manifest_sha256 = raw_context_manifest_sha256
     state_root = oracle_state_root()
     if is_within(project_root, state_root) or is_within(state_root, project_root):
         raise OracleStateError(
@@ -575,7 +620,7 @@ def load_manifest(
         mode,
         transport,
         attachments,
-        tuple(sha256_file(item) for item in attachments),
+        attachment_sha256s,
         project_context_manifest_path,
         project_context_manifest_sha256,
         run_root,
