@@ -388,6 +388,30 @@ def test_exact_semantic_devspace_token_proceeds_when_transient_ui_is_absent(
 
 
 @pytest.mark.parametrize(
+    ("semantic_marker", "semantic_token"),
+    [
+        pytest.param("data-lexical-decorator", "@DevSpace", id="lexical-decorator"),
+        pytest.param("contenteditable", "DevSpace", id="noneditable-pill"),
+    ],
+)
+def test_exact_clicked_app_accepts_current_semantic_decorator_variants(
+    tmp_path: Path, semantic_marker: str, semantic_token: str
+) -> None:
+    result, stderr = run_prompt_route_case(
+        tmp_path,
+        suggestion="DevSpace",
+        semantic_token=semantic_token,
+        semantic_identity_attr=None,
+        semantic_marker=semantic_marker,
+    )
+
+    assert result["error"] is None
+    assert result["suggestionClicks"] == 1
+    assert result["sendAttempts"] == 1
+    assert "APP_MENTION_ROUTE_UNCONFIRMED" not in stderr
+
+
+@pytest.mark.parametrize(
     "semantic_marker", ["data-lexical-decorator", "contenteditable"]
 )
 def test_generic_exact_text_semantic_nodes_cannot_authorize_send(
@@ -478,6 +502,23 @@ def test_devspace_lookalike_suggestion_is_rejected_before_send(tmp_path: Path) -
     assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
 
 
+def test_exact_app_suggestion_with_wrong_semantic_decorator_fails_before_send(
+    tmp_path: Path,
+) -> None:
+    result, stderr = run_prompt_route_case(
+        tmp_path,
+        suggestion="DevSpace",
+        semantic_token="DevSpace Helper",
+        semantic_identity_attr=None,
+        semantic_marker="contenteditable",
+    )
+
+    assert result["suggestionClicks"] == 1
+    assert result["sendAttempts"] == 0
+    assert result["error"]["code"] == "APP_MENTION_ROUTE_UNCONFIRMED"
+    assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
+
+
 def test_oracle_0170_has_the_exact_eight_hash_gated_compatibility_patches() -> None:
     compat = load_compat()
     contracts = compat.VERSION_PATCHES["0.17.0"]
@@ -495,7 +536,7 @@ def test_oracle_0170_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "dist/src/cli/browserConfig.js": ("989f14399c8aa51913752306135e11d97e4f1c55b2baf984907f1b54959cc340", "bd18d11e4770fa5335c889b7856622f2da4199351ec65bc17a5ec1f472e2506f"),
         "dist/src/browser/index.js": ("335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11", "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895"),
         "dist/src/browser/actions/assistantResponse.js": ("0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d", "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4"),
-        "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "8bba8fd9a663c4c404ccf479a0193672624c0e42afb3a3e04edf832a4d9820f6"),
+        "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "4da4b078cfba5c239b4cae55a58f4c831a48edb72e66286b63f86d6c9aa86594"),
         "dist/src/browser/actions/thinkingTime.js": ("9d0c8ae34d72c6ab5ca4176ba2ac2b8431fbb93d6d4e73c0cc02f5d2eb8863b7", "7d475ed81ccee29a5b4107ed166584bcd3b0266bfd25e02ca7743bf24301e7f0"),
     }
 
@@ -513,6 +554,7 @@ def test_oracle_0170_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "71769d77b50d2c66bf281a6d70a965eaa0d43bfd23aa7c0c6645d774f95604fa",
         "7523e315eb6c6f29e5567a994084a39b73adf0adc1aecb013831885a3474e9b8",
         "f34821a5c4ac51d55bf2da0e0b8c2a8a3b3cafd3b9b6b6010726f0b032a5ece8",
+        "8bba8fd9a663c4c404ccf479a0193672624c0e42afb3a3e04edf832a4d9820f6",
     ]
 
 

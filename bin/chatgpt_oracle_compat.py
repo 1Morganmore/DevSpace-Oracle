@@ -98,13 +98,14 @@ PATCHES_0170 = {
     "dist/src/browser/actions/promptComposer.js": {
         "patch": "promptComposer.patch",
         "pristine": "db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000",
-        "patched": "8bba8fd9a663c4c404ccf479a0193672624c0e42afb3a3e04edf832a4d9820f6",
+        "patched": "4da4b078cfba5c239b4cae55a58f4c831a48edb72e66286b63f86d6c9aa86594",
         "legacy_patched": [
             "02874d0f2fcd0f45c2c50385893a210e2be5822e1831fa81b99944728ed1cb79",
             "99e4307ccdda8256e352d09b149f795ba0766584cd3fa838ea1adb22fd5b63ba",
             "71769d77b50d2c66bf281a6d70a965eaa0d43bfd23aa7c0c6645d774f95604fa",
             "7523e315eb6c6f29e5567a994084a39b73adf0adc1aecb013831885a3474e9b8",
             "f34821a5c4ac51d55bf2da0e0b8c2a8a3b3cafd3b9b6b6010726f0b032a5ece8",
+            "8bba8fd9a663c4c404ccf479a0193672624c0e42afb3a3e04edf832a4d9820f6",
         ],
     },
     "dist/src/browser/actions/thinkingTime.js": {

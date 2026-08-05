@@ -13,7 +13,7 @@ index c643386..c8e43bb 100644
      const encodedPrompt = JSON.stringify(prompt);
      const focusResult = await runtime.evaluate({
          expression: `(() => {
-@@ -67,7 +71,231 @@ export async function submitPrompt(deps, prompt, logger) {
+@@ -67,7 +71,241 @@ export async function submitPrompt(deps, prompt, logger) {
          await logDomFailure(runtime, logger, "focus-textarea");
          throw new Error("Failed to focus prompt textarea");
      }
@@ -55,6 +55,7 @@ index c643386..c8e43bb 100644
 +    // identity, then require ChatGPT's semantic mention token before send.
 +    const mentionMatch = prompt.match(/^(@[^\s]+)(\s+[\s\S]+)$/u);
 +    let routedAppName = null;
++    let exactAppSuggestionSelected = false;
 +    if (mentionMatch) {
 +        const appName = mentionMatch[1].slice(1);
 +        routedAppName = appName;
@@ -120,7 +121,8 @@ index c643386..c8e43bb 100644
 +            })()`,
 +            returnByValue: true,
 +        });
-+        if (clickResult.result?.value !== true) {
++        exactAppSuggestionSelected = clickResult.result?.value === true;
++        if (!exactAppSuggestionSelected) {
 +            logger(`Exact ChatGPT app suggestion was not observable for @${appName}; waiting for semantic mention confirmation.`);
 +        }
 +        const routeDeadline = Date.now() + 5_000;
@@ -133,6 +135,13 @@ index c643386..c8e43bb 100644
 +                    node?.getAttribute?.('data-app-name'),
 +                    node?.getAttribute?.('data-mention'),
 +                  ].some((value) => typeof value === 'string' && value === wanted);
++                  const exactSelectedAppDecorator = (node) => {
++                    const semantic = node?.hasAttribute?.('data-lexical-decorator') ||
++                      node?.getAttribute?.('contenteditable') === 'false';
++                    const text = String(node?.innerText || node?.textContent || '')
++                      .replace(/^@/, '').trim();
++                    return ${JSON.stringify(exactAppSuggestionSelected)} && semantic && text === wanted;
++                  };
 +                  const visible = (node) => {
 +                    const rect = node?.getBoundingClientRect?.();
 +                    if (!rect || rect.width <= 0 || rect.height <= 0) return false;
@@ -143,10 +152,11 @@ index c643386..c8e43bb 100644
 +                  const editors = Array.from(document.querySelectorAll(
 +                    ${JSON.stringify(INPUT_SELECTORS.join(","))}
 +                  ));
-+                  const semanticMentionSelectors = '[data-app-name],[data-mention]';
++                  const semanticMentionSelectors = '[data-app-name],[data-mention],[data-lexical-decorator],[contenteditable="false"]';
 +                  return editors.filter(visible).some((editor) =>
 +                    Array.from(editor.querySelectorAll(semanticMentionSelectors))
-+                      .some((node) => visible(node) && exactAppIdentity(node))
++                      .some((node) => visible(node) &&
++                        (exactAppIdentity(node) || exactSelectedAppDecorator(node)))
 +                  );
 +                })()`,
 +                returnByValue: true,
@@ -246,7 +256,7 @@ index c643386..c8e43bb 100644
      // Some pages (notably ChatGPT when subscriptions/widgets load) need a brief settle
      // before the send button becomes enabled; give it a short breather to avoid races.
      await delay(500);
-@@ -167,4 +395,44 @@ export async function submitPrompt(deps, prompt, logger) {
+@@ -167,4 +405,52 @@ export async function submitPrompt(deps, prompt, logger) {
              observedLength,
          });
      }
@@ -261,6 +271,13 @@ index c643386..c8e43bb 100644
 +                node?.getAttribute?.('data-app-name'),
 +                node?.getAttribute?.('data-mention'),
 +              ].some((value) => typeof value === 'string' && value === wanted);
++              const exactSelectedAppDecorator = (node) => {
++                const semantic = node?.hasAttribute?.('data-lexical-decorator') ||
++                  node?.getAttribute?.('contenteditable') === 'false';
++                const text = String(node?.innerText || node?.textContent || '')
++                  .replace(/^@/, '').trim();
++                return ${JSON.stringify(exactAppSuggestionSelected)} && semantic && text === wanted;
++              };
 +              const visible = (node) => {
 +                const rect = node?.getBoundingClientRect?.();
 +                if (!rect || rect.width <= 0 || rect.height <= 0) return false;
@@ -271,10 +288,11 @@ index c643386..c8e43bb 100644
 +              const editors = Array.from(document.querySelectorAll(
 +                ${JSON.stringify(INPUT_SELECTORS.join(","))}
 +              ));
-+              const semanticMentionSelectors = '[data-app-name],[data-mention]';
++              const semanticMentionSelectors = '[data-app-name],[data-mention],[data-lexical-decorator],[contenteditable="false"]';
 +              return editors.filter(visible).some((editor) =>
 +                Array.from(editor.querySelectorAll(semanticMentionSelectors))
-+                  .some((node) => visible(node) && exactAppIdentity(node))
++                  .some((node) => visible(node) &&
++                    (exactAppIdentity(node) || exactSelectedAppDecorator(node)))
 +              );
 +            })()`,
 +            returnByValue: true,
