@@ -1320,8 +1320,11 @@ def test_direct_web_multi_child_no_submission_settlement_is_hash_bound(tmp_path:
     assert settled["result"]["session_authority"] == "pre_submit"
     assert proof is not None
     assert proof["settlement_eligibility"] == "oracle-web-multi-child/v1"
+    assert proof["provenance_mode"] == "legacy-result-lane/v1"
     assert proof["parallel_parent_id"] == parent_id
     assert proof["source_mission_sha256"] == proof["transport_mission_sha256"]
+    assert proof["legacy_result_sha256"]
+    assert proof["legacy_lane_manifest_sha256"]
     for path in (
         run_dir / "stdout.log", run_dir / "stderr.log", run_dir / "transcript.md",
         run_dir / "recovery-harvest-stdout.log", run_dir / "recovery-harvest-stderr.log",
@@ -1346,13 +1349,20 @@ def test_direct_web_multi_child_no_submission_settlement_is_hash_bound(tmp_path:
 
 def test_direct_web_multi_child_settlement_requires_recovery_pair(tmp_path: Path) -> None:
     runner = load_runner()
-    config = runner.STATE.load_manifest(manifest(tmp_path, run_id="e" * 32, parallel_parent_id="f" * 64))
-    layout = runner.STATE.create_layout(config, run_id=config.requested_run_id)
+    parent_id = "f" * 64
+    config = runner.STATE.load_manifest(manifest(tmp_path, parallel_parent_id=parent_id))
+    layout = runner.STATE.create_layout(config)
     layout.run_dir.mkdir(parents=True)
     layout.output_path.touch()
     layout.stdout_path.write_text(f"Session: {layout.slug}\nERROR: Prompt did not appear in conversation before timeout (send may have failed)\n", encoding="utf-8")
     layout.stderr_path.touch()
+    layout.transcript_path.touch()
     (layout.run_dir / "mission.md").write_bytes(config.mission_path.read_bytes())
+    oracle_output = tmp_path / "runtime" / "legacy" / "oracle_output"
+    lane_dir = oracle_output / "lanes" / "lane"
+    lane_dir.mkdir(parents=True)
+    (lane_dir / "oracle.json").write_text(json.dumps({"schema": "codex.chatgpt.oracle-run/v1", "project_root": str(tmp_path.resolve()), "mission_path": str(config.mission_path), "parallel_parent_id": parent_id}), encoding="utf-8")
+    (oracle_output / "result.json").write_text(json.dumps({"schema": "codex.chatgpt.oracle-multi-result/v1", "parent_id": parent_id, "lanes": [{"id": "lane", "run_dir": str(layout.run_dir), "session_locator": layout.slug}]}), encoding="utf-8")
     state = runner.STATE.state_payload(config, layout, status="attention_required", resolved_version="0.16.1")
     state["session_authority"] = "submitted_unknown"
     runner.STATE.write_json_atomic(layout.state_path, state)
@@ -1370,10 +1380,16 @@ def test_direct_web_multi_child_settlement_rejects_identity_mismatch(tmp_path: P
     layout.run_dir.mkdir(parents=True)
     (layout.run_dir / "mission.md").write_bytes(config.mission_path.read_bytes())
     layout.output_path.touch()
+    layout.transcript_path.touch()
     layout.stdout_path.write_text(f"Session: {layout.slug}\nERROR: Prompt did not appear in conversation before timeout (send may have failed)\n", encoding="utf-8")
     layout.stderr_path.touch()
     (layout.run_dir / "recovery-harvest-stdout.log").write_text(f'No live ChatGPT tab matched session "{layout.slug}".\n', encoding="utf-8")
     (layout.run_dir / "recovery-harvest-stderr.log").write_text("Cannot recover conversation: session metadata has no recoverable ChatGPT conversation URL.\n", encoding="utf-8")
+    oracle_output = tmp_path / "runtime" / "legacy" / "oracle_output"
+    lane_dir = oracle_output / "lanes" / "lane"
+    lane_dir.mkdir(parents=True)
+    (lane_dir / "oracle.json").write_text(json.dumps({"schema": "codex.chatgpt.oracle-run/v1", "project_root": str(tmp_path.resolve()), "mission_path": str(config.mission_path), "parallel_parent_id": "b" * 64}), encoding="utf-8")
+    (oracle_output / "result.json").write_text(json.dumps({"schema": "codex.chatgpt.oracle-multi-result/v1", "parent_id": "b" * 64, "lanes": [{"id": "lane", "run_dir": str(layout.run_dir), "session_locator": layout.slug}]}), encoding="utf-8")
     state = runner.STATE.state_payload(config, layout, status="attention_required", resolved_version="0.16.1")
     state["session_authority"] = "submitted_unknown"
     if field == "parallel_parent_id":

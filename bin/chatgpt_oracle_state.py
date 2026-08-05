@@ -965,13 +965,13 @@ def _web_multi_child_provenance(
 ) -> dict[str, Any] | None:
     """Validate new provenance, or the exact legacy result/lane pair when present."""
     raw = state.get("web_multi_child_provenance")
-    candidates: list[tuple[Path, dict[str, Any] | None]] = []
+    candidates: list[tuple[Path, dict[str, Any] | None, Path | None]] = []
     if isinstance(raw, dict):
         path = Path(str(raw.get("path") or ""))
         try:
             if not path.is_absolute() or path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != str(raw.get("sha256") or ""):
                 return None
-            candidates.append((path, json.loads(path.read_text(encoding="utf-8", errors="strict"))))
+            candidates.append((path, json.loads(path.read_text(encoding="utf-8", errors="strict")), None))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return None
     else:
@@ -987,12 +987,12 @@ def _web_multi_child_provenance(
                     continue
                 lane_id = str(matching[0].get("id") or "")
                 lane_manifest = result_path.parent / "lanes" / lane_id / "oracle.json"
-                candidates.append((lane_manifest, json.loads(lane_manifest.read_text(encoding="utf-8", errors="strict"))))
+                candidates.append((lane_manifest, json.loads(lane_manifest.read_text(encoding="utf-8", errors="strict")), result_path))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                 return None
     if len(candidates) != 1:
         return None
-    path, value = candidates[0]
+    path, value, legacy_result_path = candidates[0]
     if not isinstance(value, dict):
         return None
     if value.get("schema") == "codex.chatgpt.oracle-multi-child-provenance/v1":
@@ -1015,7 +1015,19 @@ def _web_multi_child_provenance(
         return None
     if Path(str(value.get("project_root") or "")).resolve() != project_root or Path(str(value.get("mission_path") or "")).resolve() != source_path:
         return None
-    return {"path": str(path), "sha256": sha256_file(path)}
+    if value.get("schema") == "codex.chatgpt.oracle-multi-child-provenance/v1":
+        return {
+            "provenance_mode": "new-child-provenance/v1",
+            "child_provenance_path": str(path.resolve()), "child_provenance_sha256": sha256_file(path),
+            "parent_manifest_path": str(parent_manifest.resolve()), "parent_manifest_sha256": sha256_file(parent_manifest),
+        }
+    if legacy_result_path is None:
+        return None
+    return {
+        "provenance_mode": "legacy-result-lane/v1",
+        "legacy_result_path": str(legacy_result_path.resolve()), "legacy_result_sha256": sha256_file(legacy_result_path),
+        "legacy_lane_manifest_path": str(path.resolve()), "legacy_lane_manifest_sha256": sha256_file(path),
+    }
 
 
 def _web_multi_child_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
@@ -1106,6 +1118,7 @@ def _web_multi_child_no_submission_evidence(state_path: Path) -> dict[str, Any] 
         "source_mission_path": str(source_path), "source_mission_sha256": source_sha256,
         "transport_mission_path": str(transport_path), "transport_mission_sha256": transport_sha256,
         "mission_sha256": mission_sha256, "oracle_locator": locator,
+        **provenance,
         "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(), "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
         "recovery_evidence": recovery_records, "output_absent": True, "conversation_url_absent": True,
         "_source_mission_path": str(source_path), "_transport_mission_path": str(transport_path),
@@ -1117,7 +1130,7 @@ def _settlement_logs_have_conversation_url(state_path: Path) -> bool:
     for name in ("stdout", "stderr", "transcript"):
         record = _artifact_bytes(state, name)
         if record is None:
-            return True
+            continue
         try:
             if CHATGPT_CONVERSATION_URL_RE.search(record[1].decode("utf-8", errors="strict")):
                 return True
@@ -1197,6 +1210,12 @@ def proven_user_confirmed_no_submission(state_path: Path) -> dict[str, Any] | No
             "settlement_eligibility", "parallel_parent_id", "source_mission_path",
             "source_mission_sha256", "transport_mission_path", "transport_mission_sha256",
         )
+        if current.get("provenance_mode") == "new-child-provenance/v1":
+            required += ("provenance_mode", "child_provenance_path", "child_provenance_sha256", "parent_manifest_path", "parent_manifest_sha256")
+        elif current.get("provenance_mode") == "legacy-result-lane/v1":
+            required += ("provenance_mode", "legacy_result_path", "legacy_result_sha256", "legacy_lane_manifest_path", "legacy_lane_manifest_sha256")
+        else:
+            return None
     else:
         required = ("workflow_id", "stage", "attempt_id", "input_mission_sha256")
     if any(recorded.get(key) != current.get(key) for key in required):
