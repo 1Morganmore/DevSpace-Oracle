@@ -129,6 +129,38 @@ def _receipt_path(root: Path, value: Any, *, exists: bool = True) -> tuple[Path,
     return _inside(root, candidate, exists=exists), relative_compat
 
 
+def _legacy_initial_mission_binding(
+    root: Path,
+    workflow_id: str,
+    manifest_sha256: str,
+    mission: Path,
+) -> str | None:
+    """Recover a missing pre-hash manifest field from exact stage-zero host state."""
+    state_path = _state_path({"project_root": root}, workflow_id)
+    if not state_path.is_file():
+        return None
+    try:
+        stored = _json(state_path)
+        current_mission = _inside(root, stored.get("current_mission_path"))
+        binding_source = _inside(root, stored.get("current_binding_source_path"))
+        mission_sha256 = sha(mission)
+    except (OSError, ValueError, WorkflowError, json.JSONDecodeError):
+        return None
+    if all((
+        stored.get("schema") == STATE_SCHEMA,
+        stored.get("workflow_id") == workflow_id,
+        stored.get("manifest_sha256") == manifest_sha256,
+        stored.get("status") in {"running", "attention_required", "awaiting_receipt", "complete"},
+        stored.get("current_stage") == "plan",
+        current_mission == mission,
+        binding_source == mission,
+        stored.get("current_input_sha256") == mission_sha256,
+        stored.get("current_binding_source_sha256") == mission_sha256,
+    )):
+        return mission_sha256
+    return None
+
+
 def load_manifest(
     path: Path,
     *,
@@ -156,12 +188,21 @@ def load_manifest(
     root = Path(str(value.get("project_root") or "")).expanduser().resolve(strict=True)
     workflow_dir = _inside(root, value.get("workflow_dir"), exists=False)
     mission = _inside(root, value.get("initial_mission_path"))
+    workflow_id = str(value.get("workflow_id") or "").strip()
+    if not workflow_id or not all(character in "0123456789abcdef-" for character in workflow_id.casefold()):
+        raise WorkflowError("workflow_id must be stable hex/UUID text")
     initial_mission_sha256 = value.get("initial_mission_sha256")
     if (
         not isinstance(initial_mission_sha256, str)
         or re.fullmatch(r"[0-9a-f]{64}", initial_mission_sha256) is None
     ):
-        raise WorkflowError("initial_mission_sha256 must be exact lowercase SHA-256")
+        initial_mission_sha256 = (
+            _legacy_initial_mission_binding(root, workflow_id, manifest_sha256, mission)
+            if initial_mission_sha256 is None and expected_manifest_sha256 is not None
+            else None
+        )
+        if initial_mission_sha256 is None:
+            raise WorkflowError("initial_mission_sha256 must be exact lowercase SHA-256")
     if sha(mission) != initial_mission_sha256:
         raise WorkflowError("initial mission changed after workflow authoring")
     maximum = int(value.get("max_stages", 8))
@@ -173,9 +214,6 @@ def load_manifest(
     state_root = RUNNER.STATE.oracle_state_root()
     if RUNNER.STATE.is_within(root, state_root) or RUNNER.STATE.is_within(state_root, root):
         raise WorkflowError("host state must be disjoint from project")
-    workflow_id = str(value.get("workflow_id") or "").strip()
-    if not workflow_id or not all(character in "0123456789abcdef-" for character in workflow_id.casefold()):
-        raise WorkflowError("workflow_id must be stable hex/UUID text")
     app_name = str(value.get("app_name") or "DevSpace").strip()
     if app_name != "DevSpace":
         raise WorkflowError("app_name must be exactly DevSpace")

@@ -157,6 +157,40 @@ def test_manifest_and_initial_mission_require_previewed_hashes(tmp_path: Path) -
         module.load_manifest(path, expected_manifest_sha256=module.sha(path))
 
 
+def test_legacy_manifest_requires_exact_stage_zero_host_bindings(tmp_path: Path) -> None:
+    module = load()
+    path = manifest(tmp_path)
+    config = module.load_manifest(path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    del payload["initial_mission_sha256"]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    manifest_sha256 = module.sha(path)
+    mission_sha256 = module.sha(config["initial_mission_path"])
+    state_path = module._state_path(config, config["workflow_id"])
+    state = {
+        "schema": module.STATE_SCHEMA,
+        "status": "attention_required",
+        "workflow_id": config["workflow_id"],
+        "manifest_sha256": manifest_sha256,
+        "current_stage": "plan",
+        "current_mission_path": str(config["initial_mission_path"]),
+        "current_input_sha256": mission_sha256,
+        "current_binding_source_path": str(config["initial_mission_path"]),
+        "current_binding_source_sha256": "0" * 64,
+    }
+    module._write(state_path, state)
+
+    with pytest.raises(module.WorkflowError, match="initial_mission_sha256"):
+        module.load_manifest(path, expected_manifest_sha256=manifest_sha256)
+
+    state["current_binding_source_sha256"] = mission_sha256
+    module._write(state_path, state)
+    resumed = module.load_manifest(path, expected_manifest_sha256=manifest_sha256)
+
+    assert resumed["manifest_sha256"] == manifest_sha256
+    assert resumed["initial_mission_sha256"] == mission_sha256
+
+
 def test_main_requires_and_propagates_comprehensive_preview_hash(
     monkeypatch, capsys, tmp_path: Path
 ) -> None:
@@ -1029,7 +1063,11 @@ def test_pre_submit_retry_budget_is_stage_input_scoped_and_counts_started_replac
     ) == 1
 
 
-def test_user_confirmed_settlement_submits_one_bound_replacement_then_never_a_second(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy_manifest", (False, True), ids=("current", "legacy-bound"))
+def test_user_confirmed_settlement_submits_one_bound_replacement_then_never_a_second(
+    tmp_path: Path,
+    legacy_manifest: bool,
+) -> None:
     module = load()
     submissions: list[Path] = []
 
@@ -1079,6 +1117,15 @@ def test_user_confirmed_settlement_submits_one_bound_replacement_then_never_a_se
         confirmation=module.RUNNER.STATE.USER_CONFIRMED_NO_SUBMISSION,
         reason="user confirmed the exact attempt was not submitted",
     )
+    if legacy_manifest:
+        config = module.load_manifest(workflow_manifest)
+        state_path = module._state_path(config, config["workflow_id"])
+        payload = json.loads(workflow_manifest.read_text(encoding="utf-8"))
+        del payload["initial_mission_sha256"]
+        workflow_manifest.write_text(json.dumps(payload), encoding="utf-8")
+        state = module._json(state_path)
+        state["manifest_sha256"] = module.sha(workflow_manifest)
+        module._write(state_path, state)
     second = run_workflow(module, workflow_manifest, oracle_execute=fake_execute)
     assert second["status"] == "attention_required"
     assert len(submissions) == 2

@@ -82,6 +82,14 @@ authorized live workflow, use the same manifest and pass that exact value:
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_comprehensive.py" --manifest C:\project\workflow.json --expected-manifest-sha256 <manifest_sha256>
 ```
 
+An immutable pre-hash v1 manifest that already owns exact stage-zero host state
+must not be edited or dry-run again. Hash its unchanged bytes with
+`(Get-FileHash -Algorithm SHA256 <manifest>).Hash.ToLowerInvariant()` and pass
+that value through `--expected-manifest-sha256`. The runner may recover the
+missing `initial_mission_sha256` only when the stored manifest/workflow identity
+and both stored initial-source path/hash bindings match; otherwise it fails
+closed. This compatibility path cannot create a new unbound workflow.
+
 The review GPT owns plan repair and finalization. It does not merely list
 findings: it directly repairs every defect resolvable from the mission,
 DevSpace workspace, project rules, or available evidence, writes the corrected
