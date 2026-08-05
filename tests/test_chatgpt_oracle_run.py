@@ -1277,6 +1277,86 @@ def test_user_confirmation_cannot_replace_missing_recovery_evidence(tmp_path: Pa
     assert exc.value.code == "NO_SUBMISSION_EVIDENCE_INCOMPLETE"
 
 
+def test_direct_web_multi_child_no_submission_settlement_is_hash_bound(tmp_path: Path) -> None:
+    runner = load_runner()
+    parent_id = "d" * 64
+    manifest_path = manifest(tmp_path, parallel_parent_id=parent_id)
+    (tmp_path / "mission.md").write_text("direct web multi lane", encoding="utf-8")
+
+    def prompt_not_observed(command, **kwargs):
+        slug = command[command.index("--slug") + 1]
+        kwargs["stdout"].write((f"Session: {slug}\nERROR: Prompt did not appear in conversation before timeout (send may have failed)\n").encode())
+        kwargs["stdout"].flush()
+        return Process(1, [])
+
+    failed = execute_run(runner, manifest_path, run_factory=version_runner, popen_factory=prompt_not_observed)
+    run_dir = Path(failed["run_dir"])
+    state_path = run_dir / "state.json"
+    slug = runner.STATE.load_state(state_path)["oracle"]["slug"]
+    (run_dir / "recovery-harvest-stdout.log").write_text(
+        f'No live ChatGPT tab matched session "{slug}". Attempting recovery.\n', encoding="utf-8"
+    )
+    (run_dir / "recovery-harvest-stderr.log").write_text(
+        "Cannot recover conversation: session metadata has no recoverable ChatGPT conversation URL.\n", encoding="utf-8"
+    )
+
+    settled = runner.settle_user_confirmed_no_submission(
+        run_dir, confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION, reason="exact child inspected"
+    )
+    proof = runner.STATE.proven_user_confirmed_no_submission(state_path)
+
+    assert settled["result"]["session_authority"] == "pre_submit"
+    assert proof is not None
+    assert proof["settlement_eligibility"] == "oracle-web-multi-child/v1"
+    assert proof["parallel_parent_id"] == parent_id
+    assert proof["source_mission_sha256"] == proof["transport_mission_sha256"]
+
+
+def test_direct_web_multi_child_settlement_requires_recovery_pair(tmp_path: Path) -> None:
+    runner = load_runner()
+    config = runner.STATE.load_manifest(manifest(tmp_path, run_id="e" * 32, parallel_parent_id="f" * 64))
+    layout = runner.STATE.create_layout(config, run_id=config.requested_run_id)
+    layout.run_dir.mkdir(parents=True)
+    layout.output_path.touch()
+    layout.stdout_path.write_text(f"Session: {layout.slug}\nERROR: Prompt did not appear in conversation before timeout (send may have failed)\n", encoding="utf-8")
+    layout.stderr_path.touch()
+    (layout.run_dir / "mission.md").write_bytes(config.mission_path.read_bytes())
+    state = runner.STATE.state_payload(config, layout, status="attention_required", resolved_version="0.16.1")
+    state["session_authority"] = "submitted_unknown"
+    runner.STATE.write_json_atomic(layout.state_path, state)
+
+    with pytest.raises(runner.STATE.OracleStateError) as exc:
+        runner.settle_user_confirmed_no_submission(layout.run_dir, confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION, reason="no recovery")
+    assert exc.value.code == "NO_SUBMISSION_EVIDENCE_INCOMPLETE"
+
+
+@pytest.mark.parametrize("field", ["parallel_parent_id", "mission_sha256", "oracle_locator"])
+def test_direct_web_multi_child_settlement_rejects_identity_mismatch(tmp_path: Path, field: str) -> None:
+    runner = load_runner()
+    config = runner.STATE.load_manifest(manifest(tmp_path, parallel_parent_id="b" * 64))
+    layout = runner.STATE.create_layout(config, run_id=config.requested_run_id)
+    layout.run_dir.mkdir(parents=True)
+    (layout.run_dir / "mission.md").write_bytes(config.mission_path.read_bytes())
+    layout.output_path.touch()
+    layout.stdout_path.write_text(f"Session: {layout.slug}\nERROR: Prompt did not appear in conversation before timeout (send may have failed)\n", encoding="utf-8")
+    layout.stderr_path.touch()
+    (layout.run_dir / "recovery-harvest-stdout.log").write_text(f'No live ChatGPT tab matched session "{layout.slug}".\n', encoding="utf-8")
+    (layout.run_dir / "recovery-harvest-stderr.log").write_text("Cannot recover conversation: session metadata has no recoverable ChatGPT conversation URL.\n", encoding="utf-8")
+    state = runner.STATE.state_payload(config, layout, status="attention_required", resolved_version="0.16.1")
+    state["session_authority"] = "submitted_unknown"
+    if field == "parallel_parent_id":
+        state[field] = "invalid"
+    elif field == "mission_sha256":
+        state["mission"]["sha256"] = "0" * 64
+    else:
+        state["oracle"]["session_locator"] = "oracle-foreign"
+    runner.STATE.write_json_atomic(layout.state_path, state)
+
+    with pytest.raises((runner.STATE.OracleStateError, runner.OracleRunError)) as exc:
+        runner.settle_user_confirmed_no_submission(layout.run_dir, confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION, reason="identity mismatch")
+    assert exc.value.code in {"NO_SUBMISSION_EVIDENCE_INCOMPLETE", "SETTLEMENT_PARALLEL_PARENT_ID_INVALID"}
+
+
 def test_recovery_captures_output_and_updates_state(tmp_path: Path) -> None:
     runner = load_runner()
     result = execute_run(

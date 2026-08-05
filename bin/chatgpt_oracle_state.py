@@ -124,6 +124,7 @@ APP_RE = re.compile(r"^[^\r\n]+$")
 MODEL_RE = re.compile(r"^[a-zA-Z0-9._ -]+$")
 PARENT_ID_RE = re.compile(r"^[a-f0-9]{32,64}$")
 RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{7,95}$")
+WEB_MULTI_CHILD_RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[a-f0-9]{12}$")
 _THREAD_MUTEXES: dict[str, threading.Lock] = {}
 _THREAD_MUTEXES_GUARD = threading.Lock()
 
@@ -765,7 +766,7 @@ def _artifact_bytes(state: dict[str, Any], name: str) -> tuple[Path, bytes] | No
         return None
 
 
-def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
+def _comprehensive_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
     """Return exact evidence for a user-adjudicable Oracle composer timeout.
 
     The Oracle message is not mechanical proof of non-submission.  This helper
@@ -946,6 +947,102 @@ def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any]
     }
 
 
+def _web_multi_child_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
+    """Return fail-closed settlement evidence for a direct Oracle Multi child."""
+    state = load_state(state_path)
+    if str(state.get("session_authority") or "") not in {"submitted_unknown", "pre_submit"}:
+        return None
+    parent_id = str(state.get("parallel_parent_id") or "").strip().casefold()
+    run_id = str(state.get("run_id") or "")
+    if PARENT_ID_RE.fullmatch(parent_id) is None or WEB_MULTI_CHILD_RUN_ID_RE.fullmatch(run_id) is None:
+        return None
+    if state.get("terminal_harvested") is True or _state_has_conversation_url(state):
+        return None
+    run_dir = state_path.parent
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    output = Path(str(artifacts.get("output") or ""))
+    if output.resolve() != (run_dir / "output.md").resolve() or output.is_symlink() or output_is_nonempty(output):
+        return None
+    stdout_record = _artifact_bytes(state, "stdout")
+    stderr_record = _artifact_bytes(state, "stderr")
+    if stdout_record is None or stderr_record is None:
+        return None
+    stdout_path, stdout_bytes = stdout_record
+    stderr_path, stderr_bytes = stderr_record
+    if (stdout_path.resolve() != (run_dir / "stdout.log").resolve() or stderr_path.resolve() != (run_dir / "stderr.log").resolve() or stdout_path.is_symlink() or stderr_path.is_symlink()):
+        return None
+    try:
+        stdout_text = stdout_bytes.decode("utf-8", errors="strict")
+        stderr_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
+    if not locator or ORACLE_PROMPT_NOT_OBSERVED_MARKER not in stdout_text or f"Session: {locator}" not in stdout_text:
+        return None
+    mission = state.get("mission") if isinstance(state.get("mission"), dict) else {}
+    source_path = Path(str(mission.get("path") or ""))
+    transport_path = Path(str(mission.get("transport_path") or ""))
+    try:
+        project_root = Path(str(state.get("project_root") or "")).resolve(strict=True)
+        if not project_root.is_dir() or not source_path.is_absolute() or not transport_path.is_absolute() or source_path.is_symlink() or transport_path.is_symlink():
+            return None
+        source_path = source_path.resolve(strict=True)
+        transport_path = transport_path.resolve(strict=True)
+        if not source_path.is_file() or transport_path != (run_dir / "mission.md").resolve() or not is_within(project_root, source_path):
+            return None
+        source_bytes = source_path.read_bytes()
+        transport_bytes = transport_path.read_bytes()
+    except OSError:
+        return None
+    mission_sha256 = str(mission.get("sha256") or "")
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    transport_sha256 = hashlib.sha256(transport_bytes).hexdigest()
+    if not re.fullmatch(r"[a-f0-9]{64}", mission_sha256) or source_sha256 != mission_sha256 or transport_sha256 != mission_sha256 or source_bytes != transport_bytes:
+        return None
+    recovery_records: list[dict[str, str]] = []
+    for recovery_stdout in sorted(run_dir.glob("recovery-*-stdout.log"), key=lambda item: item.name):
+        recovery_stderr = recovery_stdout.with_name(recovery_stdout.name.replace("-stdout.log", "-stderr.log"))
+        try:
+            if recovery_stdout.is_symlink() or recovery_stderr.is_symlink():
+                continue
+            recovery_stdout_bytes = recovery_stdout.read_bytes()
+            recovery_stderr_bytes = recovery_stderr.read_bytes()
+            recovery_text = b"\n".join((recovery_stdout_bytes, recovery_stderr_bytes)).decode("utf-8", errors="strict")
+        except (OSError, UnicodeDecodeError):
+            return None
+        if ORACLE_RECOVERY_STATE_RE.search(recovery_text) or ORACLE_NO_LIVE_TAB_MARKER not in recovery_text or f'"{locator}"' not in recovery_text or ORACLE_NO_RECOVERABLE_URL_MARKER not in recovery_text:
+            return None
+        recovery_records.append({"stdout_name": recovery_stdout.name, "stdout_sha256": hashlib.sha256(recovery_stdout_bytes).hexdigest(), "stderr_name": recovery_stderr.name, "stderr_sha256": hashlib.sha256(recovery_stderr_bytes).hexdigest()})
+    if not recovery_records:
+        return None
+    return {
+        "settlement_eligibility": "oracle-web-multi-child/v1",
+        "project_root": str(project_root), "run_id": run_id, "parallel_parent_id": parent_id,
+        "source_mission_path": str(source_path), "source_mission_sha256": source_sha256,
+        "transport_mission_path": str(transport_path), "transport_mission_sha256": transport_sha256,
+        "mission_sha256": mission_sha256, "oracle_locator": locator,
+        "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(), "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+        "recovery_evidence": recovery_records, "output_absent": True, "conversation_url_absent": True,
+        "_source_mission_path": str(source_path), "_transport_mission_path": str(transport_path),
+    }
+
+
+def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
+    """Return exact evidence for a comprehensive stage or direct Web Multi child."""
+    comprehensive = _comprehensive_no_submission_evidence(state_path)
+    if comprehensive is not None:
+        return comprehensive
+    try:
+        mission_text = (state_path.parent / "mission.md").read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
+        return None
+    # A partial or malformed comprehensive contract must never fall through.
+    if "[HOST_STAGE_CONTRACT]" in mission_text or "[DEVSPACE_WORKSPACE_ENTRY_CONTRACT]" in mission_text:
+        return None
+    return _web_multi_child_no_submission_evidence(state_path)
+
+
 def proven_user_confirmed_no_submission(state_path: Path) -> dict[str, Any] | None:
     """Revalidate a persisted user confirmation against immutable run artifacts."""
     state = load_state(state_path)
@@ -979,10 +1076,6 @@ def proven_user_confirmed_no_submission(state_path: Path) -> dict[str, Any] | No
     for key in (
         "project_root",
         "run_id",
-        "workflow_id",
-        "stage",
-        "attempt_id",
-        "input_mission_sha256",
         "mission_sha256",
         "oracle_locator",
         "stdout_sha256",
@@ -993,12 +1086,16 @@ def proven_user_confirmed_no_submission(state_path: Path) -> dict[str, Any] | No
     ):
         if recorded.get(key) != current.get(key):
             return None
-    return {
-        **recorded,
-        "_augmented_mission_path": current["_augmented_mission_path"],
-        "_input_mission_path": current["_input_mission_path"],
-        "_receipt_path": current["_receipt_path"],
-    }
+    if current.get("settlement_eligibility") == "oracle-web-multi-child/v1":
+        required = (
+            "settlement_eligibility", "parallel_parent_id", "source_mission_path",
+            "source_mission_sha256", "transport_mission_path", "transport_mission_sha256",
+        )
+    else:
+        required = ("workflow_id", "stage", "attempt_id", "input_mission_sha256")
+    if any(recorded.get(key) != current.get(key) for key in required):
+        return None
+    return {**recorded, **{key: value for key, value in current.items() if key.startswith("_")}}
 
 
 def settle_user_confirmed_no_submission(
