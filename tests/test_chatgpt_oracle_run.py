@@ -1372,6 +1372,40 @@ def test_direct_web_multi_child_settlement_requires_recovery_pair(tmp_path: Path
     assert exc.value.code == "NO_SUBMISSION_EVIDENCE_INCOMPLETE"
 
 
+def test_settlement_transcript_scan_uses_canonical_path_not_state_mapping(tmp_path: Path) -> None:
+    runner = load_runner()
+    config = runner.STATE.load_manifest(manifest(tmp_path))
+    layout = runner.STATE.create_layout(config)
+    layout.run_dir.mkdir(parents=True)
+    layout.stdout_path.touch()
+    layout.stderr_path.touch()
+    state = runner.STATE.state_payload(config, layout, status="attention_required", resolved_version="0.16.1")
+    runner.STATE.write_json_atomic(layout.state_path, state)
+    layout.transcript_path.write_text("https://chatgpt.com/c/hidden-in-canonical\n", encoding="utf-8")
+    state["artifacts"].pop("transcript")
+    runner.STATE.write_json_atomic(layout.state_path, state)
+    assert runner.STATE._settlement_logs_have_conversation_url(layout.state_path) is True
+
+    layout.transcript_path.unlink()
+    state["artifacts"]["transcript"] = str(tmp_path / "foreign.md")
+    runner.STATE.write_json_atomic(layout.state_path, state)
+    assert runner.STATE._settlement_logs_have_conversation_url(layout.state_path) is True
+    state["artifacts"]["transcript"] = str(layout.transcript_path)
+    runner.STATE.write_json_atomic(layout.state_path, state)
+    assert runner.STATE._settlement_logs_have_conversation_url(layout.state_path) is False
+
+    layout.transcript_path.write_bytes(b"\xff")
+    assert runner.STATE._settlement_logs_have_conversation_url(layout.state_path) is True
+    layout.transcript_path.unlink()
+    target = tmp_path / "transcript-target.md"
+    target.write_text("no url", encoding="utf-8")
+    try:
+        layout.transcript_path.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this Windows host")
+    assert runner.STATE._settlement_logs_have_conversation_url(layout.state_path) is True
+
+
 @pytest.mark.parametrize("field", ["parallel_parent_id", "mission_sha256", "oracle_locator", "requested_run_id"])
 def test_direct_web_multi_child_settlement_rejects_identity_mismatch(tmp_path: Path, field: str) -> None:
     runner = load_runner()

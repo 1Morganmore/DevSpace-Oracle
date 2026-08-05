@@ -1127,7 +1127,7 @@ def _web_multi_child_no_submission_evidence(state_path: Path) -> dict[str, Any] 
 
 def _settlement_logs_have_conversation_url(state_path: Path) -> bool:
     state = load_state(state_path)
-    for name in ("stdout", "stderr", "transcript"):
+    for name in ("stdout", "stderr"):
         record = _artifact_bytes(state, name)
         if record is None:
             continue
@@ -1135,6 +1135,23 @@ def _settlement_logs_have_conversation_url(state_path: Path) -> bool:
             if CHATGPT_CONVERSATION_URL_RE.search(record[1].decode("utf-8", errors="strict")):
                 return True
         except UnicodeDecodeError:
+            return True
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    transcript_raw = str(artifacts.get("transcript") or "").strip()
+    canonical_transcript = state_path.parent / "transcript.md"
+    if transcript_raw:
+        try:
+            if Path(transcript_raw).resolve() != canonical_transcript.resolve():
+                return True
+        except OSError:
+            return True
+    if canonical_transcript.is_symlink():
+        return True
+    if canonical_transcript.exists():
+        try:
+            if CHATGPT_CONVERSATION_URL_RE.search(canonical_transcript.read_text(encoding="utf-8", errors="strict")):
+                return True
+        except (OSError, UnicodeDecodeError):
             return True
     try:
         for path in state_path.parent.glob("recovery-*-*.log"):
