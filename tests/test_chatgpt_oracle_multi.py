@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -9,6 +10,10 @@ import pytest
 
 
 PATH = Path(__file__).resolve().parents[1] / "bin" / "chatgpt_oracle_multi.py"
+
+
+def digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def load():
@@ -25,7 +30,11 @@ def make_manifest(tmp_path: Path, count: int = 7) -> Path:
     for index in range(count):
         path = tmp_path / f"solver-{index}.md"
         path.write_text(f"solve {index}", encoding="utf-8")
-        missions.append({"id": f"s{index}", "mission_path": str(path.resolve())})
+        missions.append({
+            "id": f"s{index}",
+            "mission_path": str(path.resolve()),
+            "mission_sha256": digest(path),
+        })
     merger = tmp_path / "merge.md"
     merger.write_text("Merge every listed handoff.", encoding="utf-8")
     manifest = tmp_path / "multi.json"
@@ -38,6 +47,7 @@ def make_manifest(tmp_path: Path, count: int = 7) -> Path:
         "max_concurrency": 5,
         "solvers": missions,
         "merger_mission_path": str(merger.resolve()),
+        "merger_mission_sha256": digest(merger),
     }), encoding="utf-8")
     return manifest
 
@@ -76,8 +86,11 @@ def test_multi_uses_unique_child_manifests_waves_and_merger(tmp_path: Path) -> N
     assert all(item["model_strategy"] == "select" for item in calls)
     assert all(item["thinking_time"] == "heavy" for item in calls)
     assert all(item["copy_profile"] for item in calls)
+    assert all(len(item["mission_sha256"]) == 64 for item in calls)
     merger_text = Path(calls[-1]["mission_path"]).read_text(encoding="utf-8")
     assert merger_text.count(".md") == 7
+    assert merger_text.count("sha256=") == 7
+    assert all(item["output_sha256"] in merger_text for item in result["lanes"])
 
 
 def test_multi_preserves_partial_results_and_rejects_over_capacity(tmp_path: Path) -> None:
@@ -92,6 +105,7 @@ def test_multi_preserves_partial_results_and_rejects_over_capacity(tmp_path: Pat
         return {"ok": True, "run_dir": str(run_dir)}
 
     result = module.run_multi(manifest, execute=fake_execute)
+    assert result["ok"] is False
     assert result["status"] == "partial"
     value = json.loads(manifest.read_text(encoding="utf-8"))
     value["max_concurrency"] = 6
@@ -116,3 +130,115 @@ def test_multi_rejects_lane_path_traversal(tmp_path: Path) -> None:
         pass
     else:
         raise AssertionError("unsafe lane id must fail")
+
+
+def test_multi_rejects_manifest_changed_after_preflight_before_any_lane(tmp_path: Path) -> None:
+    module = load()
+    manifest = make_manifest(tmp_path, 2)
+    expected = module.load_manifest(manifest)["manifest_sha256"]
+    manifest.write_bytes(manifest.read_bytes() + b"\n")
+    calls = []
+
+    with pytest.raises(module.MultiError, match="changed after preflight"):
+        module.run_multi(manifest, expected_manifest_sha256=expected, execute=lambda *args, **kwargs: calls.append(args))
+
+    assert calls == []
+
+
+def test_multi_rejects_solver_mission_changed_immediately_before_submission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = load()
+    manifest = make_manifest(tmp_path, 2)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["max_concurrency"] = 1
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    mission = tmp_path / "solver-0.md"
+    calls = []
+    child_manifest = module._child_manifest
+
+    def mutate_after_child_manifest(config, lane, parent_id):
+        result = child_manifest(config, lane, parent_id)
+        if lane["id"] == "s0":
+            mission.write_text("stale", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(module, "_child_manifest", mutate_after_child_manifest)
+
+    with pytest.raises(module.MultiError, match="solver mission changed after authoring"):
+        module.run_multi(
+            manifest,
+            parent_lock_held=True,
+            execute=lambda *args, **kwargs: calls.append(args),
+        )
+
+    assert calls == []
+
+
+def test_multi_rejects_merger_mission_changed_before_submission(tmp_path: Path) -> None:
+    module = load()
+    manifest = make_manifest(tmp_path, 2)
+    calls = []
+
+    def fake_execute(path: Path, *, dry_run: bool):
+        calls.append(path)
+        run_dir = path.parent / "fake-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "output.md").write_text("answer", encoding="utf-8")
+        if path.parent.name == "s0":
+            (tmp_path / "merge.md").write_text("stale", encoding="utf-8")
+        return {"ok": True, "run_dir": str(run_dir)}
+
+    with pytest.raises(module.MultiError, match="merger mission changed after authoring"):
+        module.run_multi(manifest, execute=fake_execute)
+
+    assert len(calls) == 2
+
+
+def test_multi_rejects_handoff_changed_before_merger_submission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = load()
+    manifest = make_manifest(tmp_path, 2)
+    calls = []
+    child_manifest = module._child_manifest
+
+    def mutate_before_merger(config, lane, parent_id):
+        result = child_manifest(config, lane, parent_id)
+        if lane["id"] == "merger":
+            (config["output_dir"] / "handoffs" / "s0.md").write_text("stale", encoding="utf-8")
+        return result
+
+    def fake_execute(path: Path, *, dry_run: bool):
+        calls.append(path)
+        run_dir = path.parent / "fake-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "output.md").write_text("answer", encoding="utf-8")
+        return {"ok": True, "run_dir": str(run_dir)}
+
+    monkeypatch.setattr(module, "_child_manifest", mutate_before_merger)
+
+    with pytest.raises(module.MultiError, match="solver handoff changed after authoring"):
+        module.run_multi(manifest, execute=fake_execute)
+
+    assert len(calls) == 2
+    assert all(path.parent.name != "merger" for path in calls)
+
+
+def test_multi_accepts_bound_manifest_and_missions(tmp_path: Path) -> None:
+    module = load()
+    manifest = make_manifest(tmp_path, 2)
+    expected = module.load_manifest(manifest)["manifest_sha256"]
+
+    result = module.run_multi(
+        manifest,
+        expected_manifest_sha256=expected,
+        parent_id="a" * 64,
+        dry_run=True,
+        execute=lambda path, *, dry_run: {"ok": True},
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "complete"
+    assert result["parent_id"] == "a" * 64
+    assert result["manifest_sha256"] == expected

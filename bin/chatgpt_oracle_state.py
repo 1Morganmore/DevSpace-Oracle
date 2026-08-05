@@ -120,6 +120,7 @@ def profile_copy_is_supported(
 APP_RE = re.compile(r"^[^\r\n]+$")
 MODEL_RE = re.compile(r"^[a-zA-Z0-9._ -]+$")
 PARENT_ID_RE = re.compile(r"^[a-f0-9]{32,64}$")
+SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{7,95}$")
 _THREAD_MUTEXES: dict[str, threading.Lock] = {}
 _THREAD_MUTEXES_GUARD = threading.Lock()
@@ -312,6 +313,20 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
         raise OracleStateError("PROJECT_ROOT_NOT_DIRECTORY", "project_root must identify a directory")
     mission_path = exact_regular_file(payload.get("mission_path"), label="mission_path")
     read_utf8_strict(mission_path)
+    mission_sha256 = sha256_file(mission_path)
+    if "mission_sha256" in payload:
+        expected_mission_sha256 = payload["mission_sha256"]
+        if not isinstance(expected_mission_sha256, str) or SHA256_RE.fullmatch(expected_mission_sha256) is None:
+            raise OracleStateError(
+                "MISSION_SHA256_INVALID",
+                "mission_sha256 must be exactly 64 lowercase hexadecimal characters",
+            )
+        if expected_mission_sha256 != mission_sha256:
+            raise OracleStateError(
+                "MISSION_SHA256_MISMATCH",
+                "mission_sha256 does not match the current mission file",
+                {"expected": expected_mission_sha256, "actual": mission_sha256},
+            )
     mode = str(payload.get("mode") or "browser").strip().casefold()
     if mode != "browser":
         raise OracleStateError("MODE_INVALID", "Oracle foundation runner supports mode=browser only")
@@ -468,7 +483,7 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
     return OracleConfig(
         project_root,
         mission_path,
-        sha256_file(mission_path),
+        mission_sha256,
         app_name,
         mode,
         transport,

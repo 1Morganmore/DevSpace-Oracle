@@ -74,6 +74,13 @@ def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _bound_source_bytes(source: Path, expected_sha: str) -> bytes:
+    source_bytes = source.read_bytes()
+    if hashlib.sha256(source_bytes).hexdigest() != expected_sha:
+        raise WorkflowError("stage transition source changed after validation")
+    return source_bytes
+
+
 def _json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -81,10 +88,25 @@ def _json(path: Path) -> dict[str, Any]:
     return value
 
 
+def _lexical_nonsymlink(path: Path) -> None:
+    if ".." in path.parts:
+        raise WorkflowError(f"path outside project: parent traversal is forbidden: {path}")
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            raise WorkflowError(f"workflow paths must use only non-symlink components: {current}")
+
+
 def _inside(root: Path, value: Any, *, exists: bool = True) -> Path:
     path = Path(str(value or "")).expanduser()
     if not path.is_absolute():
         raise WorkflowError("workflow paths must be absolute")
+    _lexical_nonsymlink(path)
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise WorkflowError(f"path outside project: {path}") from exc
     path = path.resolve(strict=exists)
     try:
         path.relative_to(root)
@@ -104,12 +126,7 @@ def _receipt_path(root: Path, value: Any, *, exists: bool = True) -> tuple[Path,
         if candidate.drive:
             raise WorkflowError("drive-relative workflow paths are forbidden")
         candidate = root / candidate
-    path = candidate.resolve(strict=exists)
-    try:
-        path.relative_to(root)
-    except ValueError as exc:
-        raise WorkflowError(f"path outside project: {path}") from exc
-    return path, relative_compat
+    return _inside(root, candidate, exists=exists), relative_compat
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
@@ -278,13 +295,15 @@ def _stage_mission(
     stage: str,
     source: Path,
     attempt_id: str,
-) -> tuple[Path, Path, str]:
+    source_sha: str,
+    source_bytes: bytes,
+) -> tuple[Path, Path, str, str]:
     stage_dir = config["workflow_dir"] / "stages" / f"{index:02d}-{stage}-{attempt_id[:12]}"
     receipt = stage_dir / "stage-result.json"
     target = stage_dir / "mission.md"
     stage_dir.mkdir(parents=True, exist_ok=True)
-    body = source.read_text(encoding="utf-8")
-    input_sha = sha(source)
+    body = source_bytes.decode("utf-8")
+    input_sha = source_sha
     protocol = (
         "\n\n[HOST_STAGE_CONTRACT]\n"
         f"workflow_id={workflow_id}\nstage={stage}\nstage_index={index}\n"
@@ -324,6 +343,8 @@ def _stage_mission(
             f"{PRO_ATTACHMENT_END}\n"
             "Canonical plan receipt status is PLAN_READY. The legacy status completed is accepted only when the "
             "receipt is otherwise a complete, hash-valid, blocker-free ready transition to review, web-multi, or pro.\n"
+            "If next_stage=web-multi, every solver entry in the authored Multi manifest must include the exact "
+            "mission_sha256 for its mission_path, and merger_mission_sha256 must bind merger_mission_path.\n"
         )
     if stage == "review":
         config.setdefault("_review_policy", _review_policy_from_history(config))
@@ -352,8 +373,9 @@ def _stage_mission(
             f"baseline_critical_finding_ids={json.dumps(policy['baseline_critical_finding_ids'], ensure_ascii=False, separators=(',', ':'))}\n"
             f"baseline_critical_findings_sha256={policy['baseline_critical_findings_sha256'] or ''}\n"
         )
-    target.write_text(body.rstrip() + protocol, encoding="utf-8")
-    return target, receipt, input_sha
+    mission_bytes = (body.rstrip() + protocol).encode("utf-8")
+    target.write_bytes(mission_bytes)
+    return target, receipt, input_sha, hashlib.sha256(mission_bytes).hexdigest()
 
 
 def _pro_stage_mission(
@@ -362,13 +384,17 @@ def _pro_stage_mission(
     index: int,
     source: Path,
     attempt_id: str,
-) -> tuple[Path, Path, str]:
+    source_sha: str,
+    source_bytes: bytes,
+) -> tuple[Path, Path, str, str]:
     stage_dir = config["workflow_dir"] / "stages" / f"{index:02d}-pro-{attempt_id[:12]}"
     receipt = stage_dir / "stage-result.json"
     target = stage_dir / "mission.md"
     stage_dir.mkdir(parents=True, exist_ok=True)
-    input_sha = sha(source)
-    body = source.read_text(encoding="utf-8")
+    body = source_bytes.decode("utf-8")
+    if not body.strip():
+        raise WorkflowError("Pro transition source must be nonempty")
+    input_sha = source_sha
     protocol = (
         "\n\n[HOST_STAGE_CONTRACT]\n"
         f"workflow_id={workflow_id}\nstage=pro\nstage_index={index}\n"
@@ -383,8 +409,9 @@ def _pro_stage_mission(
         "next_mission_text. Never paste a nested JSON document into either string with raw, unescaped quotes; "
         "encode it as string content with JSON escaping.\n"
     )
-    target.write_text(body.rstrip() + protocol, encoding="utf-8")
-    return target, receipt, input_sha
+    mission_bytes = (body.rstrip() + protocol).encode("utf-8")
+    target.write_bytes(mission_bytes)
+    return target, receipt, input_sha, hashlib.sha256(mission_bytes).hexdigest()
 
 
 def _oracle_manifest(
@@ -394,13 +421,15 @@ def _oracle_manifest(
     run_id: str,
     *,
     stage: str,
-    pro_attachments: Iterable[Path] = (),
+    pro_attachments: Iterable[tuple[Path, str]] = (),
+    mission_sha: str,
 ) -> Path:
     path = stage_dir / "oracle.json"
     payload: dict[str, Any] = {
         "schema": RUNNER.STATE.SCHEMA,
         "project_root": str(config["project_root"]),
         "mission_path": str(mission),
+        "mission_sha256": mission_sha,
         "mode": "browser",
         "model": "gpt-5.5-pro" if stage == "pro" else config["model"],
         "model_strategy": "select",
@@ -423,7 +452,7 @@ def _oracle_manifest(
             "project_root": str(config["project_root"]),
             "question": "Complete the comprehensive Pro stage using the exact attached project evidence.",
             "mission_path": str(mission),
-            "mission_sha256": sha(mission),
+            "mission_sha256": mission_sha,
             "required_categories": [category],
             "category_omissions": [],
             "local_transport_envelope_bytes": builder.TOTAL_ENVELOPE_BYTES,
@@ -431,8 +460,8 @@ def _oracle_manifest(
             "metadata_reserve_bytes": builder.METADATA_RESERVE_BYTES,
             "packet_path": str(packet),
             "evidence": [
-                {"path": str(item), "category": category, "priority": priority, "sha256": sha(item)}
-                for priority, item in enumerate(evidence)
+                {"path": str(item), "category": category, "priority": priority, "sha256": expected_sha}
+                for priority, (item, expected_sha) in enumerate(evidence)
             ],
         })
         try:
@@ -449,9 +478,14 @@ def _oracle_manifest(
     return path
 
 
-def _declared_pro_attachments(config: dict[str, Any], source: Path) -> tuple[Path, ...]:
+def _declared_pro_attachments(
+    config: dict[str, Any], source: Path, source_bytes: bytes
+) -> tuple[tuple[Path, str], ...]:
     """Return only packets declared in one closed machine-readable mission block."""
-    text = source.read_text(encoding="utf-8")
+    source = _inside(config["project_root"], source)
+    text = source_bytes.decode("utf-8")
+    if not text.strip():
+        raise WorkflowError("Pro transition source must be nonempty")
     begin_count = text.count(PRO_ATTACHMENT_BEGIN)
     end_count = text.count(PRO_ATTACHMENT_END)
     if begin_count == end_count == 0:
@@ -468,7 +502,7 @@ def _declared_pro_attachments(config: dict[str, Any], source: Path) -> tuple[Pat
         raise WorkflowError("Pro attachment contract has an invalid closed key set")
     if payload.get("schema") != PRO_ATTACHMENT_SCHEMA or not isinstance(payload.get("attachments"), list):
         raise WorkflowError("Pro attachment contract schema or attachments is invalid")
-    paths: list[Path] = []
+    paths: list[tuple[Path, str]] = []
     seen: set[Path] = set()
     for item in payload["attachments"]:
         if not isinstance(item, dict) or set(item) - {"path", "sha256"} or not isinstance(item.get("path"), str):
@@ -479,19 +513,24 @@ def _declared_pro_attachments(config: dict[str, Any], source: Path) -> tuple[Pat
         path = _inside(config["project_root"], raw)
         if path in seen:
             raise WorkflowError("Pro attachment contract contains a duplicate path")
+        actual_hash = sha(path)
         declared_hash = item.get("sha256")
         if declared_hash is not None:
-            if not isinstance(declared_hash, str) or len(declared_hash) != 64 or any(char not in "0123456789abcdef" for char in declared_hash.lower()):
-                raise WorkflowError("Pro attachment sha256 must be a 64-character hexadecimal digest")
-            if sha(path).lower() != declared_hash.lower():
+            if not isinstance(declared_hash, str) or re.fullmatch(r"[0-9a-f]{64}", declared_hash) is None:
+                raise WorkflowError("Pro attachment sha256 must be an exact lowercase 64-character hexadecimal digest")
+            if actual_hash != declared_hash:
                 raise WorkflowError("Pro attachment hash mismatch")
         seen.add(path)
-        paths.append(path)
+        paths.append((path, actual_hash))
     return tuple(paths)
 
 
-def _mission_contains_pro_attachment_contract(source: Path) -> bool:
-    text = source.read_text(encoding="utf-8")
+def _pro_attachment_state(attachments: Iterable[tuple[Path, str]]) -> list[dict[str, str]]:
+    return [{"path": str(path), "sha256": expected} for path, expected in attachments]
+
+
+def _mission_contains_pro_attachment_contract(source_bytes: bytes) -> bool:
+    text = source_bytes.decode("utf-8")
     return PRO_ATTACHMENT_BEGIN in text or PRO_ATTACHMENT_END in text
 
 
@@ -1140,16 +1179,25 @@ def _recover_exact_multi_stage(stored: dict[str, Any]) -> dict[str, Any]:
     """Read a persisted Multi result only; absent identity is never a retry signal."""
     result_path = Path(str(stored.get("multi_result_path") or "")).expanduser()
     expected_manifest_sha = str(stored.get("multi_manifest_sha256") or "")
-    if not result_path.is_absolute() or not expected_manifest_sha:
+    expected_parent = str(stored.get("multi_execution_id") or "")
+    expected_receipt = Path(str(stored.get("multi_receipt_path") or "")).expanduser()
+    if not result_path.is_absolute() or not expected_manifest_sha or not expected_parent or not expected_receipt.is_absolute():
         return {"ok": False, "error": "MULTI_RECOVERY_IDENTITY_MISSING"}
     try:
         result = _json(result_path.resolve(strict=True))
     except Exception as exc:
         return {"ok": False, "error": "MULTI_RESULT_UNAVAILABLE", "detail": str(exc)}
-    if result.get("schema") != MULTI.RESULT_SCHEMA or not str(result.get("parent_id") or ""):
+    actual_receipt = Path(str(result.get("next_stage_result_path") or "")).expanduser()
+    if (
+        result.get("schema") != MULTI.RESULT_SCHEMA
+        or str(result.get("parent_id") or "") != expected_parent
+        or str(result.get("manifest_sha256") or "") != expected_manifest_sha
+        or not actual_receipt.is_absolute()
+        or actual_receipt.resolve() != expected_receipt.resolve()
+    ):
         return {"ok": False, "error": "MULTI_RESULT_IDENTITY_INVALID"}
     return {
-        "ok": result.get("status") in {"complete", "partial"},
+        "ok": result.get("status") == "complete",
         "parent_id": str(result["parent_id"]),
         "next_stage_result_path": result.get("next_stage_result_path"),
         "status": result.get("status"),
@@ -1174,10 +1222,15 @@ def _run_workflow_locked(
     config["workflow_dir"].mkdir(parents=True, exist_ok=True)
     if dry_run:
         attempt_id = uuid.uuid4().hex
-        mission, receipt_path, input_sha = _stage_mission(
-            config, workflow_id, 0, "plan", config["initial_mission_path"], attempt_id
+        source_sha = sha(config["initial_mission_path"])
+        source_bytes = _bound_source_bytes(config["initial_mission_path"], source_sha)
+        mission, receipt_path, input_sha, augmented_mission_sha = _stage_mission(
+            config, workflow_id, 0, "plan", config["initial_mission_path"], attempt_id,
+            source_sha, source_bytes,
         )
-        oracle_manifest = _oracle_manifest(config, mission, mission.parent, attempt_id, stage="plan")
+        oracle_manifest = _oracle_manifest(
+            config, mission, mission.parent, attempt_id, stage="plan", mission_sha=augmented_mission_sha
+        )
         preview = oracle_execute(oracle_manifest, dry_run=True)
         return {
             "ok": bool(preview.get("ok")),
@@ -1192,6 +1245,7 @@ def _run_workflow_locked(
         }
     _claim_scope(config, workflow_id)
     state_path = _state_path(config, workflow_id)
+    frozen_pro_attachments: tuple[tuple[Path, str], ...] | None = None
     if state_path.is_file():
         stored = _json(state_path)
         if stored.get("manifest_sha256") != config["manifest_sha256"]:
@@ -1228,6 +1282,7 @@ def _run_workflow_locked(
                 return {"ok": True, **complete}
             stage = str(receipt["next_stage"])
             source = receipt["_next_mission"]
+            source_sha = str(receipt["next_mission_sha256"])
             start_index = int(stored["next_index"]) + 1
             _write_workflow_state(state_path, config, {
                 "schema": STATE_SCHEMA, "status": "prepared", "workflow_id": workflow_id,
@@ -1249,6 +1304,7 @@ def _run_workflow_locked(
             )
             stage = str(receipt["next_stage"])
             source = receipt["_next_mission"]
+            source_sha = str(receipt["next_mission_sha256"])
             records = list(stored.get("records") or []) + [{"stage": "pro", "receipt_path": str(pro_receipt)}]
             start_index = int(stored["next_index"]) + 1
             _write_workflow_state(state_path, config, {
@@ -1282,7 +1338,10 @@ def _run_workflow_locked(
                 _write_workflow_state(state_path, config, blocked)
                 return {"ok": False, **blocked}
             attempt_id = str(recovered["parent_id"])
-            receipt = _validate_receipt(config, result_path, workflow_id, "web-multi", attempt_id, sha(Path(str(stored["current_mission_path"]))))
+            receipt = _validate_receipt(
+                config, result_path, workflow_id, "web-multi", attempt_id,
+                str(stored["multi_manifest_sha256"]),
+            )
             records.append({"stage": "web-multi", "parent_id": attempt_id, "result_path": recovered["result_path"], "recovered": True})
             prepared = {
                 "schema": STATE_SCHEMA, "status": "prepared", "workflow_id": workflow_id,
@@ -1314,6 +1373,7 @@ def _run_workflow_locked(
                 ) < 1
                 and persisted_run_dir.is_dir()
                 and _is_unambiguous_pre_submit_failure(persisted_run_dir)
+                and (stored_stage != "pro" or bool(stored.get("pro_attachments")))
                 and _user_confirmed_retry_binding_matches(
                     persisted_run_dir,
                     config=config,
@@ -1326,7 +1386,7 @@ def _run_workflow_locked(
                     binding_source_path=Path(str(stored.get("current_binding_source_path") or "")),
                 )
             ):
-                source = Path(str(stored["current_mission_path"])).resolve(strict=True)
+                source, _ = _receipt_path(config["project_root"], stored["current_mission_path"])
                 retry_record = _pre_submit_retry_record(
                     persisted_run_dir,
                     stage=stored_stage,
@@ -1345,7 +1405,8 @@ def _run_workflow_locked(
                     "manifest_sha256": config["manifest_sha256"],
                     "next_stage": str(stored["current_stage"]),
                     "next_mission_path": str(source),
-                    "next_mission_sha256": sha(source),
+                    "next_mission_sha256": stored_input_sha,
+                    **({"pro_attachments": stored["pro_attachments"]} if stored_stage == "pro" else {}),
                     "next_index": int(stored["next_index"]),
                     "records": stored_records + [retry_record],
                     "pre_submit_retries": pre_submit_retries + 1,
@@ -1398,13 +1459,28 @@ def _run_workflow_locked(
             return {"ok": False, **stored}
         else:
             stage = str(stored["next_stage"])
-            source = Path(str(stored["next_mission_path"])).resolve(strict=True)
-            if str(stored.get("next_mission_sha256") or "") != sha(source):
+            source, _ = _receipt_path(config["project_root"], stored["next_mission_path"])
+            source_sha = str(stored.get("next_mission_sha256") or "")
+            if source_sha != sha(source):
                 raise WorkflowError("prepared next mission changed after receipt verification")
+            frozen = stored.get("pro_attachments")
+            if frozen is not None:
+                if stage != "pro" or not isinstance(frozen, list) or not frozen:
+                    raise WorkflowError("stored Pro attachment binding is invalid")
+                items: list[tuple[Path, str]] = []
+                for item in frozen:
+                    if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
+                        raise WorkflowError("stored Pro attachment binding is invalid")
+                    expected = str(item["sha256"])
+                    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+                        raise WorkflowError("stored Pro attachment hash is invalid")
+                    items.append((_inside(config["project_root"], item["path"]), expected))
+                frozen_pro_attachments = tuple(items)
             records = list(stored.get("records") or [])
             start_index = int(stored.get("next_index") or 0)
     else:
         stage, source, records, start_index = "plan", config["initial_mission_path"], [], 0
+        source_sha = sha(source)
         _write_workflow_state(state_path, config, {
             "schema": STATE_SCHEMA, "status": "prepared", "workflow_id": workflow_id,
             "manifest_sha256": config["manifest_sha256"], "next_stage": stage,
@@ -1416,35 +1492,53 @@ def _run_workflow_locked(
             # This complete preflight is intentionally before the send-boundary
             # state write.  An invalid Multi manifest is a retryable pre-submit
             # error, not an active/uncertain provider workflow.
-            multi_config = MULTI.load_manifest(source)
-            multi_source = _json(source)
-            binding = multi_source.get("next_stage_binding") if isinstance(multi_source.get("next_stage_binding"), dict) else {}
+            multi_manifest_sha = source_sha
+            multi_config = MULTI.load_manifest(source, expected_manifest_sha256=multi_manifest_sha)
+            binding = multi_config["next_stage_binding"]
             if binding.get("workflow_id") != workflow_id or binding.get("stage") != "web-multi":
                 raise WorkflowError("web-multi manifest is not bound to this workflow")
             multi_result_path = multi_config["output_dir"] / "result.json"
             multi_receipt_path = multi_config.get("next_stage_result_path")
+            if not isinstance(multi_receipt_path, Path) or not multi_receipt_path.is_absolute():
+                raise WorkflowError("web-multi manifest requires an absolute next_stage_result_path")
             multi_execution_id = hashlib.sha256(
-                f"{workflow_id}:{index}:{sha(source)}".encode("utf-8")
+                f"{workflow_id}:{index}:{multi_manifest_sha}".encode("utf-8")
             ).hexdigest()
             _write_workflow_state(state_path, config, {
                 "schema": STATE_SCHEMA, "status": "running", "workflow_id": workflow_id,
                 "manifest_sha256": config["manifest_sha256"], "current_stage": stage,
                 "current_mission_path": str(source), "next_index": index, "records": records,
-                "multi_execution_id": multi_execution_id, "multi_manifest_sha256": sha(source),
+                "multi_execution_id": multi_execution_id, "multi_manifest_sha256": multi_manifest_sha,
                 "multi_result_path": str(multi_result_path),
                 "multi_receipt_path": str(multi_receipt_path) if multi_receipt_path else None,
             })
-            multi_result = multi_execute(source, dry_run=False, parent_lock_held=True)
+            multi_result = multi_execute(
+                source, expected_manifest_sha256=multi_manifest_sha, parent_id=multi_execution_id,
+                dry_run=False, parent_lock_held=True,
+            )
             records.append({"stage": stage, "result": multi_result})
             if not multi_result.get("ok"):
-                break
+                blocked = {
+                    **_json(state_path), "status": "attention_required", "records": records,
+                    "blocker": "web-multi exact execution needs recovery; no replacement was submitted",
+                }
+                _write_workflow_state(state_path, config, blocked)
+                return {"ok": False, **blocked}
             result_path = Path(str(multi_result.get("next_stage_result_path") or ""))
-            if not result_path.is_file():
+            if (
+                str(multi_result.get("parent_id") or "") != multi_execution_id
+                or str(multi_result.get("manifest_sha256") or "") != multi_manifest_sha
+                or result_path.resolve() != multi_receipt_path.resolve()
+                or not result_path.is_file()
+            ):
                 return {"ok": False, "status": "attention_required", "workflow_id": workflow_id,
-                        "error": "web-multi merger did not provide next_stage_result_path", "records": records}
-            attempt_id = str(multi_result.get("parent_id") or "")
-            receipt = _validate_receipt(config, result_path, workflow_id, "web-multi", attempt_id, sha(source))
+                        "error": "web-multi result identity did not match its persisted execution", "records": records}
+            attempt_id = multi_execution_id
+            receipt = _validate_receipt(
+                config, result_path, workflow_id, "web-multi", attempt_id, multi_manifest_sha
+            )
             stage, source = str(receipt["next_stage"]), receipt["_next_mission"]
+            source_sha = str(receipt["next_mission_sha256"])
             _write_workflow_state(state_path, config, {
                 "schema": STATE_SCHEMA, "status": "prepared", "workflow_id": workflow_id,
                 "manifest_sha256": config["manifest_sha256"], "next_stage": stage,
@@ -1453,23 +1547,27 @@ def _run_workflow_locked(
             })
             continue
         attempt_id = uuid.uuid4().hex
+        source_bytes = _bound_source_bytes(source, source_sha)
         if stage == "pro":
-            pro_attachments = _declared_pro_attachments(config, source)
+            pro_attachments = frozen_pro_attachments
+            if pro_attachments is None:
+                pro_attachments = _declared_pro_attachments(config, source, source_bytes)
             if not pro_attachments:
-                pro_attachments = (source,)
-            mission, receipt_path, input_sha = _pro_stage_mission(
-                config, workflow_id, index, source, attempt_id
+                pro_attachments = ((source, source_sha),)
+            mission, receipt_path, input_sha, augmented_mission_sha = _pro_stage_mission(
+                config, workflow_id, index, source, attempt_id, source_sha, source_bytes
             )
         else:
-            if _mission_contains_pro_attachment_contract(source):
+            if _mission_contains_pro_attachment_contract(source_bytes):
                 raise WorkflowError("Pro attachment contract is forbidden for regular DevSpace stages")
             pro_attachments = ()
-            mission, receipt_path, input_sha = _stage_mission(
-                config, workflow_id, index, stage, source, attempt_id
+            mission, receipt_path, input_sha, augmented_mission_sha = _stage_mission(
+                config, workflow_id, index, stage, source, attempt_id, source_sha, source_bytes
             )
         stage_dir = mission.parent
         oracle_manifest = _oracle_manifest(
-            config, mission, stage_dir, attempt_id, stage=stage, pro_attachments=pro_attachments
+            config, mission, stage_dir, attempt_id, stage=stage, pro_attachments=pro_attachments,
+            mission_sha=augmented_mission_sha,
         )
         oracle_config = RUNNER.STATE.load_manifest(oracle_manifest)
         oracle_layout = RUNNER.STATE.create_layout(oracle_config, run_id=attempt_id)
@@ -1482,7 +1580,8 @@ def _run_workflow_locked(
             "current_binding_source_path": str(source),
             "current_binding_source_sha256": input_sha,
             "current_augmented_mission_path": str(mission),
-            "current_augmented_mission_sha256": sha(mission),
+            "current_augmented_mission_sha256": augmented_mission_sha,
+            **({"pro_attachments": _pro_attachment_state(pro_attachments)} if stage == "pro" else {}),
             "oracle_run_id": attempt_id, "oracle_run_dir": str(oracle_layout.run_dir), "oracle_manifest_path": str(oracle_manifest),
             "next_index": index, "records": records, "pre_submit_retries": stage_pre_submit_retries,
         })
@@ -1507,7 +1606,8 @@ def _run_workflow_locked(
                 "current_binding_source_path": str(source),
                 "current_binding_source_sha256": input_sha,
                 "current_augmented_mission_path": str(mission),
-                "current_augmented_mission_sha256": sha(mission),
+                "current_augmented_mission_sha256": augmented_mission_sha,
+                **({"pro_attachments": _pro_attachment_state(pro_attachments)} if stage == "pro" else {}),
                 "oracle_run_dir": run.get("run_dir"), "next_index": index, "records": records,
             })
         if run.get("ok") and not receipt_path.is_file():
@@ -1533,7 +1633,7 @@ def _run_workflow_locked(
                     attempt_id=attempt_id,
                     input_sha256=input_sha,
                     augmented_mission_path=mission,
-                    augmented_mission_sha256=sha(mission),
+                    augmented_mission_sha256=augmented_mission_sha,
                     binding_source_path=source,
                 )
             ):
@@ -1545,7 +1645,7 @@ def _run_workflow_locked(
                     workflow_id=workflow_id,
                     attempt_id=attempt_id,
                     augmented_mission_path=mission,
-                    augmented_mission_sha256=sha(mission),
+                    augmented_mission_sha256=augmented_mission_sha,
                     binding_source_path=source,
                 )
                 _write_workflow_state(state_path, config, {
@@ -1555,7 +1655,8 @@ def _run_workflow_locked(
                     "manifest_sha256": config["manifest_sha256"],
                     "next_stage": stage,
                     "next_mission_path": str(source),
-                    "next_mission_sha256": sha(source),
+                    "next_mission_sha256": input_sha,
+                    **({"pro_attachments": _pro_attachment_state(pro_attachments)} if stage == "pro" else {}),
                     "next_index": index,
                     "records": records + [retry_record],
                     "pre_submit_retries": pre_submit_retries + 1,
@@ -1589,6 +1690,7 @@ def _run_workflow_locked(
             _write_workflow_state(state_path, config, result)
             return {"ok": True, **result}
         stage, source = str(receipt["next_stage"]), receipt["_next_mission"]
+        source_sha = str(receipt["next_mission_sha256"])
         _write_workflow_state(state_path, config, {
             "schema": STATE_SCHEMA, "status": "prepared", "workflow_id": workflow_id,
             "manifest_sha256": config["manifest_sha256"], "next_stage": stage,

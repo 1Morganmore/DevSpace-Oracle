@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import importlib.util
 import json
-import shutil
 import subprocess
 import sys
 import uuid
@@ -17,6 +16,7 @@ from typing import Any, Callable, Iterable
 SCHEMA = "codex.chatgpt.oracle-multi/v1"
 RESULT_SCHEMA = "codex.chatgpt.oracle-multi-result/v1"
 LANE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 BIN = Path(__file__).resolve().parent
 
 
@@ -52,11 +52,29 @@ def _git_common_dir(root: Path) -> Path:
     return Path(completed.stdout.strip()).resolve()
 
 
-def _read_json(path: Path) -> dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"))
+def _json_bytes(raw: bytes) -> dict[str, Any]:
+    value = json.loads(raw.decode("utf-8"))
     if not isinstance(value, dict):
         raise MultiError("manifest must be a JSON object")
     return value
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    return _json_bytes(path.read_bytes())
+
+
+def _expected_sha256(value: Any, label: str) -> str:
+    expected = str(value or "")
+    if SHA256_RE.fullmatch(expected) is None:
+        raise MultiError(f"{label} must be exact lowercase SHA-256")
+    return expected
+
+
+def _verified_bytes(path: Path, expected: str, label: str) -> bytes:
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != expected:
+        raise MultiError(f"{label} changed after authoring: {path}")
+    return raw
 
 
 def _inside(root: Path, value: Any, *, exists: bool = True) -> Path:
@@ -71,8 +89,15 @@ def _inside(root: Path, value: Any, *, exists: bool = True) -> Path:
     return path
 
 
-def load_manifest(path: Path) -> dict[str, Any]:
-    value = _read_json(path.resolve(strict=True))
+def load_manifest(path: Path, *, expected_manifest_sha256: str | None = None) -> dict[str, Any]:
+    resolved = path.resolve(strict=True)
+    raw = resolved.read_bytes()
+    manifest_sha256 = hashlib.sha256(raw).hexdigest()
+    if expected_manifest_sha256 is not None:
+        expected = _expected_sha256(expected_manifest_sha256, "expected manifest SHA-256")
+        if manifest_sha256 != expected:
+            raise MultiError(f"manifest changed after preflight: {resolved}")
+    value = _json_bytes(raw)
     if value.get("schema") != SCHEMA:
         raise MultiError(f"schema must be {SCHEMA}")
     root = Path(str(value.get("project_root") or "")).expanduser().resolve(strict=True)
@@ -101,9 +126,13 @@ def load_manifest(path: Path) -> dict[str, Any]:
         lane_root = Path(str(item.get("project_root") or root)).expanduser().resolve(strict=True)
         if lane_root != root and lane_root not in allowed_worktrees:
             raise MultiError("external worktree root must be explicitly allowed")
+        mission_path = _inside(lane_root, item.get("mission_path"))
+        mission_sha256 = _expected_sha256(item.get("mission_sha256"), "solver mission_sha256")
+        _verified_bytes(mission_path, mission_sha256, "solver mission")
         normalized.append({
             "id": lane,
-            "mission_path": _inside(lane_root, item.get("mission_path")),
+            "mission_path": mission_path,
+            "mission_sha256": mission_sha256,
             "access": access,
             "project_root": lane_root,
         })
@@ -115,6 +144,8 @@ def load_manifest(path: Path) -> dict[str, Any]:
         if any(_git_common_dir(path) != canonical_common for path in write_roots):
             raise MultiError("write solver worktrees must belong to the canonical repository")
     merger = _inside(root, value.get("merger_mission_path"))
+    merger_sha256 = _expected_sha256(value.get("merger_mission_sha256"), "merger_mission_sha256")
+    _verified_bytes(merger, merger_sha256, "merger mission")
     next_stage_result = (
         _inside(root, value.get("next_stage_result_path"), exists=False)
         if value.get("next_stage_result_path")
@@ -132,6 +163,7 @@ def load_manifest(path: Path) -> dict[str, Any]:
         "output_dir": output_dir,
         "solvers": normalized,
         "merger_mission_path": merger,
+        "merger_mission_sha256": merger_sha256,
         "next_stage_result_path": next_stage_result,
         "max_concurrency": concurrency,
         "app_name": app_name,
@@ -140,7 +172,7 @@ def load_manifest(path: Path) -> dict[str, Any]:
             str(value.get("copy_profile") or (Path.home() / ".oracle" / "browser-profile"))
         ).expanduser().resolve(),
         "allowed_worktree_roots": allowed_worktrees,
-        "manifest_sha256": hashlib.sha256(path.resolve(strict=True).read_bytes()).hexdigest(),
+        "manifest_sha256": manifest_sha256,
         "next_stage_binding": value.get("next_stage_binding") if isinstance(value.get("next_stage_binding"), dict) else {},
     }
 
@@ -159,6 +191,7 @@ def _child_manifest(config: dict[str, Any], lane: dict[str, Any], parent_id: str
             "schema": STATE.SCHEMA,
             "project_root": str(lane.get("project_root") or config["project_root"]),
             "mission_path": str(lane["mission_path"]),
+            "mission_sha256": lane["mission_sha256"],
             "app_name": config["app_name"],
             "mode": "browser",
             "model": config["model"],
@@ -181,8 +214,10 @@ def _run_lane(
     dry_run: bool,
 ) -> dict[str, Any]:
     manifest = _child_manifest(config, lane, parent_id)
+    _verified_bytes(lane["mission_path"], lane["mission_sha256"], "solver mission")
     result = execute(manifest, dry_run=dry_run)
     output = None
+    output_sha256 = None
     session_locator = None
     if not dry_run and result.get("run_dir"):
         run_dir = Path(str(result["run_dir"]))
@@ -192,15 +227,18 @@ def _run_lane(
             state = _read_json(state_path)
             oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
             session_locator = oracle.get("session_locator")
-        if source.is_file() and source.read_bytes().strip():
+        source_bytes = source.read_bytes() if source.is_file() else b""
+        if source_bytes.strip():
             output = config["output_dir"] / "handoffs" / f"{lane['id']}.md"
             output.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, output)
+            output.write_bytes(source_bytes)
+            output_sha256 = hashlib.sha256(source_bytes).hexdigest()
     return {
         "id": lane["id"],
         "ok": bool(result.get("ok")),
         "run_dir": result.get("run_dir"),
         "output_path": str(output) if output else None,
+        "output_sha256": output_sha256,
         "session_locator": session_locator,
     }
 
@@ -210,8 +248,12 @@ def _merger_transport(
     successful: list[dict[str, Any]],
     parent_id: str,
 ) -> Path:
-    source = config["merger_mission_path"].read_text(encoding="utf-8")
-    paths = "\n".join(f"- {item['output_path']}" for item in successful)
+    source = _verified_bytes(
+        config["merger_mission_path"], config["merger_mission_sha256"], "merger mission"
+    ).decode("utf-8")
+    paths = "\n".join(
+        f"- path={item['output_path']}\n  sha256={item['output_sha256']}" for item in successful
+    )
     target = config["output_dir"] / "merger" / "mission.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     receipt_line = (
@@ -231,12 +273,18 @@ def _merger_transport(
 def run_multi(
     manifest_path: Path,
     *,
+    expected_manifest_sha256: str | None = None,
+    parent_id: str | None = None,
     dry_run: bool = False,
     execute: Callable[..., dict[str, Any]] = RUNNER.execute_run,
     parent_lock_held: bool = False,
 ) -> dict[str, Any]:
-    config = load_manifest(manifest_path)
-    parent_id = hashlib.sha256(f"{config['project_root']}:{uuid.uuid4().hex}".encode()).hexdigest()
+    config = load_manifest(manifest_path, expected_manifest_sha256=expected_manifest_sha256)
+    parent_id = (
+        _expected_sha256(parent_id, "parent_id")
+        if parent_id is not None
+        else hashlib.sha256(f"{config['project_root']}:{uuid.uuid4().hex}".encode()).hexdigest()
+    )
     config["output_dir"].mkdir(parents=True, exist_ok=True)
     lanes: list[dict[str, Any]] = []
     # The parent owns normal same-project exclusion. Children use the separate
@@ -252,15 +300,33 @@ def run_multi(
         lanes.sort(key=lambda item: order[item["id"]])
         successful = [item for item in lanes if item["ok"] and (dry_run or item["output_path"])]
         if not successful:
-            result = {"schema": RESULT_SCHEMA, "status": "failed", "parent_id": parent_id, "lanes": lanes}
+            result = {
+                "schema": RESULT_SCHEMA,
+                "status": "failed",
+                "parent_id": parent_id,
+                "manifest_sha256": config["manifest_sha256"],
+                "lanes": lanes,
+            }
             _write_json(config["output_dir"] / "result.json", result)
             return {"ok": False, **result}
         merger_mission = _merger_transport(config, successful, parent_id) if not dry_run else config["merger_mission_path"]
         merger_manifest = _child_manifest(
             config,
-            {"id": "merger", "mission_path": merger_mission},
+            {
+                "id": "merger",
+                "mission_path": merger_mission,
+                "mission_sha256": hashlib.sha256(merger_mission.read_bytes()).hexdigest(),
+            },
             parent_id,
         )
+        _verified_bytes(
+            config["merger_mission_path"], config["merger_mission_sha256"], "merger mission"
+        )
+        if not dry_run:
+            for item in successful:
+                _verified_bytes(
+                    Path(item["output_path"]), item["output_sha256"], "solver handoff"
+                )
         merger = execute(merger_manifest, dry_run=dry_run)
     status = "complete" if merger.get("ok") and len(successful) == len(lanes) else (
         "partial" if merger.get("ok") else "failed"
@@ -269,6 +335,7 @@ def run_multi(
         "schema": RESULT_SCHEMA,
         "status": status,
         "parent_id": parent_id,
+        "manifest_sha256": config["manifest_sha256"],
         "lanes": lanes,
         "merger_run_dir": merger.get("run_dir"),
         "successful_lane_count": len(successful),
@@ -279,7 +346,7 @@ def run_multi(
         ),
     }
     _write_json(config["output_dir"] / "result.json", result)
-    return {"ok": status in {"complete", "partial"}, **result}
+    return {"ok": status == "complete", **result}
 
 
 def main(argv: Iterable[str] | None = None) -> int:

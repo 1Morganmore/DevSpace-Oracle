@@ -55,6 +55,46 @@ def test_invalid_utf8_and_relative_mission_are_rejected(tmp_path: Path) -> None:
     assert exc.value.code == "MISSION_PATH_ABSOLUTE_REQUIRED"
 
 
+def test_manifest_mission_sha256_binds_current_bytes(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    expected = state.sha256_file(mission)
+
+    config = state.load_manifest(manifest(tmp_path, mission.resolve(), mission_sha256=expected))
+    layout = state.create_layout(config, run_id="20260725T151414Z-a3aeba967d99")
+
+    assert config.mission_sha256 == expected
+    assert state.state_payload(config, layout, status="prepared", resolved_version="oracle 0.17.0")["mission"]["sha256"] == expected
+
+
+@pytest.mark.parametrize("invalid", [None, "A" * 64, "0" * 63])
+def test_manifest_mission_sha256_requires_exact_lowercase_hex(tmp_path: Path, invalid: object) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(tmp_path, mission.resolve(), mission_sha256=invalid))
+
+    assert exc.value.code == "MISSION_SHA256_INVALID"
+
+
+def test_manifest_mission_sha256_rejects_stale_bytes(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("current", encoding="utf-8")
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(tmp_path, mission.resolve(), mission_sha256="0" * 64))
+
+    assert exc.value.code == "MISSION_SHA256_MISMATCH"
+    assert exc.value.evidence == {
+        "expected": "0" * 64,
+        "actual": state.sha256_file(mission),
+    }
+
+
 def test_prompt_is_plain_app_plus_absolute_mission_instruction(tmp_path: Path) -> None:
     state = load_state()
     mission = tmp_path / "mission.md"
