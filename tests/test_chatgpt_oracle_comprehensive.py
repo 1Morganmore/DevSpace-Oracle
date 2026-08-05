@@ -780,6 +780,216 @@ def _oracle_running_state(module, oracle_manifest: Path) -> Path:
     return layout.run_dir
 
 
+def _retirable_workflow(module, tmp_path: Path) -> tuple[Path, dict, Path, Path]:
+    path = manifest(tmp_path)
+    config = module.load_manifest(path)
+    config["_review_policy"] = module._default_review_policy()
+    config["_parallel_parent_id"] = hashlib.sha256(config["workflow_id"].encode()).hexdigest()
+    attempt = "b" * 32
+    source = config["initial_mission_path"]
+    source_sha = module.sha(source)
+    mission, receipt_path, input_sha, mission_sha = module._stage_mission(
+        config, config["workflow_id"], 0, "plan", source, attempt,
+        source_sha, source.read_bytes(),
+    )
+    oracle_manifest = module._oracle_manifest(
+        config, mission, mission.parent, attempt, stage="plan", mission_sha=mission_sha,
+    )
+    oracle_config = module.RUNNER.STATE.load_manifest(
+        oracle_manifest, expected_manifest_sha256=module.sha(oracle_manifest)
+    )
+    layout = module.RUNNER.STATE.create_layout(oracle_config, run_id=attempt)
+    layout.run_dir.mkdir(parents=True)
+    run_state = module.RUNNER.STATE.state_payload(
+        oracle_config,
+        layout,
+        status="attention_required",
+        resolved_version=module.RUNNER.STATE.ORACLE_ACTIVE_VERSION,
+    )
+    run_state.update({
+        "exit_code": 1,
+        "session_authority": "submitted_unknown",
+        "terminal_harvested": False,
+        "artifact_sha256": None,
+        "transport_status": "incomplete",
+    })
+    module.RUNNER.STATE.write_json_atomic(layout.state_path, run_state)
+    Path(run_state["mission"]["transport_path"]).write_bytes(mission.read_bytes())
+    slug = run_state["oracle"]["slug"]
+    marker = module.RUNNER.STATE.ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER
+    (layout.run_dir / "stdout.log").write_text(
+        f"Session: {slug}\nERROR: {marker}\nUser error (browser-automation): {marker}\n",
+        encoding="utf-8",
+    )
+    (layout.run_dir / "stderr.log").write_text("", encoding="utf-8")
+    (layout.run_dir / "recovery-harvest-stdout.log").write_text(
+        f'No live ChatGPT tab matched session "{slug}". Attempting recovery.\n',
+        encoding="utf-8",
+    )
+    (layout.run_dir / "recovery-harvest-stderr.log").write_text(
+        "Cannot recover conversation: session metadata has no recoverable ChatGPT conversation URL.\n",
+        encoding="utf-8",
+    )
+    settled = module.RUNNER.STATE.settle_user_confirmed_no_submission(
+        layout.state_path,
+        confirmation=module.RUNNER.STATE.USER_CONFIRMED_NO_SUBMISSION,
+        reason="user confirmed this exact pre-submit attempt",
+    )
+    reference = settled["user_confirmed_no_submission"]
+    workflow_state = {
+        "schema": module.STATE_SCHEMA,
+        "status": "attention_required",
+        "workflow_id": config["workflow_id"],
+        "manifest_sha256": config["manifest_sha256"],
+        "current_stage": "plan",
+        "current_attempt_id": attempt,
+        "current_input_sha256": input_sha,
+        "current_mission_path": str(source),
+        "receipt_path": str(receipt_path),
+        "current_binding_source_path": str(source),
+        "current_binding_source_sha256": input_sha,
+        "current_augmented_mission_path": str(mission),
+        "current_augmented_mission_sha256": mission_sha,
+        "oracle_run_id": attempt,
+        "oracle_run_dir": str(layout.run_dir),
+        "oracle_manifest_path": str(oracle_manifest),
+        "oracle_manifest_sha256": module.sha(oracle_manifest),
+        "next_index": 0,
+        "records": [
+            {"stage": "plan", "run_dir": str(layout.run_dir), "ok": False},
+            {
+                "stage": "plan",
+                "run_dir": str(layout.run_dir),
+                "settlement": "user-confirmed-no-submission",
+                "settlement_path": reference["path"],
+                "settlement_sha256": reference["sha256"],
+            },
+        ],
+        "blocker": "exact pre-submit attempt is settled; scientific work was not completed",
+    }
+    state_path = module._state_path(config, config["workflow_id"])
+    module._write_workflow_state(state_path, config, workflow_state)
+    return path, config, layout.run_dir, state_path
+
+
+def test_retirement_releases_scope_with_immutable_idempotent_receipt(tmp_path: Path) -> None:
+    module = load()
+    path, config, _run_dir, state_path = _retirable_workflow(module, tmp_path)
+    confirmation = f"{module.RETIREMENT_CONFIRMATION_PREFIX}{config['workflow_id']}"
+    state_before = state_path.read_bytes()
+
+    first = module.retire_workflow(
+        path,
+        expected_manifest_sha256=module.sha(path),
+        confirmation=confirmation,
+        reason="user authorized a new workflow ID for the same scientific mission",
+    )
+    receipt = Path(first["retirement_receipt_path"])
+    receipt_before = receipt.read_bytes()
+    scope_before = Path(first["scope_path"]).read_bytes()
+    second = module.retire_workflow(
+        path,
+        expected_manifest_sha256=module.sha(path),
+        confirmation=confirmation,
+        reason="user authorized a new workflow ID for the same scientific mission",
+    )
+
+    assert first["status"] == "workflow_retired_scope_released"
+    assert first["scope_readback"]["status"] == "released"
+    assert first["scope_readback"]["active_workflow_id"] == ""
+    assert json.loads(receipt_before)["scientific_work_complete"] is False
+    assert second["replayed"] is True
+    assert receipt.read_bytes() == receipt_before
+    assert Path(first["scope_path"]).read_bytes() == scope_before
+    assert state_path.read_bytes() == state_before
+    assert module._json(state_path)["status"] == "attention_required"
+
+    replacement = {**config, "workflow_id": "c" * 32, "workflow_dir": tmp_path / "workflow-new"}
+    module._claim_scope(replacement, replacement["workflow_id"])
+    claimed = module._json(module._scope_path(replacement))
+    assert claimed["status"] == "active"
+    assert claimed["active_workflow_id"] == replacement["workflow_id"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("submitted", "live", "terminal", "foreign", "mismatched", "unsettled", "terminal-receipt"),
+)
+def test_retirement_refuses_any_non_pre_submit_or_unbound_attempt(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    module = load()
+    path, config, run_dir, state_path = _retirable_workflow(module, tmp_path)
+    run_state_path = run_dir / "state.json"
+    run_state = module.RUNNER.STATE.load_state(run_state_path)
+    workflow_state = module._json(state_path)
+    if mutation in {"submitted", "live"}:
+        run_state["session_authority"] = "submitted_unknown" if mutation == "submitted" else "live"
+        module.RUNNER.STATE.write_json_atomic(run_state_path, run_state)
+    elif mutation == "terminal":
+        (run_dir / "output.md").write_text("terminal provider output", encoding="utf-8")
+        run_state.update({"session_authority": "terminal", "terminal_harvested": True})
+        module.RUNNER.STATE.write_json_atomic(run_state_path, run_state)
+    elif mutation == "foreign":
+        foreign = tmp_path / "foreign" / ("d" * 32)
+        foreign.mkdir(parents=True)
+        workflow_state["records"].append({"stage": "plan", "run_dir": str(foreign), "ok": False})
+        module._write(state_path, workflow_state)
+    elif mutation == "mismatched":
+        workflow_state["current_attempt_id"] = "e" * 32
+        module._write(state_path, workflow_state)
+    elif mutation == "unsettled":
+        (run_dir / "user-confirmed-no-submission.json").unlink()
+    else:
+        Path(workflow_state["receipt_path"]).write_text("{}", encoding="utf-8")
+
+    with pytest.raises(module.WorkflowError):
+        module.retire_workflow(
+            path,
+            expected_manifest_sha256=module.sha(path),
+            confirmation=f"{module.RETIREMENT_CONFIRMATION_PREFIX}{config['workflow_id']}",
+            reason="explicit replacement workflow authorization",
+        )
+
+
+def test_retirement_requires_exact_workflow_bound_confirmation(tmp_path: Path) -> None:
+    module = load()
+    path, config, _run_dir, _state_path = _retirable_workflow(module, tmp_path)
+
+    with pytest.raises(module.WorkflowError, match="confirmation must be exactly"):
+        module.retire_workflow(
+            path,
+            expected_manifest_sha256=module.sha(path),
+            confirmation="retire-comprehensive-workflow:other",
+            reason="explicit replacement workflow authorization",
+        )
+    with pytest.raises(module.WorkflowError, match="reason is required"):
+        module.retire_workflow(
+            path,
+            expected_manifest_sha256=module.sha(path),
+            confirmation=f"{module.RETIREMENT_CONFIRMATION_PREFIX}{config['workflow_id']}",
+            reason="",
+        )
+
+
+def test_new_workflow_refuses_unreceipted_released_scope(tmp_path: Path) -> None:
+    module = load()
+    path = manifest(tmp_path)
+    config = module.load_manifest(path)
+    module._write(module._scope_path(config), {
+        "schema": module.SCOPE_SCHEMA,
+        "status": "released",
+        "active_workflow_id": "",
+        "retired_workflow_id": "b" * 32,
+        "project_root": str(config["project_root"]),
+        "workflow_parent": str(config["workflow_dir"].parent),
+    })
+
+    with pytest.raises(module.WorkflowError, match="valid retirement receipt"):
+        module._claim_scope(config, config["workflow_id"])
+
+
 @pytest.mark.parametrize("mutation", ["manifest", "attachment", "context"])
 def test_oracle_recovery_rejects_run_state_binding_mismatch(tmp_path: Path, mutation: str) -> None:
     module = load()

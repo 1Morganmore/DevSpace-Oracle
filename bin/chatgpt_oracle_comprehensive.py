@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -28,6 +29,8 @@ PRO_OUTPUT_PREFIX_KEYS = (
 PRO_OUTPUT_RECOVERY_SCHEMA = "codex.chatgpt.oracle-pro-output-recovery/v1"
 STATE_SCHEMA = "codex.chatgpt.oracle-comprehensive-state/v1"
 SCOPE_SCHEMA = "codex.chatgpt.oracle-comprehensive-scope/v1"
+RETIREMENT_RECEIPT_SCHEMA = "codex.chatgpt.oracle-comprehensive-retirement/v1"
+RETIREMENT_CONFIRMATION_PREFIX = "retire-comprehensive-workflow:"
 MAX_PLAN_REVISIONS = 2
 REVIEW_STATUSES = {"PASS", "PASS_WITH_NOTES", "REVISE", "FAIL"}
 UNAMBIGUOUS_PRE_SUBMIT_MARKERS = (
@@ -219,6 +222,7 @@ def load_manifest(
         raise WorkflowError("app_name must be exactly DevSpace")
     return {
         **value,
+        "manifest_path": manifest_path,
         "project_root": root,
         "workflow_dir": workflow_dir,
         "initial_mission_path": mission,
@@ -320,12 +324,70 @@ def _scope_path(config: dict[str, Any]) -> Path:
     return RUNNER.STATE.oracle_state_root() / "comprehensive-scopes" / project_key / f"{scope_key}.json"
 
 
+def _retirement_receipt_path(config: dict[str, Any], workflow_id: str | None = None) -> Path:
+    scope = _scope_path(config)
+    return (
+        RUNNER.STATE.oracle_state_root()
+        / "comprehensive-retirements"
+        / scope.parent.name
+        / scope.stem
+        / f"{workflow_id or config['workflow_id']}.json"
+    )
+
+
+def _released_scope_is_valid(config: dict[str, Any], stored: dict[str, Any]) -> bool:
+    retired_id = str(stored.get("retired_workflow_id") or "")
+    if not retired_id or str(stored.get("active_workflow_id") or ""):
+        return False
+    receipt_path = _retirement_receipt_path(config, retired_id)
+    try:
+        if (
+            Path(str(stored.get("retirement_receipt_path") or "")).resolve() != receipt_path.resolve()
+            or receipt_path.is_symlink()
+            or not receipt_path.is_file()
+            or sha(receipt_path) != str(stored.get("retirement_receipt_sha256") or "")
+        ):
+            return False
+        receipt = _json(receipt_path)
+        retired_state_path = _state_path(config, retired_id)
+        recorded_state_path = Path(str(receipt.get("workflow_state_path") or ""))
+        recorded_manifest_path = Path(str(receipt.get("manifest_path") or ""))
+        if (
+            recorded_state_path.resolve() != retired_state_path.resolve()
+            or recorded_state_path.is_symlink()
+            or not recorded_state_path.is_file()
+            or recorded_manifest_path.is_symlink()
+            or not recorded_manifest_path.is_file()
+        ):
+            return False
+        recorded_state_sha256 = sha(recorded_state_path)
+        recorded_manifest_sha256 = sha(recorded_manifest_path)
+    except (OSError, ValueError, WorkflowError, json.JSONDecodeError):
+        return False
+    return all((
+        receipt.get("schema") == RETIREMENT_RECEIPT_SCHEMA,
+        receipt.get("status") == "workflow_retired_scope_released",
+        receipt.get("scientific_work_complete") is False,
+        receipt.get("workflow_id") == retired_id,
+        receipt.get("confirmation") == f"{RETIREMENT_CONFIRMATION_PREFIX}{retired_id}",
+        bool(str(receipt.get("reason") or "").strip()),
+        receipt.get("project_root") == str(config["project_root"]),
+        receipt.get("workflow_parent") == str(config["workflow_dir"].parent),
+        recorded_state_sha256 == receipt.get("workflow_state_sha256"),
+        recorded_manifest_sha256 == receipt.get("manifest_sha256"),
+        stored.get("project_root") == str(config["project_root"]),
+        stored.get("workflow_parent") == str(config["workflow_dir"].parent),
+    ))
+
+
 def _claim_scope(config: dict[str, Any], workflow_id: str) -> None:
     path = _scope_path(config)
     if path.is_file():
         stored = _json(path)
         active = str(stored.get("active_workflow_id") or "")
         status = str(stored.get("status") or "")
+        if status == "released" and not _released_scope_is_valid(config, stored):
+            raise WorkflowError("released comprehensive scope lacks a valid retirement receipt")
         if active and active != workflow_id and status != "complete":
             raise WorkflowError(
                 f"comprehensive scope already belongs to active workflow {active}; recover that exact workflow"
@@ -1016,6 +1078,127 @@ def _validate_receipt(
 def _state_path(config: dict[str, Any], workflow_id: str) -> Path:
     project_key = hashlib.sha256(str(config["project_root"]).casefold().encode("utf-8")).hexdigest()[:24]
     return RUNNER.STATE.oracle_state_root() / "workflows" / project_key / f"{workflow_id}.json"
+
+
+def _audit_retirable_workflow(config: dict[str, Any]) -> tuple[Path, dict[str, Any], list[dict[str, Any]]]:
+    workflow_id = config["workflow_id"]
+    state_path = _state_path(config, workflow_id)
+    if state_path.is_symlink() or not state_path.is_file():
+        raise WorkflowError("exact comprehensive workflow state is missing or symlinked")
+    state = _json(state_path)
+    if not all((
+        state.get("schema") == STATE_SCHEMA,
+        state.get("status") == "attention_required",
+        state.get("workflow_id") == workflow_id,
+        state.get("manifest_sha256") == config["manifest_sha256"],
+        state.get("current_stage") == "plan",
+        int(state.get("next_index", -1)) == 0,
+        state.get("current_input_sha256") == config["initial_mission_sha256"],
+        Path(str(state.get("current_binding_source_path") or "")).resolve()
+        == config["initial_mission_path"],
+        state.get("current_binding_source_sha256") == config["initial_mission_sha256"],
+    )):
+        raise WorkflowError("workflow state is not the exact unsettled stage-zero plan authority")
+    if any(key in state for key in ("final_output_path", "local_gate")):
+        raise WorkflowError("workflow has terminal output or a local completion gate")
+    records = state.get("records")
+    if not isinstance(records, list) or not records or not all(isinstance(item, dict) for item in records):
+        raise WorkflowError("workflow retirement requires a nonempty exact Oracle attempt ledger")
+    project_key = hashlib.sha256(str(config["project_root"]).casefold().encode("utf-8")).hexdigest()[:24]
+    run_root = RUNNER.STATE.oracle_state_root() / "projects" / project_key / "runs"
+    owners = RUNNER.STATE.unresolved_project_sessions(run_root, config["project_root"])
+    if owners:
+        raise WorkflowError(f"workflow retirement refused: unresolved Oracle owners: {owners}")
+
+    attempts: dict[str, dict[str, Any]] = {}
+    for record in records:
+        raw_run_dir = str(record.get("run_dir") or "").strip()
+        if (
+            record.get("stage") != "plan"
+            or not raw_run_dir
+            or record.get("ok") is True
+            or any(key in record for key in ("result", "result_path", "receipt_path", "parent_id"))
+            or str(record.get("recovery_status") or "") in {
+                "session_live", "submitted_unknown", "terminal", "terminal_observed", "complete"
+            }
+        ):
+            raise WorkflowError("workflow ledger contains submitted, terminal, or non-plan activity")
+        run_dir = Path(raw_run_dir).expanduser()
+        try:
+            if not run_dir.is_absolute() or run_dir.is_symlink():
+                raise WorkflowError("recorded Oracle attempt path is not an exact host directory")
+            run_dir = run_dir.resolve(strict=True)
+        except OSError as exc:
+            raise WorkflowError("recorded Oracle attempt directory is missing") from exc
+        if run_dir.parent != run_root.resolve() or re.fullmatch(r"[0-9a-f]{32}", run_dir.name) is None:
+            raise WorkflowError("recorded Oracle attempt is foreign to the exact project run root")
+        run_id = run_dir.name
+        if run_id in attempts:
+            continue
+        run_state_path = run_dir / "state.json"
+        proof = RUNNER.STATE.proven_user_confirmed_no_submission(run_state_path)
+        run_state = RUNNER.STATE.load_state(run_state_path)
+        expected_stage_dir = config["workflow_dir"] / "stages" / f"00-plan-{run_id[:12]}"
+        expected_mission = expected_stage_dir / "mission.md"
+        expected_receipt = expected_stage_dir / "stage-result.json"
+        reference = run_state.get("user_confirmed_no_submission")
+        if proof is None or not isinstance(reference, dict):
+            raise WorkflowError("recorded Oracle attempt lacks user-confirmed no-submission settlement")
+        settlement_path = Path(str(reference.get("path") or ""))
+        if (
+            settlement_path.resolve() != (run_dir / "user-confirmed-no-submission.json").resolve()
+            or settlement_path.is_symlink()
+            or not settlement_path.is_file()
+        ):
+            raise WorkflowError("recorded Oracle attempt settlement path is missing or foreign")
+        if not all((
+            run_state.get("run_id") == run_id,
+            run_state.get("project_root") == str(config["project_root"]),
+            run_state.get("session_authority") == "pre_submit",
+            run_state.get("transport_status") == "not_submitted_user_confirmed",
+            run_state.get("terminal_harvested") is False,
+            run_state.get("artifact_sha256") is None,
+            proof.get("workflow_id") == workflow_id,
+            proof.get("stage") == "plan",
+            proof.get("attempt_id") == run_id,
+            proof.get("run_id") == run_id,
+            proof.get("input_mission_sha256") == config["initial_mission_sha256"],
+            proof.get("output_absent") is True,
+            proof.get("conversation_url_absent") is True,
+            Path(str(proof.get("_augmented_mission_path") or "")).resolve() == expected_mission.resolve(),
+            Path(str(proof.get("_input_mission_path") or "")).resolve()
+            == config["initial_mission_path"],
+            Path(str(proof.get("_receipt_path") or "")).resolve() == expected_receipt.resolve(),
+            not expected_receipt.exists(),
+            sha(settlement_path) == str(reference.get("sha256") or ""),
+        )):
+            raise WorkflowError("recorded Oracle attempt is submitted, terminal, mismatched, or unsettled")
+        attempts[run_id] = {
+            "run_id": run_id,
+            "state_path": str(run_state_path),
+            "state_sha256": sha(run_state_path),
+            "settlement_path": str(settlement_path.resolve()),
+            "settlement_sha256": sha(settlement_path),
+            "stage": "plan",
+            "attempt_id": run_id,
+            "input_mission_sha256": proof["input_mission_sha256"],
+            "mission_sha256": proof["mission_sha256"],
+            "output_absent": True,
+            "conversation_url_absent": True,
+        }
+    current_attempt = str(state.get("current_attempt_id") or "")
+    if (
+        current_attempt not in attempts
+        or state.get("oracle_run_id") != current_attempt
+        or Path(str(state.get("oracle_run_dir") or "")).resolve()
+        != Path(attempts[current_attempt]["state_path"]).parent.resolve()
+        or Path(str(state.get("current_augmented_mission_path") or "")).resolve()
+        != (config["workflow_dir"] / "stages" / f"00-plan-{current_attempt[:12]}" / "mission.md").resolve()
+        or state.get("current_augmented_mission_sha256") != attempts[current_attempt]["mission_sha256"]
+        or Path(str(state.get("receipt_path") or "")).exists()
+    ):
+        raise WorkflowError("current Oracle attempt does not match the exact settled attempt ledger")
+    return state_path, state, [attempts[key] for key in sorted(attempts)]
 
 
 def _is_unambiguous_pre_submit_failure(run_dir: Path) -> bool:
@@ -2010,18 +2193,165 @@ def run_workflow(
         )
 
 
+def retire_workflow(
+    manifest_path: Path,
+    *,
+    expected_manifest_sha256: str | None,
+    confirmation: str,
+    reason: str,
+) -> dict[str, Any]:
+    if expected_manifest_sha256 is None:
+        raise WorkflowError(
+            "MANIFEST_SHA256_REQUIRED: workflow retirement requires the exact old manifest SHA-256"
+        )
+    config = load_manifest(manifest_path, expected_manifest_sha256=expected_manifest_sha256)
+    expected_confirmation = f"{RETIREMENT_CONFIRMATION_PREFIX}{config['workflow_id']}"
+    if confirmation != expected_confirmation:
+        raise WorkflowError(f"retirement confirmation must be exactly {expected_confirmation}")
+    normalized_reason = reason.strip()
+    if not normalized_reason:
+        raise WorkflowError("workflow retirement reason is required")
+
+    with RUNNER.STATE.project_submit_mutex(config["project_root"], timeout_seconds=30):
+        scope_path = _scope_path(config)
+        state_path, _state, attempts = _audit_retirable_workflow(config)
+        if scope_path.is_symlink() or not scope_path.is_file():
+            raise WorkflowError("exact comprehensive scope authority is missing or symlinked")
+        scope = _json(scope_path)
+        receipt_path = _retirement_receipt_path(config)
+        stable_receipt = {
+            "schema": RETIREMENT_RECEIPT_SCHEMA,
+            "status": "workflow_retired_scope_released",
+            "scientific_work_complete": False,
+            "workflow_id": config["workflow_id"],
+            "project_root": str(config["project_root"]),
+            "workflow_parent": str(config["workflow_dir"].parent),
+            "manifest_path": str(config["manifest_path"]),
+            "manifest_sha256": config["manifest_sha256"],
+            "workflow_state_path": str(state_path),
+            "workflow_state_sha256": sha(state_path),
+            "scope_path": str(scope_path),
+            "confirmation": confirmation,
+            "reason": normalized_reason,
+            "attempts": attempts,
+        }
+        replayed = False
+        if receipt_path.exists():
+            if receipt_path.is_symlink():
+                raise WorkflowError("retirement receipt path is symlinked")
+            receipt = _json(receipt_path)
+            if any(receipt.get(key) != value for key, value in stable_receipt.items()):
+                raise WorkflowError("existing retirement receipt does not match the exact workflow evidence")
+            replayed = True
+        else:
+            if not all((
+                scope.get("schema") == SCOPE_SCHEMA,
+                scope.get("status") == "attention_required",
+                scope.get("active_workflow_id") == config["workflow_id"],
+                scope.get("project_root") == str(config["project_root"]),
+                scope.get("workflow_parent") == str(config["workflow_dir"].parent),
+                Path(str(scope.get("workflow_state_path") or "")).resolve() == state_path.resolve(),
+            )):
+                raise WorkflowError("scope does not belong to the exact attention-required workflow")
+            receipt = {
+                **stable_receipt,
+                "scope_before_sha256": sha(scope_path),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            RUNNER.STATE.write_json_atomic(receipt_path, receipt)
+
+        receipt_sha256 = sha(receipt_path)
+        active = str(scope.get("active_workflow_id") or "")
+        if scope.get("status") == "released":
+            if not _released_scope_is_valid(config, scope):
+                raise WorkflowError("scope release readback does not match the immutable retirement receipt")
+            return {
+                "ok": True,
+                "status": "workflow_retired_scope_released",
+                "replayed": True,
+                "workflow_id": config["workflow_id"],
+                "retirement_receipt_path": str(receipt_path),
+                "retirement_receipt_sha256": receipt_sha256,
+                "scope_path": str(scope_path),
+                "scope_readback": scope,
+            }
+        if active and active != config["workflow_id"]:
+            return {
+                "ok": True,
+                "status": "workflow_already_retired_scope_reclaimed",
+                "replayed": True,
+                "workflow_id": config["workflow_id"],
+                "active_workflow_id": active,
+                "retirement_receipt_path": str(receipt_path),
+                "retirement_receipt_sha256": receipt_sha256,
+                "scope_path": str(scope_path),
+                "scope_readback": scope,
+            }
+        if not all((
+            scope.get("schema") == SCOPE_SCHEMA,
+            scope.get("status") == "attention_required",
+            active == config["workflow_id"],
+            scope.get("project_root") == str(config["project_root"]),
+            scope.get("workflow_parent") == str(config["workflow_dir"].parent),
+            Path(str(scope.get("workflow_state_path") or "")).resolve() == state_path.resolve(),
+            receipt.get("scope_before_sha256") == sha(scope_path),
+        )):
+            raise WorkflowError("scope changed before retirement release")
+        released = {
+            "schema": SCOPE_SCHEMA,
+            "status": "released",
+            "active_workflow_id": "",
+            "retired_workflow_id": config["workflow_id"],
+            "project_root": str(config["project_root"]),
+            "workflow_parent": str(config["workflow_dir"].parent),
+            "workflow_state_path": str(state_path),
+            "retirement_receipt_path": str(receipt_path),
+            "retirement_receipt_sha256": receipt_sha256,
+            "review_policy": scope.get("review_policy") or _default_review_policy(),
+        }
+        RUNNER.STATE.write_json_atomic(scope_path, released)
+        readback = _json(scope_path)
+        if readback != released or not _released_scope_is_valid(config, readback):
+            raise WorkflowError("scope release authoritative readback failed")
+        return {
+            "ok": True,
+            "status": "workflow_retired_scope_released",
+            "replayed": replayed,
+            "workflow_id": config["workflow_id"],
+            "retirement_receipt_path": str(receipt_path),
+            "retirement_receipt_sha256": receipt_sha256,
+            "scope_path": str(scope_path),
+            "scope_readback": readback,
+        }
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a bounded Oracle comprehensive workflow.")
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--expected-manifest-sha256")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--retire-workflow", action="store_true")
+    parser.add_argument("--retirement-confirmation", default="")
+    parser.add_argument("--retirement-reason", default="")
     args = parser.parse_args(argv)
     try:
-        value = run_workflow(
-            args.manifest,
-            expected_manifest_sha256=args.expected_manifest_sha256,
-            dry_run=args.dry_run,
-        )
+        if args.retire_workflow:
+            if args.dry_run:
+                raise WorkflowError("workflow retirement cannot be combined with --dry-run")
+            value = retire_workflow(
+                args.manifest,
+                expected_manifest_sha256=args.expected_manifest_sha256,
+                confirmation=args.retirement_confirmation,
+                reason=args.retirement_reason,
+            )
+        else:
+            if args.retirement_confirmation or args.retirement_reason:
+                raise WorkflowError("retirement arguments require --retire-workflow")
+            value = run_workflow(
+                args.manifest,
+                expected_manifest_sha256=args.expected_manifest_sha256,
+                dry_run=args.dry_run,
+            )
     except Exception as exc:
         value = {"ok": False, "error": {"code": "ORACLE_COMPREHENSIVE_FAILED", "message": str(exc)}}
     print(json.dumps(value, ensure_ascii=False, indent=2))
