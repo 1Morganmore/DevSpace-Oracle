@@ -138,6 +138,27 @@ consume at most one replacement for that immutable
 binding. Missing or changed evidence restores fail-closed project ownership;
 a replacement failure never authorizes a second submission.
 
+To retire an abandoned stage-zero Comprehensive workflow, first settle every
+exact Oracle attempt as above, then use the unchanged old manifest and its exact
+SHA-256. The workflow-bound confirmation token and a nonempty operator reason
+are mandatory:
+
+```powershell
+$manifest = 'C:\project\workflow.json'
+$sha = (Get-FileHash -Algorithm SHA256 $manifest).Hash.ToLowerInvariant()
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_comprehensive.py" `
+  --manifest $manifest --expected-manifest-sha256 $sha --retire-workflow `
+  --retirement-confirmation 'retire-comprehensive-workflow:<workflow_id>' `
+  --retirement-reason 'user authorized an exact replacement workflow'
+```
+
+Retirement is maintenance, not scientific completion. It succeeds only for the
+exact attention-required stage-zero authority when every workflow-bound run is
+ledgered and still proves user-confirmed pre-submit non-submission. It writes an
+immutable retirement receipt, releases the scope for a different workflow ID,
+and permanently prevents the retired ID from reclaiming that scope. Any extra,
+submitted, live, terminal, changed, or unledgered run remains fail-closed.
+
 Existing v1-v4 agbrowse comprehensive state and v3 parallel implementation are
 legacy recovery-only. Their files remain installed for exact recovery but are
 not the new-work route.

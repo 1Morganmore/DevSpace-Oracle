@@ -173,6 +173,7 @@ def test_legacy_manifest_requires_exact_stage_zero_host_bindings(tmp_path: Path)
         "workflow_id": config["workflow_id"],
         "manifest_sha256": manifest_sha256,
         "current_stage": "plan",
+        "next_index": 0,
         "current_mission_path": str(config["initial_mission_path"]),
         "current_input_sha256": mission_sha256,
         "current_binding_source_path": str(config["initial_mission_path"]),
@@ -184,6 +185,12 @@ def test_legacy_manifest_requires_exact_stage_zero_host_bindings(tmp_path: Path)
         module.load_manifest(path, expected_manifest_sha256=manifest_sha256)
 
     state["current_binding_source_sha256"] = mission_sha256
+    for invalid in (None, False, "0", 1):
+        state["next_index"] = invalid
+        module._write(state_path, state)
+        with pytest.raises(module.WorkflowError, match="initial_mission_sha256"):
+            module.load_manifest(path, expected_manifest_sha256=manifest_sha256)
+    state["next_index"] = 0
     module._write(state_path, state)
     resumed = module.load_manifest(path, expected_manifest_sha256=manifest_sha256)
 
@@ -212,6 +219,27 @@ def test_main_requires_and_propagates_comprehensive_preview_hash(
     ]) == 0
     capsys.readouterr()
     assert calls == [((path,), {"expected_manifest_sha256": expected, "dry_run": False})]
+
+    retire_calls = []
+    monkeypatch.setattr(
+        module,
+        "retire_workflow",
+        lambda *args, **kwargs: retire_calls.append((args, kwargs)) or {"ok": True},
+    )
+    confirmation = "retire-comprehensive-workflow:" + "a" * 32
+    assert module.main([
+        "--manifest", str(path),
+        "--expected-manifest-sha256", expected,
+        "--retire-workflow",
+        "--retirement-confirmation", confirmation,
+        "--retirement-reason", "operator-authorized replacement",
+    ]) == 0
+    capsys.readouterr()
+    assert retire_calls == [((path,), {
+        "expected_manifest_sha256": expected,
+        "confirmation": confirmation,
+        "reason": "operator-authorized replacement",
+    })]
 
 
 def test_web_authored_relay_reaches_complete_without_host_semantic_rewrite(tmp_path: Path) -> None:
@@ -951,6 +979,208 @@ def test_retirement_refuses_any_non_pre_submit_or_unbound_attempt(
             confirmation=f"{module.RETIREMENT_CONFIRMATION_PREFIX}{config['workflow_id']}",
             reason="explicit replacement workflow authorization",
         )
+
+
+@pytest.mark.parametrize("authority", ["pre_submit", "submitted_unknown", "live", "terminal"])
+def test_retirement_refuses_every_unledgered_exact_workflow_run(
+    tmp_path: Path,
+    authority: str,
+) -> None:
+    module = load()
+    path, config, _run_dir, _state_path = _retirable_workflow(module, tmp_path)
+    attempt = "d" * 32
+    source = config["initial_mission_path"]
+    mission, _receipt, _input_sha, mission_sha = module._stage_mission(
+        config, config["workflow_id"], 0, "plan", source, attempt,
+        module.sha(source), source.read_bytes(),
+    )
+    oracle_manifest = module._oracle_manifest(
+        config, mission, mission.parent, attempt, stage="plan", mission_sha=mission_sha,
+    )
+    oracle_config = module.RUNNER.STATE.load_manifest(
+        oracle_manifest, expected_manifest_sha256=module.sha(oracle_manifest)
+    )
+    layout = module.RUNNER.STATE.create_layout(oracle_config, run_id=attempt)
+    layout.run_dir.mkdir(parents=True)
+    run_state = module.RUNNER.STATE.state_payload(
+        oracle_config,
+        layout,
+        status="attention_required",
+        resolved_version=module.RUNNER.STATE.ORACLE_ACTIVE_VERSION,
+    )
+    run_state.update({
+        "session_authority": authority,
+        "terminal_harvested": authority == "terminal",
+    })
+    module.RUNNER.STATE.write_json_atomic(layout.state_path, run_state)
+
+    with pytest.raises(module.WorkflowError):
+        module.retire_workflow(
+            path,
+            expected_manifest_sha256=module.sha(path),
+            confirmation=f"{module.RETIREMENT_CONFIRMATION_PREFIX}{config['workflow_id']}",
+            reason="explicit replacement workflow authorization",
+        )
+
+
+def test_retirement_refuses_an_unreadable_unledgered_project_run(tmp_path: Path) -> None:
+    module = load()
+    path, config, _run_dir, _state_path = _retirable_workflow(module, tmp_path)
+    project_key = hashlib.sha256(str(config["project_root"]).casefold().encode("utf-8")).hexdigest()[:24]
+    corrupt = module.RUNNER.STATE.oracle_state_root() / "projects" / project_key / "runs" / ("d" * 32)
+    corrupt.mkdir(parents=True)
+    (corrupt / "state.json").write_text("{", encoding="utf-8")
+
+    with pytest.raises(module.WorkflowError, match="do not exactly match"):
+        module.retire_workflow(
+            path,
+            expected_manifest_sha256=module.sha(path),
+            confirmation=f"{module.RETIREMENT_CONFIRMATION_PREFIX}{config['workflow_id']}",
+            reason="explicit replacement workflow authorization",
+        )
+
+
+@pytest.mark.parametrize("artifact", ["state", "settlement"])
+def test_released_scope_revalidates_sealed_attempts_before_replacement_claim(
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    module = load()
+    path, config, run_dir, _state_path = _retirable_workflow(module, tmp_path)
+    module.retire_workflow(
+        path,
+        expected_manifest_sha256=module.sha(path),
+        confirmation=f"{module.RETIREMENT_CONFIRMATION_PREFIX}{config['workflow_id']}",
+        reason="explicit replacement workflow authorization",
+    )
+    target = run_dir / ("state.json" if artifact == "state" else "user-confirmed-no-submission.json")
+    target.write_bytes(target.read_bytes() + b"\n")
+    replacement = {**config, "workflow_id": "c" * 32, "workflow_dir": tmp_path / "workflow-new"}
+
+    with module.RUNNER.STATE.project_submit_mutex(config["project_root"], timeout_seconds=30):
+        with pytest.raises(module.WorkflowError, match="valid retirement receipt"):
+            module._claim_scope(replacement, replacement["workflow_id"])
+
+
+def test_retired_workflow_cannot_reclaim_after_valid_replacement_completion(tmp_path: Path) -> None:
+    module = load()
+    path, config, _run_dir, _state_path = _retirable_workflow(module, tmp_path)
+    module.retire_workflow(
+        path,
+        expected_manifest_sha256=module.sha(path),
+        confirmation=f"{module.RETIREMENT_CONFIRMATION_PREFIX}{config['workflow_id']}",
+        reason="explicit replacement workflow authorization",
+    )
+    replacement = {
+        **config,
+        "workflow_id": "c" * 32,
+        "workflow_dir": tmp_path / "workflow-new",
+        "manifest_sha256": "c" * 64,
+    }
+    replacement_output = tmp_path / "replacement-output.md"
+    replacement_output.write_text("completed replacement", encoding="utf-8")
+    module._claim_scope(replacement, replacement["workflow_id"])
+    module._write_workflow_state(
+        module._state_path(replacement, replacement["workflow_id"]),
+        replacement,
+        {
+            "schema": module.STATE_SCHEMA,
+            "status": "complete",
+            "workflow_id": replacement["workflow_id"],
+            "manifest_sha256": replacement["manifest_sha256"],
+            "records": [],
+            "final_output_path": str(replacement_output),
+            "local_gate": {"exit_code": 0},
+        },
+    )
+
+    with pytest.raises(module.WorkflowError, match="retired comprehensive workflow"):
+        module._claim_scope(config, config["workflow_id"])
+
+    next_workflow = {
+        **replacement,
+        "workflow_id": "e" * 32,
+        "workflow_dir": tmp_path / "workflow-next",
+    }
+    module._claim_scope(next_workflow, next_workflow["workflow_id"])
+    assert module._json(module._scope_path(next_workflow))["active_workflow_id"] == next_workflow["workflow_id"]
+
+
+def test_complete_replay_preserves_scope_for_the_next_workflow(tmp_path: Path) -> None:
+    module = load()
+    path = manifest(tmp_path)
+    config = module.load_manifest(path)
+    config["_review_policy"] = module._default_review_policy()
+    output = tmp_path / "final.md"
+    output.write_text("durable result", encoding="utf-8")
+    state_path = module._state_path(config, config["workflow_id"])
+    module._write_workflow_state(state_path, config, {
+        "schema": module.STATE_SCHEMA,
+        "status": "complete",
+        "workflow_id": config["workflow_id"],
+        "manifest_sha256": config["manifest_sha256"],
+        "records": [],
+        "final_output_path": str(output),
+        "local_gate": {"exit_code": 0},
+    })
+    scope_path = module._scope_path(config)
+    scope_before = scope_path.read_bytes()
+
+    result = run_workflow(module, path)
+
+    assert result["status"] == "complete"
+    assert scope_path.read_bytes() == scope_before
+    replacement = {**config, "workflow_id": "c" * 32, "workflow_dir": tmp_path / "workflow-new"}
+    module._claim_scope(replacement, replacement["workflow_id"])
+    assert module._json(scope_path)["active_workflow_id"] == replacement["workflow_id"]
+
+
+def test_completed_scope_with_missing_output_cannot_be_replaced(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    config["_review_policy"] = module._default_review_policy()
+    module._write_workflow_state(
+        module._state_path(config, config["workflow_id"]),
+        config,
+        {
+            "schema": module.STATE_SCHEMA,
+            "status": "complete",
+            "workflow_id": config["workflow_id"],
+            "manifest_sha256": config["manifest_sha256"],
+            "records": [],
+            "final_output_path": str(tmp_path / "missing.md"),
+            "local_gate": {"exit_code": 0},
+        },
+    )
+    replacement = {**config, "workflow_id": "c" * 32, "workflow_dir": tmp_path / "workflow-new"}
+
+    with pytest.raises(module.WorkflowError, match="valid completion authority"):
+        module._claim_scope(replacement, replacement["workflow_id"])
+
+
+@pytest.mark.parametrize(
+    ("status", "owner", "schema"),
+    [("active", "", None), ("unknown", "a" * 32, None), ("active", "a" * 32, "invalid")],
+)
+def test_claim_scope_rejects_malformed_or_ownerless_authority(
+    tmp_path: Path,
+    status: str,
+    owner: str,
+    schema: str | None,
+) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    config["_review_policy"] = module._default_review_policy()
+    module._write(module._scope_path(config), {
+        "schema": schema or module.SCOPE_SCHEMA,
+        "status": status,
+        "active_workflow_id": owner,
+        "project_root": str(config["project_root"]),
+        "workflow_parent": str(config["workflow_dir"].parent),
+    })
+
+    with pytest.raises(module.WorkflowError):
+        module._claim_scope(config, config["workflow_id"])
 
 
 def test_retirement_requires_exact_workflow_bound_confirmation(tmp_path: Path) -> None:

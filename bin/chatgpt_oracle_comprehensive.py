@@ -155,6 +155,7 @@ def _legacy_initial_mission_binding(
         stored.get("manifest_sha256") == manifest_sha256,
         stored.get("status") in {"running", "attention_required", "awaiting_receipt", "complete"},
         stored.get("current_stage") == "plan",
+        type(stored.get("next_index")) is int and stored["next_index"] == 0,
         current_mission == mission,
         binding_source == mission,
         stored.get("current_input_sha256") == mission_sha256,
@@ -373,6 +374,7 @@ def _released_scope_is_valid(config: dict[str, Any], stored: dict[str, Any]) -> 
         bool(str(receipt.get("reason") or "").strip()),
         receipt.get("project_root") == str(config["project_root"]),
         receipt.get("workflow_parent") == str(config["workflow_dir"].parent),
+        _retirement_attempts_are_current(config, retired_id, receipt.get("attempts")),
         recorded_state_sha256 == receipt.get("workflow_state_sha256"),
         recorded_manifest_sha256 == receipt.get("manifest_sha256"),
         stored.get("project_root") == str(config["project_root"]),
@@ -380,15 +382,71 @@ def _released_scope_is_valid(config: dict[str, Any], stored: dict[str, Any]) -> 
     ))
 
 
+def _completed_scope_is_valid(config: dict[str, Any], stored: dict[str, Any]) -> bool:
+    active = str(stored.get("active_workflow_id") or "")
+    state_path = _state_path(config, active)
+    try:
+        recorded = Path(str(stored.get("workflow_state_path") or ""))
+        if (
+            not active
+            or recorded.resolve() != state_path.resolve()
+            or recorded.is_symlink()
+            or not recorded.is_file()
+        ):
+            return False
+        state = _json(recorded)
+        output = _inside(config["project_root"], state.get("final_output_path"))
+        output_bytes = output.read_bytes() if output.is_file() else b""
+    except (OSError, ValueError, WorkflowError, json.JSONDecodeError):
+        return False
+    gate = state.get("local_gate")
+    return all((
+        state.get("schema") == STATE_SCHEMA,
+        state.get("status") == "complete",
+        state.get("workflow_id") == active,
+        output.is_file(),
+        bool(output_bytes.strip()),
+        isinstance(gate, dict) and gate.get("exit_code") == 0,
+    ))
+
+
 def _claim_scope(config: dict[str, Any], workflow_id: str) -> None:
     path = _scope_path(config)
-    if path.is_file():
+    retired_receipt = _retirement_receipt_path(config, workflow_id)
+    if retired_receipt.exists() or retired_receipt.is_symlink():
+        raise WorkflowError(f"retired comprehensive workflow {workflow_id} cannot reclaim its scope")
+    if path.exists() or path.is_symlink():
+        if path.is_symlink() or not path.is_file():
+            raise WorkflowError("comprehensive scope authority is not a regular non-symlink file")
         stored = _json(path)
-        active = str(stored.get("active_workflow_id") or "")
-        status = str(stored.get("status") or "")
-        if status == "released" and not _released_scope_is_valid(config, stored):
-            raise WorkflowError("released comprehensive scope lacks a valid retirement receipt")
-        if active and active != workflow_id and status != "complete":
+        raw_active = stored.get("active_workflow_id")
+        active = raw_active if isinstance(raw_active, str) else ""
+        status = stored.get("status")
+        if not all((
+            stored.get("schema") == SCOPE_SCHEMA,
+            stored.get("project_root") == str(config["project_root"]),
+            stored.get("workflow_parent") == str(config["workflow_dir"].parent),
+            isinstance(status, str),
+            isinstance(raw_active, str),
+            active == active.strip(),
+        )):
+            raise WorkflowError("comprehensive scope authority is malformed or foreign")
+        if status == "released":
+            if not _released_scope_is_valid(config, stored):
+                raise WorkflowError("released comprehensive scope lacks a valid retirement receipt")
+        elif not active:
+            raise WorkflowError("nonreleased comprehensive scope lacks an exact owner")
+        elif active == workflow_id:
+            if status == "complete":
+                if not _completed_scope_is_valid(config, stored):
+                    raise WorkflowError("completed comprehensive scope lacks valid completion authority")
+                return
+            if status not in {"active", "attention_required", "failed"}:
+                raise WorkflowError("comprehensive scope authority has an invalid owner status")
+        elif status == "complete":
+            if not _completed_scope_is_valid(config, stored):
+                raise WorkflowError("completed comprehensive scope lacks valid completion authority")
+        else:
             raise WorkflowError(
                 f"comprehensive scope already belongs to active workflow {active}; recover that exact workflow"
             )
@@ -1080,6 +1138,101 @@ def _state_path(config: dict[str, Any], workflow_id: str) -> Path:
     return RUNNER.STATE.oracle_state_root() / "workflows" / project_key / f"{workflow_id}.json"
 
 
+def _retirement_attempts_are_current(
+    config: dict[str, Any],
+    workflow_id: str,
+    attempts: Any,
+) -> bool:
+    """Require the sealed attempt ledger to equal every exact-workflow run state."""
+    if not isinstance(attempts, list) or not attempts or not all(isinstance(item, dict) for item in attempts):
+        return False
+    project_key = hashlib.sha256(str(config["project_root"]).casefold().encode("utf-8")).hexdigest()[:24]
+    run_root = RUNNER.STATE.oracle_state_root() / "projects" / project_key / "runs"
+    expected_parent = hashlib.sha256(workflow_id.encode("utf-8")).hexdigest()
+    sealed: dict[str, Path] = {}
+    for item in attempts:
+        run_id = item.get("run_id")
+        if (
+            not isinstance(run_id, str)
+            or re.fullmatch(r"[0-9a-f]{32}", run_id) is None
+            or run_id in sealed
+            or item.get("stage") != "plan"
+            or item.get("attempt_id") != run_id
+            or item.get("output_absent") is not True
+            or item.get("conversation_url_absent") is not True
+            or re.fullmatch(r"[0-9a-f]{64}", str(item.get("input_mission_sha256") or "")) is None
+            or re.fullmatch(r"[0-9a-f]{64}", str(item.get("mission_sha256") or "")) is None
+        ):
+            return False
+        run_dir = run_root / run_id
+        state_path = Path(str(item.get("state_path") or ""))
+        settlement_path = Path(str(item.get("settlement_path") or ""))
+        try:
+            _lexical_nonsymlink(state_path)
+            _lexical_nonsymlink(settlement_path)
+            if (
+                state_path != run_dir / "state.json"
+                or settlement_path != run_dir / "user-confirmed-no-submission.json"
+                or not state_path.is_file()
+                or not settlement_path.is_file()
+                or sha(state_path) != item.get("state_sha256")
+                or sha(settlement_path) != item.get("settlement_sha256")
+            ):
+                return False
+            state = RUNNER.STATE.load_state(state_path)
+            proof = RUNNER.STATE.proven_user_confirmed_no_submission(state_path)
+        except Exception:
+            return False
+        reference = state.get("user_confirmed_no_submission")
+        if not isinstance(reference, dict) or proof is None or not all((
+            state.get("run_id") == run_id,
+            state.get("project_root") == str(config["project_root"]),
+            state.get("parallel_parent_id") == expected_parent,
+            state.get("session_authority") == "pre_submit",
+            state.get("transport_status") == "not_submitted_user_confirmed",
+            state.get("terminal_harvested") is False,
+            state.get("artifact_sha256") is None,
+            Path(str(reference.get("path") or "")) == settlement_path,
+            reference.get("sha256") == item.get("settlement_sha256"),
+            proof.get("workflow_id") == workflow_id,
+            proof.get("stage") == "plan",
+            proof.get("attempt_id") == run_id,
+            proof.get("run_id") == run_id,
+            proof.get("input_mission_sha256") == item.get("input_mission_sha256"),
+            proof.get("mission_sha256") == item.get("mission_sha256"),
+            proof.get("output_absent") is True,
+            proof.get("conversation_url_absent") is True,
+            not Path(str(proof.get("_receipt_path") or "")).exists(),
+            sha(state_path) == item.get("state_sha256"),
+            sha(settlement_path) == item.get("settlement_sha256"),
+        )):
+            return False
+        sealed[run_id] = state_path
+
+    found: set[str] = set()
+    if run_root.is_dir():
+        for candidate in sorted(run_root.glob("*/state.json"), key=lambda item: str(item)):
+            try:
+                state = RUNNER.STATE.load_state(candidate)
+            except Exception:
+                return False
+            if (
+                state.get("project_root") != str(config["project_root"])
+                or state.get("parallel_parent_id") != expected_parent
+            ):
+                continue
+            run_id = state.get("run_id")
+            if (
+                not isinstance(run_id, str)
+                or run_id not in sealed
+                or candidate != sealed[run_id]
+                or candidate.parent.name != run_id
+            ):
+                return False
+            found.add(run_id)
+    return found == set(sealed)
+
+
 def _audit_retirable_workflow(config: dict[str, Any]) -> tuple[Path, dict[str, Any], list[dict[str, Any]]]:
     workflow_id = config["workflow_id"]
     state_path = _state_path(config, workflow_id)
@@ -1092,7 +1245,7 @@ def _audit_retirable_workflow(config: dict[str, Any]) -> tuple[Path, dict[str, A
         state.get("workflow_id") == workflow_id,
         state.get("manifest_sha256") == config["manifest_sha256"],
         state.get("current_stage") == "plan",
-        int(state.get("next_index", -1)) == 0,
+        type(state.get("next_index")) is int and state["next_index"] == 0,
         state.get("current_input_sha256") == config["initial_mission_sha256"],
         Path(str(state.get("current_binding_source_path") or "")).resolve()
         == config["initial_mission_path"],
@@ -1186,6 +1339,9 @@ def _audit_retirable_workflow(config: dict[str, Any]) -> tuple[Path, dict[str, A
             "output_absent": True,
             "conversation_url_absent": True,
         }
+    sealed_attempts = [attempts[key] for key in sorted(attempts)]
+    if not _retirement_attempts_are_current(config, workflow_id, sealed_attempts):
+        raise WorkflowError("workflow run states do not exactly match the settled retirement ledger")
     current_attempt = str(state.get("current_attempt_id") or "")
     if (
         current_attempt not in attempts
@@ -1198,7 +1354,7 @@ def _audit_retirable_workflow(config: dict[str, Any]) -> tuple[Path, dict[str, A
         or Path(str(state.get("receipt_path") or "")).exists()
     ):
         raise WorkflowError("current Oracle attempt does not match the exact settled attempt ledger")
-    return state_path, state, [attempts[key] for key in sorted(attempts)]
+    return state_path, state, sealed_attempts
 
 
 def _is_unambiguous_pre_submit_failure(run_dir: Path) -> bool:
