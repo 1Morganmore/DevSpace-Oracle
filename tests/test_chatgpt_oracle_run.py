@@ -1292,7 +1292,19 @@ def test_direct_web_multi_child_no_submission_settlement_is_hash_bound(tmp_path:
     failed = execute_run(runner, manifest_path, run_factory=version_runner, popen_factory=prompt_not_observed)
     run_dir = Path(failed["run_dir"])
     state_path = run_dir / "state.json"
-    slug = runner.STATE.load_state(state_path)["oracle"]["slug"]
+    state = runner.STATE.load_state(state_path)
+    slug = state["oracle"]["slug"]
+    oracle_output = tmp_path / "runtime" / "legacy" / "oracle_output"
+    lane_dir = oracle_output / "lanes" / "lane"
+    lane_dir.mkdir(parents=True)
+    (lane_dir / "oracle.json").write_text(json.dumps({
+        "schema": "codex.chatgpt.oracle-run/v1", "project_root": str(tmp_path.resolve()),
+        "mission_path": str((tmp_path / "mission.md").resolve()), "parallel_parent_id": parent_id,
+    }), encoding="utf-8")
+    (oracle_output / "result.json").write_text(json.dumps({
+        "schema": "codex.chatgpt.oracle-multi-result/v1", "parent_id": parent_id,
+        "lanes": [{"id": "lane", "run_dir": str(run_dir), "session_locator": slug}],
+    }), encoding="utf-8")
     (run_dir / "recovery-harvest-stdout.log").write_text(
         f'No live ChatGPT tab matched session "{slug}". Attempting recovery.\n', encoding="utf-8"
     )
@@ -1310,6 +1322,26 @@ def test_direct_web_multi_child_no_submission_settlement_is_hash_bound(tmp_path:
     assert proof["settlement_eligibility"] == "oracle-web-multi-child/v1"
     assert proof["parallel_parent_id"] == parent_id
     assert proof["source_mission_sha256"] == proof["transport_mission_sha256"]
+    for path in (
+        run_dir / "stdout.log", run_dir / "stderr.log", run_dir / "transcript.md",
+        run_dir / "recovery-harvest-stdout.log", run_dir / "recovery-harvest-stderr.log",
+    ):
+        original = path.read_text(encoding="utf-8")
+        path.write_text(original + "https://chatgpt.com/c/exact-child\n", encoding="utf-8")
+        assert runner.STATE.proven_user_confirmed_no_submission(state_path) is None
+        path.write_text(original, encoding="utf-8")
+    for path, replacement in (
+        (tmp_path / "mission.md", "changed source"),
+        (run_dir / "mission.md", "changed transport"),
+        (oracle_output / "lanes" / "lane" / "oracle.json", "{}"),
+        (oracle_output / "result.json", "{}"),
+    ):
+        original = path.read_text(encoding="utf-8")
+        path.write_text(replacement, encoding="utf-8")
+        assert runner.STATE.proven_user_confirmed_no_submission(state_path) is None
+        path.write_text(original, encoding="utf-8")
+    (run_dir / "output.md").write_text("unexpected output", encoding="utf-8")
+    assert runner.STATE.proven_user_confirmed_no_submission(state_path) is None
 
 
 def test_direct_web_multi_child_settlement_requires_recovery_pair(tmp_path: Path) -> None:
@@ -1330,7 +1362,7 @@ def test_direct_web_multi_child_settlement_requires_recovery_pair(tmp_path: Path
     assert exc.value.code == "NO_SUBMISSION_EVIDENCE_INCOMPLETE"
 
 
-@pytest.mark.parametrize("field", ["parallel_parent_id", "mission_sha256", "oracle_locator"])
+@pytest.mark.parametrize("field", ["parallel_parent_id", "mission_sha256", "oracle_locator", "requested_run_id"])
 def test_direct_web_multi_child_settlement_rejects_identity_mismatch(tmp_path: Path, field: str) -> None:
     runner = load_runner()
     config = runner.STATE.load_manifest(manifest(tmp_path, parallel_parent_id="b" * 64))
@@ -1349,7 +1381,10 @@ def test_direct_web_multi_child_settlement_rejects_identity_mismatch(tmp_path: P
     elif field == "mission_sha256":
         state["mission"]["sha256"] = "0" * 64
     else:
-        state["oracle"]["session_locator"] = "oracle-foreign"
+        if field == "oracle_locator":
+            state["oracle"]["session_locator"] = "oracle-foreign"
+        else:
+            state["requested_run_id"] = layout.run_id
     runner.STATE.write_json_atomic(layout.state_path, state)
 
     with pytest.raises((runner.STATE.OracleStateError, runner.OracleRunError)) as exc:

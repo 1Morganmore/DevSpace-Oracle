@@ -141,6 +141,7 @@ def load_manifest(path: Path) -> dict[str, Any]:
         ).expanduser().resolve(),
         "allowed_worktree_roots": allowed_worktrees,
         "manifest_sha256": hashlib.sha256(path.resolve(strict=True).read_bytes()).hexdigest(),
+        "manifest_path": path.resolve(strict=True),
         "next_stage_binding": value.get("next_stage_binding") if isinstance(value.get("next_stage_binding"), dict) else {},
     }
 
@@ -153,6 +154,17 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
 def _child_manifest(config: dict[str, Any], lane: dict[str, Any], parent_id: str) -> Path:
     lane_root = config["output_dir"] / "lanes" / lane["id"]
     manifest = lane_root / "oracle.json"
+    provenance = lane_root / "child-provenance.json"
+    _write_json(provenance, {
+        "schema": "codex.chatgpt.oracle-multi-child-provenance/v1",
+        "parent_id": parent_id,
+        "parent_manifest_path": str(config["manifest_path"]),
+        "parent_manifest_sha256": config["manifest_sha256"],
+        "project_root": str(lane.get("project_root") or config["project_root"]),
+        "lane_id": lane["id"],
+        "mission_path": str(lane["mission_path"]),
+        "mission_sha256": hashlib.sha256(lane["mission_path"].read_bytes()).hexdigest(),
+    })
     _write_json(
         manifest,
         {
@@ -168,6 +180,7 @@ def _child_manifest(config: dict[str, Any], lane: dict[str, Any], parent_id: str
             "research": "off",
             "archive": "auto",
             "parallel_parent_id": parent_id,
+            "web_multi_child_provenance_path": str(provenance),
         },
     )
     return manifest

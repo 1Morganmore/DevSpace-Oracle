@@ -125,6 +125,7 @@ MODEL_RE = re.compile(r"^[a-zA-Z0-9._ -]+$")
 PARENT_ID_RE = re.compile(r"^[a-f0-9]{32,64}$")
 RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{7,95}$")
 WEB_MULTI_CHILD_RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[a-f0-9]{12}$")
+CHATGPT_CONVERSATION_URL_RE = re.compile(r"https://chatgpt\.com/c/[A-Za-z0-9_-]+", re.IGNORECASE)
 _THREAD_MUTEXES: dict[str, threading.Lock] = {}
 _THREAD_MUTEXES_GUARD = threading.Lock()
 
@@ -162,6 +163,8 @@ class OracleConfig:
     task_outcome_contract: str
     parallel_parent_id: str | None
     requested_run_id: str | None
+    web_multi_child_provenance_path: Path | None
+    web_multi_child_provenance_sha256: str | None
 
 
 @dataclass(frozen=True)
@@ -431,6 +434,9 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
     requested_run_id = str(payload.get("run_id") or "").strip() or None
     if requested_run_id is not None and RUN_ID_RE.fullmatch(requested_run_id) is None:
         raise OracleStateError("RUN_ID_INVALID", "run_id must be a safe 8-96 character identifier")
+    provenance_raw = payload.get("web_multi_child_provenance_path")
+    provenance_path = exact_regular_file(provenance_raw, label="web_multi_child_provenance_path") if provenance_raw else None
+    provenance_sha256 = sha256_file(provenance_path) if provenance_path else None
     return OracleConfig(
         project_root,
         mission_path,
@@ -453,6 +459,8 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
         task_outcome_contract,
         parallel_parent_id,
         requested_run_id,
+        provenance_path,
+        provenance_sha256,
     )
 
 
@@ -521,6 +529,11 @@ def state_payload(config: OracleConfig, layout: RunLayout, *, status: str, resol
             "archive": config.archive,
         },
         "parallel_parent_id": config.parallel_parent_id,
+        "requested_run_id": config.requested_run_id,
+        "web_multi_child_provenance": (
+            {"path": str(config.web_multi_child_provenance_path), "sha256": config.web_multi_child_provenance_sha256}
+            if config.web_multi_child_provenance_path else None
+        ),
         "transport_status": "prepared",
         "task_outcome_contract": config.task_outcome_contract,
         "task_outcome": "not_applicable" if config.transport == "pro-attachment-only" else "pending",
@@ -947,6 +960,64 @@ def _comprehensive_no_submission_evidence(state_path: Path) -> dict[str, Any] | 
     }
 
 
+def _web_multi_child_provenance(
+    state: dict[str, Any], run_dir: Path, project_root: Path, source_path: Path, parent_id: str, locator: str,
+) -> dict[str, Any] | None:
+    """Validate new provenance, or the exact legacy result/lane pair when present."""
+    raw = state.get("web_multi_child_provenance")
+    candidates: list[tuple[Path, dict[str, Any] | None]] = []
+    if isinstance(raw, dict):
+        path = Path(str(raw.get("path") or ""))
+        try:
+            if not path.is_absolute() or path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != str(raw.get("sha256") or ""):
+                return None
+            candidates.append((path, json.loads(path.read_text(encoding="utf-8", errors="strict"))))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+    else:
+        # Legacy Oracle Multi did not copy lane provenance into state.  Its
+        # run-owned result entry and lane manifest are sufficient only when
+        # they identify this exact run directory and Oracle locator.
+        for result_path in project_root.glob("runtime/*/oracle_output/result.json"):
+            try:
+                result = json.loads(result_path.read_text(encoding="utf-8", errors="strict"))
+                lanes = result.get("lanes") if isinstance(result.get("lanes"), list) else []
+                matching = [lane for lane in lanes if isinstance(lane, dict) and Path(str(lane.get("run_dir") or "")).resolve() == run_dir and str(lane.get("session_locator") or "") == locator]
+                if result.get("schema") != "codex.chatgpt.oracle-multi-result/v1" or str(result.get("parent_id") or "") != parent_id or len(matching) != 1:
+                    continue
+                lane_id = str(matching[0].get("id") or "")
+                lane_manifest = result_path.parent / "lanes" / lane_id / "oracle.json"
+                candidates.append((lane_manifest, json.loads(lane_manifest.read_text(encoding="utf-8", errors="strict"))))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                return None
+    if len(candidates) != 1:
+        return None
+    path, value = candidates[0]
+    if not isinstance(value, dict):
+        return None
+    if value.get("schema") == "codex.chatgpt.oracle-multi-child-provenance/v1":
+        parent_manifest = Path(str(value.get("parent_manifest_path") or ""))
+        try:
+            if hashlib.sha256(parent_manifest.read_bytes()).hexdigest() != str(value.get("parent_manifest_sha256") or ""):
+                return None
+            parent = json.loads(parent_manifest.read_text(encoding="utf-8", errors="strict"))
+            lanes = parent.get("solvers") if isinstance(parent.get("solvers"), list) else []
+            lane = next((item for item in lanes if isinstance(item, dict) and str(item.get("id") or "") == str(value.get("lane_id") or "")), None)
+            if not isinstance(lane, dict) or parent.get("schema") != "codex.chatgpt.oracle-multi/v1":
+                return None
+            if Path(str(parent.get("project_root") or "")).resolve() != project_root or Path(str(lane.get("mission_path") or "")).resolve() != source_path:
+                return None
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+    else:
+        lane = value
+    if str(value.get("parent_id") or value.get("parallel_parent_id") or "") != parent_id:
+        return None
+    if Path(str(value.get("project_root") or "")).resolve() != project_root or Path(str(value.get("mission_path") or "")).resolve() != source_path:
+        return None
+    return {"path": str(path), "sha256": sha256_file(path)}
+
+
 def _web_multi_child_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
     """Return fail-closed settlement evidence for a direct Oracle Multi child."""
     state = load_state(state_path)
@@ -954,7 +1025,7 @@ def _web_multi_child_no_submission_evidence(state_path: Path) -> dict[str, Any] 
         return None
     parent_id = str(state.get("parallel_parent_id") or "").strip().casefold()
     run_id = str(state.get("run_id") or "")
-    if PARENT_ID_RE.fullmatch(parent_id) is None or WEB_MULTI_CHILD_RUN_ID_RE.fullmatch(run_id) is None:
+    if PARENT_ID_RE.fullmatch(parent_id) is None or WEB_MULTI_CHILD_RUN_ID_RE.fullmatch(run_id) is None or state.get("requested_run_id") is not None:
         return None
     if state.get("terminal_harvested") is True or _state_has_conversation_url(state):
         return None
@@ -973,8 +1044,18 @@ def _web_multi_child_no_submission_evidence(state_path: Path) -> dict[str, Any] 
         return None
     try:
         stdout_text = stdout_bytes.decode("utf-8", errors="strict")
-        stderr_bytes.decode("utf-8", errors="strict")
+        stderr_text = stderr_bytes.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
+        return None
+    transcript_record = _artifact_bytes(state, "transcript")
+    if transcript_record is None:
+        return None
+    transcript_path, transcript_bytes = transcript_record
+    try:
+        transcript_text = transcript_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    if transcript_path.resolve() != (run_dir / "transcript.md").resolve() or transcript_path.is_symlink() or any(CHATGPT_CONVERSATION_URL_RE.search(text) for text in (stdout_text, stderr_text, transcript_text)):
         return None
     oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
     locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
@@ -1000,6 +1081,9 @@ def _web_multi_child_no_submission_evidence(state_path: Path) -> dict[str, Any] 
     transport_sha256 = hashlib.sha256(transport_bytes).hexdigest()
     if not re.fullmatch(r"[a-f0-9]{64}", mission_sha256) or source_sha256 != mission_sha256 or transport_sha256 != mission_sha256 or source_bytes != transport_bytes:
         return None
+    provenance = _web_multi_child_provenance(state, run_dir, project_root, source_path, parent_id, locator)
+    if provenance is None:
+        return None
     recovery_records: list[dict[str, str]] = []
     for recovery_stdout in sorted(run_dir.glob("recovery-*-stdout.log"), key=lambda item: item.name):
         recovery_stderr = recovery_stdout.with_name(recovery_stdout.name.replace("-stdout.log", "-stderr.log"))
@@ -1011,7 +1095,7 @@ def _web_multi_child_no_submission_evidence(state_path: Path) -> dict[str, Any] 
             recovery_text = b"\n".join((recovery_stdout_bytes, recovery_stderr_bytes)).decode("utf-8", errors="strict")
         except (OSError, UnicodeDecodeError):
             return None
-        if ORACLE_RECOVERY_STATE_RE.search(recovery_text) or ORACLE_NO_LIVE_TAB_MARKER not in recovery_text or f'"{locator}"' not in recovery_text or ORACLE_NO_RECOVERABLE_URL_MARKER not in recovery_text:
+        if CHATGPT_CONVERSATION_URL_RE.search(recovery_text) or ORACLE_RECOVERY_STATE_RE.search(recovery_text) or ORACLE_NO_LIVE_TAB_MARKER not in recovery_text or f'"{locator}"' not in recovery_text or ORACLE_NO_RECOVERABLE_URL_MARKER not in recovery_text:
             return None
         recovery_records.append({"stdout_name": recovery_stdout.name, "stdout_sha256": hashlib.sha256(recovery_stdout_bytes).hexdigest(), "stderr_name": recovery_stderr.name, "stderr_sha256": hashlib.sha256(recovery_stderr_bytes).hexdigest()})
     if not recovery_records:
@@ -1028,8 +1112,30 @@ def _web_multi_child_no_submission_evidence(state_path: Path) -> dict[str, Any] 
     }
 
 
+def _settlement_logs_have_conversation_url(state_path: Path) -> bool:
+    state = load_state(state_path)
+    for name in ("stdout", "stderr", "transcript"):
+        record = _artifact_bytes(state, name)
+        if record is None:
+            return True
+        try:
+            if CHATGPT_CONVERSATION_URL_RE.search(record[1].decode("utf-8", errors="strict")):
+                return True
+        except UnicodeDecodeError:
+            return True
+    try:
+        for path in state_path.parent.glob("recovery-*-*.log"):
+            if path.is_symlink() or CHATGPT_CONVERSATION_URL_RE.search(path.read_text(encoding="utf-8", errors="strict")):
+                return True
+    except (OSError, UnicodeDecodeError):
+        return True
+    return False
+
+
 def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
     """Return exact evidence for a comprehensive stage or direct Web Multi child."""
+    if _settlement_logs_have_conversation_url(state_path):
+        return None
     comprehensive = _comprehensive_no_submission_evidence(state_path)
     if comprehensive is not None:
         return comprehensive
