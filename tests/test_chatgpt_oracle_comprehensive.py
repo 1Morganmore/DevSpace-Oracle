@@ -34,11 +34,20 @@ def manifest(tmp_path: Path) -> Path:
         "project_root": str(tmp_path.resolve()),
         "workflow_dir": str((tmp_path / "workflow").resolve()),
         "initial_mission_path": str(mission.resolve()),
+        "initial_mission_sha256": hashlib.sha256(mission.read_bytes()).hexdigest(),
         "app_name": "DevSpace",
         "model": "gpt-5.6",
         "local_gate_command": ["python", "-c", "raise SystemExit(0)"],
     }), encoding="utf-8")
     return path
+
+
+def run_workflow(module, path: Path, **kwargs):
+    return module.run_workflow(
+        path,
+        expected_manifest_sha256=module.sha(path),
+        **kwargs,
+    )
 
 
 def assert_pro_context(module, payload: dict, mission: Path, evidence: tuple[Path, ...]) -> Path:
@@ -102,6 +111,7 @@ def test_manifest_snapshot_remains_authoritative_across_mutex_entry(monkeypatch,
                 "project_root": str(other_root.resolve()),
                 "workflow_dir": str((other_root / "workflow").resolve()),
                 "initial_mission_path": str(other_mission.resolve()),
+                "initial_mission_sha256": hashlib.sha256(other_mission.read_bytes()).hexdigest(),
                 "app_name": "DevSpace",
                 "model": "gpt-5.6",
                 "local_gate_command": ["python", "-c", "raise SystemExit(0)"],
@@ -112,7 +122,7 @@ def test_manifest_snapshot_remains_authoritative_across_mutex_entry(monkeypatch,
 
     monkeypatch.setattr(module.RUNNER.STATE, "project_submit_mutex", lambda *args, **kwargs: MutatingMutex())
 
-    result = module.run_workflow(
+    result = run_workflow(module,
         path,
         oracle_execute=lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("the swapped manifest must never submit")
@@ -123,6 +133,51 @@ def test_manifest_snapshot_remains_authoritative_across_mutex_entry(monkeypatch,
     assert result["status"] == "complete"
     assert result["manifest_sha256"] == hashlib.sha256(original_bytes).hexdigest()
     assert locked_roots == [config["project_root"]]
+
+
+def test_manifest_and_initial_mission_require_previewed_hashes(tmp_path: Path) -> None:
+    module = load()
+    path = manifest(tmp_path)
+    expected = module.sha(path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    payload["max_stages"] = 9
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(module.WorkflowError, match="changed after dry-run preview"):
+        module.load_manifest(path, expected_manifest_sha256=expected)
+
+    payload["initial_mission_sha256"] = "0" * 64
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(module.WorkflowError, match="initial mission changed"):
+        module.load_manifest(path, expected_manifest_sha256=module.sha(path))
+
+    del payload["initial_mission_sha256"]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(module.WorkflowError, match="initial_mission_sha256"):
+        module.load_manifest(path, expected_manifest_sha256=module.sha(path))
+
+
+def test_main_requires_and_propagates_comprehensive_preview_hash(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    module = load()
+    path = manifest(tmp_path)
+    expected = module.sha(path)
+
+    assert module.main(["--manifest", str(path)]) == 1
+    assert "MANIFEST_SHA256_REQUIRED" in json.loads(capsys.readouterr().out)["error"]["message"]
+
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "run_workflow",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {"ok": True},
+    )
+    assert module.main([
+        "--manifest", str(path), "--expected-manifest-sha256", expected,
+    ]) == 0
+    capsys.readouterr()
+    assert calls == [((path,), {"expected_manifest_sha256": expected, "dry_run": False})]
 
 
 def test_web_authored_relay_reaches_complete_without_host_semantic_rewrite(tmp_path: Path) -> None:
@@ -167,7 +222,7 @@ def test_web_authored_relay_reaches_complete_without_host_semantic_rewrite(tmp_p
         run_dir.mkdir()
         return {"ok": True, "run_dir": str(run_dir)}
 
-    result = module.run_workflow(
+    result = run_workflow(module,
         manifest(tmp_path),
         oracle_execute=fake_execute,
         local_gate_runner=lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, "gate ok", ""),
@@ -234,7 +289,7 @@ def test_pro_stage_runs_oracle_attachment_only_and_materializes_bound_receipt(mo
         regular_receipt(mission, stage, next_stage, next_mission)
         return {"ok": True, "run_dir": str(mission.parent / "run")}
 
-    result = module.run_workflow(
+    result = run_workflow(module,
         manifest(tmp_path),
         oracle_execute=fake_execute,
         local_gate_runner=lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""),
@@ -303,7 +358,7 @@ def test_pro_exact_recovery_materializes_output_without_resubmission(tmp_path: P
         assert action == "harvest"
         return {"ok": True, "status": "complete", "run_dir": str(run_dir), "output_path": str(oracle_output)}
 
-    result = module.run_workflow(
+    result = run_workflow(module,
         workflow_path, oracle_execute=no_pro_resubmit, oracle_recover=fake_recover
     )
     assert result["status"] == "attention_required"
@@ -355,7 +410,7 @@ def test_missing_receipt_fails_closed_without_duplicate_stage(tmp_path: Path) ->
         calls += 1
         return {"ok": True, "run_dir": str(tmp_path / "run")}
 
-    result = module.run_workflow(manifest(tmp_path), oracle_execute=fake_execute)
+    result = run_workflow(module, manifest(tmp_path), oracle_execute=fake_execute)
     assert result["ok"] is False
     assert result["status"] == "awaiting_receipt"
     assert calls == 1
@@ -390,7 +445,7 @@ def test_failing_receipt_cannot_complete(tmp_path: Path) -> None:
         return {"ok": True, "run_dir": str(mission.parent / "run")}
 
     try:
-        module.run_workflow(manifest(tmp_path), oracle_execute=fake_execute)
+        run_workflow(module, manifest(tmp_path), oracle_execute=fake_execute)
     except module.WorkflowError as exc:
         assert "did not pass" in str(exc)
     else:
@@ -525,7 +580,7 @@ def test_web_multi_branch_is_bound_and_resumes_at_review(tmp_path: Path) -> None
             "next_stage_result_path": str(receipt),
         }
 
-    result = module.run_workflow(
+    result = run_workflow(module,
         workflow_path,
         oracle_execute=fake_oracle,
         multi_execute=fake_multi,
@@ -554,7 +609,7 @@ def test_web_multi_requires_receipt_path_before_submission(tmp_path: Path) -> No
         raise AssertionError("missing Multi receipt path must fail before submission")
 
     with pytest.raises(module.WorkflowError, match="absolute next_stage_result_path"):
-        module.run_workflow(workflow, multi_execute=never_submit)
+        run_workflow(module, workflow, multi_execute=never_submit)
     assert calls == 0
 
 
@@ -587,7 +642,7 @@ def test_failed_web_multi_preserves_exact_execution_identity(tmp_path: Path) -> 
         module.MULTI._publish_result(result_path, terminal, kwargs["terminal_seal"])
         return {"ok": False, **terminal}
 
-    result = module.run_workflow(workflow, multi_execute=partial_multi)
+    result = run_workflow(module, workflow, multi_execute=partial_multi)
     assert result["status"] == "attention_required"
     assert result["multi_execution_id"] == seen["execution"]
     assert result["multi_manifest_sha256"] == seen["manifest"] == source_sha
@@ -596,6 +651,7 @@ def test_failed_web_multi_preserves_exact_execution_identity(tmp_path: Path) -> 
     assert result["current_stage"] == "web-multi"
     assert result["multi_terminal_status"] == "partial"
     assert result["multi_result_sha256"] == module.sha(Path(result["multi_result_path"]))
+    assert "multi_receipt_sha256" not in result
 
     receipt_path = Path(result["multi_receipt_path"])
     output = tmp_path / "partial-output.md"
@@ -626,7 +682,7 @@ def test_failed_web_multi_preserves_exact_execution_identity(tmp_path: Path) -> 
         calls["oracle"] += 1
         raise AssertionError("persisted partial Multi must not advance")
 
-    recovered = module.run_workflow(
+    recovered = run_workflow(module,
         workflow, multi_execute=never_multi, oracle_execute=never_oracle
     )
     assert recovered["status"] == "attention_required"
@@ -639,7 +695,7 @@ def test_failed_web_multi_preserves_exact_execution_identity(tmp_path: Path) -> 
     assert calls == {"multi": 0, "oracle": 0}
 
     result_path.write_bytes(result_path.read_bytes() + b"\n")
-    mutated = module.run_workflow(
+    mutated = run_workflow(module,
         workflow, multi_execute=never_multi, oracle_execute=never_oracle
     )
     assert mutated["status"] == "attention_required"
@@ -657,8 +713,10 @@ def test_dry_run_leaves_no_host_workflow_state_and_real_run_can_follow(tmp_path:
         previews.append(dry_run)
         return {"ok": True, "status": "dry-run"}
 
-    preview = module.run_workflow(path, dry_run=True, oracle_execute=fake_preview)
+    preview = run_workflow(module, path, dry_run=True, oracle_execute=fake_preview)
     assert preview["ok"] is True
+    assert preview["manifest_sha256"] == module.sha(path)
+    assert preview["input_mission_sha256"] == module.load_manifest(path)["initial_mission_sha256"]
     assert previews == [True]
     config = module.load_manifest(path)
     assert not module._state_path(config, "a" * 32).exists()
@@ -670,7 +728,7 @@ def test_dry_run_leaves_no_host_workflow_state_and_real_run_can_follow(tmp_path:
         calls += 1
         return {"ok": True, "run_dir": str(tmp_path / "fake-run")}
 
-    real = module.run_workflow(path, oracle_execute=fake_real)
+    real = run_workflow(module, path, oracle_execute=fake_real)
     assert real["status"] == "awaiting_receipt"
     assert calls == 1
 
@@ -750,10 +808,10 @@ def test_running_oracle_stage_recovers_exact_run_without_resubmission(tmp_path: 
         return {"ok": True, "status": "complete", "run_dir": str(run_dir)}
 
     path = manifest(tmp_path)
-    first = module.run_workflow(path, oracle_execute=fake_execute, oracle_recover=fake_recover)
+    first = run_workflow(module, path, oracle_execute=fake_execute, oracle_recover=fake_recover)
     assert first["status"] == "attention_required"
     assert first["oracle_run_id"] == first["current_attempt_id"]
-    second = module.run_workflow(path, oracle_execute=fake_execute, oracle_recover=fake_recover)
+    second = run_workflow(module, path, oracle_execute=fake_execute, oracle_recover=fake_recover)
     assert second["status"] == "awaiting_receipt"
     assert submitted == 1
     assert [item[1:] for item in recovered] == [("harvest", False)]
@@ -797,12 +855,12 @@ def test_post_submit_watchdog_persists_same_attempt_and_only_exact_recovers(
         return {"ok": True, "status": "complete", "run_dir": str(run_dir)}
 
     workflow_manifest = manifest(tmp_path)
-    first = module.run_workflow(
+    first = run_workflow(module,
         workflow_manifest,
         oracle_execute=watchdog_execute,
         oracle_recover=exact_recover,
     )
-    second = module.run_workflow(
+    second = run_workflow(module,
         workflow_manifest,
         oracle_execute=watchdog_execute,
         oracle_recover=exact_recover,
@@ -835,7 +893,7 @@ def test_unambiguous_app_mention_pre_submit_failure_retries_once(tmp_path: Path)
             stdout.write_text("ERROR: unrelated terminal failure\n", encoding="utf-8")
         return {"ok": False, "run_dir": str(run_dir)}
 
-    result = module.run_workflow(manifest(tmp_path), oracle_execute=fake_execute)
+    result = run_workflow(module, manifest(tmp_path), oracle_execute=fake_execute)
 
     assert result["status"] == "attention_required"
     assert submitted == 2
@@ -865,7 +923,7 @@ def test_launch_time_pre_submit_failures_also_retry_once(tmp_path: Path, marker:
             stdout.write_text("ERROR: unrelated terminal failure\n", encoding="utf-8")
         return {"ok": False, "run_dir": str(run_dir)}
 
-    result = module.run_workflow(manifest(tmp_path), oracle_execute=fake_execute)
+    result = run_workflow(module, manifest(tmp_path), oracle_execute=fake_execute)
 
     assert submitted == 2
     assert result["status"] == "attention_required"
@@ -900,7 +958,7 @@ def test_version_resolution_prelaunch_failure_retries_same_stage_once_then_stops
         raise AssertionError("proven pre-submit failures must not invoke exact-session recovery")
 
     workflow_manifest = manifest(tmp_path)
-    result = module.run_workflow(
+    result = run_workflow(module,
         workflow_manifest,
         oracle_execute=fake_execute,
         oracle_recover=forbidden_recover,
@@ -1012,7 +1070,7 @@ def test_user_confirmed_settlement_submits_one_bound_replacement_then_never_a_se
         return {"ok": False, "run_dir": str(run_dir)}
 
     workflow_manifest = manifest(tmp_path)
-    first = module.run_workflow(workflow_manifest, oracle_execute=fake_execute)
+    first = run_workflow(module, workflow_manifest, oracle_execute=fake_execute)
     assert first["status"] == "attention_required"
     assert len(submissions) == 1
 
@@ -1021,7 +1079,7 @@ def test_user_confirmed_settlement_submits_one_bound_replacement_then_never_a_se
         confirmation=module.RUNNER.STATE.USER_CONFIRMED_NO_SUBMISSION,
         reason="user confirmed the exact attempt was not submitted",
     )
-    second = module.run_workflow(workflow_manifest, oracle_execute=fake_execute)
+    second = run_workflow(module, workflow_manifest, oracle_execute=fake_execute)
     assert second["status"] == "attention_required"
     assert len(submissions) == 2
     settlement_records = [
@@ -1038,7 +1096,7 @@ def test_user_confirmed_settlement_submits_one_bound_replacement_then_never_a_se
         recoveries.append(run_dir)
         return {"ok": False, "status": "attention_required", "run_dir": str(run_dir)}
 
-    third = module.run_workflow(
+    third = run_workflow(module,
         workflow_manifest,
         oracle_execute=lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("a second replacement must never be submitted")
@@ -1151,7 +1209,7 @@ def test_durable_output_prevents_pre_submit_retry_even_with_a_launch_marker(tmp_
         (run_dir / "output.md").write_text("partial provider answer", encoding="utf-8")
         return {"ok": False, "run_dir": str(run_dir)}
 
-    result = module.run_workflow(manifest(tmp_path), oracle_execute=fake_execute)
+    result = run_workflow(module, manifest(tmp_path), oracle_execute=fake_execute)
 
     assert submitted == 1
     assert result["status"] == "attention_required"
@@ -1175,7 +1233,7 @@ def test_running_stage_does_not_trust_existing_receipt_before_terminal_authority
         return {"ok": False, "status": "session_live", "run_dir": str(args[0])}
 
     path = manifest(tmp_path)
-    first = module.run_workflow(path, oracle_execute=fake_execute, oracle_recover=fake_recover)
+    first = run_workflow(module, path, oracle_execute=fake_execute, oracle_recover=fake_recover)
     receipt_path = Path(first["receipt_path"])
     output = receipt_path.parent / "output.md"
     output.write_text("plan", encoding="utf-8")
@@ -1195,7 +1253,7 @@ def test_running_stage_does_not_trust_existing_receipt_before_terminal_authority
         "blocker": "",
     }), encoding="utf-8")
 
-    second = module.run_workflow(path, oracle_execute=fake_execute, oracle_recover=fake_recover)
+    second = run_workflow(module, path, oracle_execute=fake_execute, oracle_recover=fake_recover)
 
     assert second["status"] == "running"
     assert second["current_stage"] == "plan"
@@ -1552,7 +1610,7 @@ def test_awaiting_receipt_rebind_advances_to_next_stage_without_replaying_plan(t
             return {"ok": True, "run_dir": str(run_dir)}
         return {"ok": False, "run_dir": str(run_dir)}
 
-    result = module.run_workflow(manifest(tmp_path), oracle_execute=fake_execute)
+    result = run_workflow(module, manifest(tmp_path), oracle_execute=fake_execute)
     assert result["status"] == "attention_required"
     assert result["current_stage"] == "review"
     assert calls == ["plan", "review"]
@@ -1614,7 +1672,7 @@ def test_awaiting_relative_receipt_resumes_same_workflow_without_replaying_plan(
         calls.append("review")
         return {"ok": False, "run_dir": str(_oracle_running_state(module, oracle_manifest))}
 
-    result = module.run_workflow(workflow_path, oracle_execute=review_only)
+    result = run_workflow(module, workflow_path, oracle_execute=review_only)
 
     assert result["status"] == "attention_required"
     assert result["current_stage"] == "review"
@@ -1653,6 +1711,7 @@ def test_running_web_multi_rebinds_only_persisted_parent_result(tmp_path: Path) 
         "multi_execution_id": parent_id, "multi_manifest_sha256": module.sha(multi_source),
         "multi_result_path": str(result_path), "multi_receipt_path": str(receipt),
         "multi_terminal_status": "complete", "multi_result_sha256": module.sha(result_path),
+        "multi_receipt_sha256": module.sha(receipt),
     })
     calls = 0
 
@@ -1664,7 +1723,7 @@ def test_running_web_multi_rebinds_only_persisted_parent_result(tmp_path: Path) 
     def never_multi(*args, **kwargs):
         raise AssertionError("stored Web Multi result must be rebound, not resubmitted")
 
-    result = module.run_workflow(path, oracle_execute=fake_oracle, multi_execute=never_multi)
+    result = run_workflow(module, path, oracle_execute=fake_oracle, multi_execute=never_multi)
     assert result["status"] == "attention_required"
     assert result["current_stage"] == "review"
     assert calls == 1
@@ -1710,7 +1769,7 @@ def test_running_web_multi_preserves_producer_sealed_failure(tmp_path: Path) -> 
     def never_submit(*args, **kwargs):
         raise AssertionError("terminal Multi recovery must never resubmit")
 
-    first = module.run_workflow(path, oracle_execute=never_submit, multi_execute=never_submit)
+    first = run_workflow(module, path, oracle_execute=never_submit, multi_execute=never_submit)
     persisted = json.loads(state_path.read_text(encoding="utf-8"))
     assert first["status"] == "attention_required"
     assert persisted["multi_terminal_status"] == "failed"
@@ -1743,14 +1802,17 @@ def test_running_web_multi_preserves_producer_sealed_failure(tmp_path: Path) -> 
         "next_stage_result_path": str(receipt),
     }), encoding="utf-8")
 
-    second = module.run_workflow(path, oracle_execute=never_submit, multi_execute=never_submit)
+    second = run_workflow(module, path, oracle_execute=never_submit, multi_execute=never_submit)
     assert second["status"] == "attention_required"
     assert second["recovery"]["error"] == "MULTI_TERMINAL_RESULT_CHANGED"
     assert second["multi_terminal_status"] == "failed"
     assert second["multi_result_sha256"] == terminal_sha
 
 
-def test_web_multi_crash_after_host_seal_rejects_replacement_result(tmp_path: Path) -> None:
+@pytest.mark.parametrize("replacement", ["result", "receipt"])
+def test_web_multi_crash_after_host_seal_rejects_replacement(
+    tmp_path: Path, replacement: str
+) -> None:
     module = load()
     workflow = manifest(tmp_path)
     config = module.load_manifest(workflow)
@@ -1772,11 +1834,11 @@ def test_web_multi_crash_after_host_seal_rejects_replacement_result(tmp_path: Pa
     def crashing_multi(path: Path, **kwargs):
         stored = module._json(state_path)
         receipt = Path(stored["multi_receipt_path"])
-        output = tmp_path / "replacement-output.md"
-        review = tmp_path / "replacement-review.md"
-        output.write_text("replacement", encoding="utf-8")
-        review.write_text("replacement review", encoding="utf-8")
-        receipt.write_text(json.dumps({
+        output = tmp_path / "sealed-output.md"
+        review = tmp_path / "sealed-review.md"
+        output.write_text("sealed", encoding="utf-8")
+        review.write_text("sealed review", encoding="utf-8")
+        receipt_payload = {
             "schema": module.RECEIPT_SCHEMA,
             "workflow_id": config["workflow_id"],
             "stage": "web-multi",
@@ -1790,7 +1852,8 @@ def test_web_multi_crash_after_host_seal_rejects_replacement_result(tmp_path: Pa
             "next_mission_sha256": module.sha(review),
             "ready_for_next": True,
             "blocker": "",
-        }), encoding="utf-8")
+        }
+        receipt.write_text(json.dumps(receipt_payload), encoding="utf-8")
         terminal = {
             "schema": module.MULTI.RESULT_SCHEMA,
             "status": "complete",
@@ -1803,15 +1866,37 @@ def test_web_multi_crash_after_host_seal_rejects_replacement_result(tmp_path: Pa
         result_path = Path(stored["multi_result_path"])
         kwargs["terminal_seal"](result_path, raw)
         result_path.parent.mkdir(parents=True, exist_ok=True)
-        result_path.write_text(json.dumps({**terminal, "lanes": [{"id": "replacement"}]}), encoding="utf-8")
+        if replacement == "result":
+            result_path.write_text(
+                json.dumps({**terminal, "lanes": [{"id": "replacement"}]}),
+                encoding="utf-8",
+            )
+        else:
+            result_path.write_bytes(raw)
+            replacement_output = tmp_path / "replacement-output.md"
+            replacement_review = tmp_path / "replacement-review.md"
+            replacement_output.write_text("replacement", encoding="utf-8")
+            replacement_review.write_text("replacement review", encoding="utf-8")
+            receipt.write_text(json.dumps({
+                **receipt_payload,
+                "output_path": str(replacement_output),
+                "output_sha256": module.sha(replacement_output),
+                "next_mission_path": str(replacement_review),
+                "next_mission_sha256": module.sha(replacement_review),
+            }), encoding="utf-8")
         raise RuntimeError("simulated crash after host seal")
 
     with pytest.raises(RuntimeError, match="simulated crash"):
-        module.run_workflow(workflow, multi_execute=crashing_multi)
+        run_workflow(module, workflow, multi_execute=crashing_multi)
 
     sealed = module._json(state_path)
     assert sealed["multi_terminal_status"] == "complete"
-    assert sealed["multi_result_sha256"] != module.sha(Path(sealed["multi_result_path"]))
+    if replacement == "result":
+        assert sealed["multi_result_sha256"] != module.sha(Path(sealed["multi_result_path"]))
+        assert sealed["multi_receipt_sha256"] == module.sha(Path(sealed["multi_receipt_path"]))
+    else:
+        assert sealed["multi_result_sha256"] == module.sha(Path(sealed["multi_result_path"]))
+        assert sealed["multi_receipt_sha256"] != module.sha(Path(sealed["multi_receipt_path"]))
     calls = {"multi": 0, "oracle": 0}
 
     def never_multi(*args, **kwargs):
@@ -1822,11 +1907,13 @@ def test_web_multi_crash_after_host_seal_rejects_replacement_result(tmp_path: Pa
         calls["oracle"] += 1
         raise AssertionError("replacement result must not advance")
 
-    recovered = module.run_workflow(
+    recovered = run_workflow(module,
         workflow, multi_execute=never_multi, oracle_execute=never_oracle
     )
     assert recovered["status"] == "attention_required"
-    assert recovered["recovery"]["error"] == "MULTI_TERMINAL_RESULT_CHANGED"
+    assert recovered["recovery"]["error"] == (
+        "MULTI_TERMINAL_RESULT_CHANGED" if replacement == "result" else "MULTI_RECEIPT_CHANGED"
+    )
     assert recovered["multi_result_sha256"] == sealed["multi_result_sha256"]
     assert calls == {"multi": 0, "oracle": 0}
 
@@ -1854,6 +1941,7 @@ def test_web_multi_recovery_rejects_persisted_identity_drift(tmp_path: Path, mut
         "multi_result_path": str(result_path), "multi_execution_id": parent_id,
         "multi_manifest_sha256": manifest_sha, "multi_receipt_path": str(receipt),
         "multi_terminal_status": "complete", "multi_result_sha256": module.sha(result_path),
+        "multi_receipt_sha256": "a" * 64,
     })
     assert recovered == {"ok": False, "error": "MULTI_RESULT_IDENTITY_INVALID"}
 
@@ -1978,7 +2066,7 @@ def test_pro_rejects_empty_transition_before_submission(tmp_path: Path) -> None:
         raise AssertionError("empty Pro transition must fail before submission")
 
     with pytest.raises(module.WorkflowError, match="nonempty"):
-        module.run_workflow(workflow, oracle_execute=never_submit)
+        run_workflow(module, workflow, oracle_execute=never_submit)
     assert calls == 0
 
 
@@ -2011,7 +2099,7 @@ def test_regular_stage_rejects_source_mutation_before_submission(
         raise AssertionError("mutated regular source must fail before submission")
 
     with pytest.raises(module.WorkflowError, match="changed after validation"):
-        module.run_workflow(workflow, oracle_execute=never_submit)
+        run_workflow(module, workflow, oracle_execute=never_submit)
     assert calls == 0
 
 
@@ -2057,7 +2145,7 @@ def test_pro_rejects_ancestor_symlink_for_transition_and_evidence(tmp_path: Path
         raise AssertionError("symlinked Pro transition must fail before submission")
 
     with pytest.raises(module.WorkflowError, match="non-symlink"):
-        module.run_workflow(workflow, oracle_execute=never_submit)
+        run_workflow(module, workflow, oracle_execute=never_submit)
     assert calls == 0
 
 
@@ -2121,7 +2209,7 @@ def test_pro_retry_reuses_frozen_optional_attachment_hash(tmp_path: Path) -> Non
         raise AssertionError("stale retry evidence must fail before submission")
 
     with pytest.raises(module.WorkflowError, match="STALE_HASH"):
-        module.run_workflow(workflow, oracle_execute=never_submit)
+        run_workflow(module, workflow, oracle_execute=never_submit)
     assert calls == 0
 
 
@@ -2170,7 +2258,7 @@ def test_recovered_pro_pre_submit_retry_preserves_frozen_attachment_hash(tmp_pat
         raise AssertionError("stale recovered evidence must fail before resubmission")
 
     with pytest.raises(module.WorkflowError, match="STALE_HASH"):
-        module.run_workflow(
+        run_workflow(module,
             workflow,
             oracle_execute=never_submit,
             oracle_recover=lambda *args, **kwargs: (_ for _ in ()).throw(
@@ -2317,6 +2405,7 @@ def test_regular_stage_rejects_pro_attachment_contract_before_submission(tmp_pat
     )
     payload = json.loads(workflow.read_text(encoding="utf-8"))
     payload["initial_mission_path"] = str(config["initial_mission_path"])
+    payload["initial_mission_sha256"] = module.sha(config["initial_mission_path"])
     workflow.write_text(json.dumps(payload), encoding="utf-8")
     calls = 0
 
@@ -2326,7 +2415,7 @@ def test_regular_stage_rejects_pro_attachment_contract_before_submission(tmp_pat
         raise AssertionError("regular stage contract must fail before submission")
 
     with pytest.raises(module.WorkflowError, match="forbidden for regular DevSpace stages"):
-        module.run_workflow(workflow, oracle_execute=never_submit)
+        run_workflow(module, workflow, oracle_execute=never_submit)
     assert calls == 0
 
 
@@ -2448,7 +2537,7 @@ def test_web_multi_preflight_failure_stays_prepared_and_rejects_changed_mission(
         return {"ok": True, "run_dir": str(mission.parent / "run")}
 
     with pytest.raises(module.MULTI.MultiError):
-        module.run_workflow(workflow_path, oracle_execute=fake_plan)
+        run_workflow(module, workflow_path, oracle_execute=fake_plan)
     config = module.load_manifest(workflow_path)
     stored = module._json(module._state_path(config, "a" * 32))
     assert stored["status"] == "prepared"
@@ -2478,7 +2567,7 @@ def test_web_multi_preflight_failure_stays_prepared_and_rejects_changed_mission(
         return {"ok": False, "parent_id": "d" * 64}
 
     with pytest.raises(module.WorkflowError, match="prepared next mission changed"):
-        module.run_workflow(workflow_path, oracle_execute=fake_plan, multi_execute=fake_multi)
+        run_workflow(module, workflow_path, oracle_execute=fake_plan, multi_execute=fake_multi)
     assert calls == 0
 
 
@@ -2587,7 +2676,7 @@ def test_awaiting_receipt_preserves_source_and_augmented_mission_bindings(tmp_pa
         ))
         return {"ok": True, "run_dir": str(receipt_path.parent / "oracle-run")}
 
-    result = module.run_workflow(path, oracle_execute=fake_oracle)
+    result = run_workflow(module, path, oracle_execute=fake_oracle)
     assert result["status"] == "awaiting_receipt"
     source = Path(result["current_binding_source_path"])
     augmented = Path(result["current_augmented_mission_path"])

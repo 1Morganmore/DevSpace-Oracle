@@ -35,7 +35,8 @@ hand; same-project web submissions stay serialized and the workflow engine owns
 stage identity and recovery.
 
 The manifest supplies absolute `project_root`, `workflow_dir`,
-`initial_mission_path`, stable `workflow_id`, and a nonempty
+`initial_mission_path`, its caller-pinned exact lowercase
+`initial_mission_sha256`, stable `workflow_id`, and a nonempty
 `local_gate_command`. Every regular web stage writes its own next mission and a
 bound `codex.chatgpt.oracle-stage-result/v1` receipt. The host validates
 workflow/stage/attempt/input hashes, UTF-8 paths, output hashes, PASS status,
@@ -72,6 +73,13 @@ source output SHA-256, recovery method, and strict parser error position.
 
 ```powershell
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_comprehensive.py" --manifest C:\project\workflow.json --dry-run
+```
+
+The preview exposes the top-level `manifest_sha256`. For an explicitly
+authorized live workflow, use the same manifest and pass that exact value:
+
+```powershell
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_comprehensive.py" --manifest C:\project\workflow.json --expected-manifest-sha256 <manifest_sha256>
 ```
 
 The review GPT owns plan repair and finalization. It does not merely list

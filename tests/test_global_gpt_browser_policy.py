@@ -114,6 +114,9 @@ def test_web_multi_is_genuine_sessions_with_wave_cap_and_worktrees() -> None:
 def test_comprehensive_is_web_native_relay_with_one_local_gate() -> None:
     value = text(HANDOFF)
     assert "chatgpt_oracle_comprehensive.py" in value
+    assert "initial_mission_sha256" in value
+    assert "manifest_sha256" in value
+    assert "--expected-manifest-sha256" in value
     assert "plan -> optional Pro or Oracle Web Multi -> review" in value
     assert "final web PASS plus a zero-exit local" in value
     assert "host validates" in value

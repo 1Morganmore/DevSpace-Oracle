@@ -129,9 +129,22 @@ def _receipt_path(root: Path, value: Any, *, exists: bool = True) -> tuple[Path,
     return _inside(root, candidate, exists=exists), relative_compat
 
 
-def load_manifest(path: Path) -> dict[str, Any]:
+def load_manifest(
+    path: Path,
+    *,
+    expected_manifest_sha256: str | None = None,
+) -> dict[str, Any]:
     manifest_path = path.expanduser().resolve(strict=True)
     manifest_bytes = manifest_path.read_bytes()
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    if expected_manifest_sha256 is not None:
+        if (
+            not isinstance(expected_manifest_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_manifest_sha256) is None
+        ):
+            raise WorkflowError("expected manifest SHA-256 must be exact lowercase hexadecimal")
+        if manifest_sha256 != expected_manifest_sha256:
+            raise WorkflowError("workflow manifest changed after dry-run preview")
     try:
         value = json.loads(manifest_bytes.decode("utf-8", errors="strict"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -143,6 +156,14 @@ def load_manifest(path: Path) -> dict[str, Any]:
     root = Path(str(value.get("project_root") or "")).expanduser().resolve(strict=True)
     workflow_dir = _inside(root, value.get("workflow_dir"), exists=False)
     mission = _inside(root, value.get("initial_mission_path"))
+    initial_mission_sha256 = value.get("initial_mission_sha256")
+    if (
+        not isinstance(initial_mission_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", initial_mission_sha256) is None
+    ):
+        raise WorkflowError("initial_mission_sha256 must be exact lowercase SHA-256")
+    if sha(mission) != initial_mission_sha256:
+        raise WorkflowError("initial mission changed after workflow authoring")
     maximum = int(value.get("max_stages", 8))
     if not 1 <= maximum <= 12:
         raise WorkflowError("max_stages must be within 1..12")
@@ -167,7 +188,8 @@ def load_manifest(path: Path) -> dict[str, Any]:
         "app_name": app_name,
         "model": str(value.get("model") or "gpt-5.6"),
         "local_gate_command": list(local_gate),
-        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "manifest_sha256": manifest_sha256,
+        "initial_mission_sha256": initial_mission_sha256,
         "workflow_id": workflow_id,
     }
 
@@ -802,8 +824,23 @@ def _validate_receipt(
     stage: str,
     attempt_id: str,
     input_sha: str,
+    *,
+    expected_receipt_sha256: str | None = None,
+    receipt_bytes: bytes | None = None,
 ) -> dict[str, Any]:
-    value = _json(receipt_path)
+    if receipt_bytes is None:
+        receipt_bytes = receipt_path.read_bytes()
+    if expected_receipt_sha256 is not None:
+        if re.fullmatch(r"[0-9a-f]{64}", expected_receipt_sha256) is None:
+            raise WorkflowError("sealed stage receipt SHA-256 is invalid")
+        if hashlib.sha256(receipt_bytes).hexdigest() != expected_receipt_sha256:
+            raise WorkflowError("sealed stage receipt changed before advancement")
+    try:
+        value = json.loads(receipt_bytes.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WorkflowError("stage receipt must be strict UTF-8 JSON") from exc
+    if not isinstance(value, dict):
+        raise WorkflowError("stage receipt must be a JSON object")
     has_schema = "schema" in value
     has_legacy_schema = "schema_version" in value
     schema = value.get("schema")
@@ -1246,9 +1283,15 @@ def _recover_exact_multi_stage(stored: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "MULTI_RECOVERY_IDENTITY_MISSING"}
     terminal_status = str(stored.get("multi_terminal_status") or "")
     terminal_sha = str(stored.get("multi_result_sha256") or "")
+    terminal_receipt_sha = str(stored.get("multi_receipt_sha256") or "")
     if not terminal_status and not terminal_sha:
         return {"ok": False, "error": "MULTI_TERMINAL_SEAL_MISSING"}
     if terminal_status not in {"complete", "partial", "failed"} or re.fullmatch(r"[0-9a-f]{64}", terminal_sha) is None:
+        return {"ok": False, "error": "MULTI_TERMINAL_SEAL_INVALID"}
+    if (
+        terminal_status == "complete"
+        and re.fullmatch(r"[0-9a-f]{64}", terminal_receipt_sha) is None
+    ) or (terminal_status in {"partial", "failed"} and terminal_receipt_sha):
         return {"ok": False, "error": "MULTI_TERMINAL_SEAL_INVALID"}
     try:
         resolved_result_path = result_path.resolve(strict=True)
@@ -1279,11 +1322,19 @@ def _recover_exact_multi_stage(stored: dict[str, Any]) -> dict[str, Any]:
             "multi_result_sha256": terminal_sha,
         }
     actual_receipt = Path(str(result.get("next_stage_result_path") or "")).expanduser()
-    if (
-        not actual_receipt.is_absolute()
-        or actual_receipt.resolve() != expected_receipt.resolve()
-    ):
+    if not actual_receipt.is_absolute() or actual_receipt != expected_receipt:
         return {"ok": False, "error": "MULTI_RESULT_IDENTITY_INVALID"}
+    try:
+        _lexical_nonsymlink(actual_receipt)
+        _lexical_nonsymlink(expected_receipt)
+        resolved_receipt = expected_receipt.resolve(strict=True)
+        if not resolved_receipt.is_file():
+            return {"ok": False, "error": "MULTI_RECEIPT_UNAVAILABLE"}
+        receipt_bytes = resolved_receipt.read_bytes()
+    except Exception as exc:
+        return {"ok": False, "error": "MULTI_RECEIPT_UNAVAILABLE", "detail": str(exc)}
+    if hashlib.sha256(receipt_bytes).hexdigest() != terminal_receipt_sha:
+        return {"ok": False, "error": "MULTI_RECEIPT_CHANGED"}
     return {
         "ok": True,
         "parent_id": str(result["parent_id"]),
@@ -1293,6 +1344,7 @@ def _recover_exact_multi_stage(stored: dict[str, Any]) -> dict[str, Any]:
         "manifest_sha256": expected_manifest_sha,
         "multi_terminal_status": status,
         "multi_result_sha256": terminal_sha,
+        "multi_receipt_sha256": terminal_receipt_sha,
     }
 
 
@@ -1311,7 +1363,7 @@ def _run_workflow_locked(
     config["workflow_dir"].mkdir(parents=True, exist_ok=True)
     if dry_run:
         attempt_id = uuid.uuid4().hex
-        source_sha = sha(config["initial_mission_path"])
+        source_sha = config["initial_mission_sha256"]
         source_bytes = _bound_source_bytes(config["initial_mission_path"], source_sha)
         mission, receipt_path, input_sha, augmented_mission_sha = _stage_mission(
             config, workflow_id, 0, "plan", config["initial_mission_path"], attempt_id,
@@ -1329,6 +1381,7 @@ def _run_workflow_locked(
             "schema": STATE_SCHEMA,
             "status": "dry-run",
             "workflow_id": workflow_id,
+            "manifest_sha256": config["manifest_sha256"],
             "stage": "plan",
             "attempt_id": attempt_id,
             "input_mission_sha256": input_sha,
@@ -1441,6 +1494,7 @@ def _run_workflow_locked(
             receipt = _validate_receipt(
                 config, result_path, workflow_id, "web-multi", attempt_id,
                 str(stored["multi_manifest_sha256"]),
+                expected_receipt_sha256=str(recovered["multi_receipt_sha256"]),
             )
             records.append({"stage": "web-multi", "parent_id": attempt_id, "result_path": recovered["result_path"], "recovered": True})
             prepared = {
@@ -1580,11 +1634,12 @@ def _run_workflow_locked(
             start_index = int(stored.get("next_index") or 0)
     else:
         stage, source, records, start_index = "plan", config["initial_mission_path"], [], 0
-        source_sha = sha(source)
+        source_sha = config["initial_mission_sha256"]
+        _bound_source_bytes(source, source_sha)
         _write_workflow_state(state_path, config, {
             "schema": STATE_SCHEMA, "status": "prepared", "workflow_id": workflow_id,
             "manifest_sha256": config["manifest_sha256"], "next_stage": stage,
-            "next_mission_path": str(source), "next_mission_sha256": sha(source),
+            "next_mission_path": str(source), "next_mission_sha256": source_sha,
             "next_index": 0, "records": records,
         })
     for index in range(start_index, config["max_stages"]):
@@ -1638,16 +1693,48 @@ def _run_workflow_locked(
                     str(terminal.get("manifest_sha256") or "") != multi_manifest_sha,
                 )):
                     raise WorkflowError("web-multi terminal seal identity mismatch")
+                terminal_receipt_sha = ""
+                if terminal_status == "complete":
+                    declared_receipt = Path(
+                        str(terminal.get("next_stage_result_path") or "")
+                    ).expanduser()
+                    if not declared_receipt.is_absolute() or declared_receipt != multi_receipt_path:
+                        raise WorkflowError("web-multi complete receipt identity mismatch")
+                    receipt_path = _inside(config["project_root"], declared_receipt)
+                    if not receipt_path.is_file():
+                        raise WorkflowError("web-multi complete receipt identity mismatch")
+                    receipt_bytes = receipt_path.read_bytes()
+                    terminal_receipt_sha = hashlib.sha256(receipt_bytes).hexdigest()
+                    _validate_receipt(
+                        config,
+                        receipt_path,
+                        workflow_id,
+                        "web-multi",
+                        multi_execution_id,
+                        multi_manifest_sha,
+                        expected_receipt_sha256=terminal_receipt_sha,
+                        receipt_bytes=receipt_bytes,
+                    )
                 existing_status = str(stored.get("multi_terminal_status") or "")
                 existing_sha = str(stored.get("multi_result_sha256") or "")
+                existing_receipt_sha = str(stored.get("multi_receipt_sha256") or "")
                 if existing_status or existing_sha:
-                    if existing_status == terminal_status and existing_sha == terminal_sha:
+                    if (
+                        existing_status == terminal_status
+                        and existing_sha == terminal_sha
+                        and existing_receipt_sha == terminal_receipt_sha
+                    ):
                         return
                     raise WorkflowError("web-multi terminal seal is immutable")
                 _write_workflow_state(state_path, config, {
                     **stored,
                     "multi_terminal_status": terminal_status,
                     "multi_result_sha256": terminal_sha,
+                    **(
+                        {"multi_receipt_sha256": terminal_receipt_sha}
+                        if terminal_receipt_sha
+                        else {}
+                    ),
                 })
 
             multi_execute(
@@ -1670,7 +1757,8 @@ def _run_workflow_locked(
                         "error": "web-multi sealed result has no stage receipt", "records": records}
             attempt_id = multi_execution_id
             receipt = _validate_receipt(
-                config, result_path, workflow_id, "web-multi", attempt_id, multi_manifest_sha
+                config, result_path, workflow_id, "web-multi", attempt_id, multi_manifest_sha,
+                expected_receipt_sha256=str(recovered["multi_receipt_sha256"]),
             )
             stage, source = str(receipt["next_stage"]), receipt["_next_mission"]
             source_sha = str(receipt["next_mission_sha256"])
@@ -1848,13 +1936,22 @@ def _run_workflow_locked(
 def run_workflow(
     manifest_path: Path,
     *,
+    expected_manifest_sha256: str | None,
     dry_run: bool = False,
     oracle_execute: Callable[..., dict[str, Any]] = RUNNER.execute_run,
     oracle_recover: Callable[..., dict[str, Any]] = _recover_oracle_under_workflow_mutex,
     multi_execute: Callable[..., dict[str, Any]] = MULTI.run_multi,
     local_gate_runner: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
-    config = load_manifest(manifest_path)
+    if not dry_run and expected_manifest_sha256 is None:
+        raise WorkflowError(
+            "MANIFEST_SHA256_REQUIRED: live Comprehensive runs require "
+            "--expected-manifest-sha256 from the exact dry-run preview"
+        )
+    config = load_manifest(
+        manifest_path,
+        expected_manifest_sha256=expected_manifest_sha256,
+    )
     if dry_run:
         return _run_workflow_locked(
             config,
@@ -1878,10 +1975,15 @@ def run_workflow(
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a bounded Oracle comprehensive workflow.")
     parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--expected-manifest-sha256")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     try:
-        value = run_workflow(args.manifest, dry_run=args.dry_run)
+        value = run_workflow(
+            args.manifest,
+            expected_manifest_sha256=args.expected_manifest_sha256,
+            dry_run=args.dry_run,
+        )
     except Exception as exc:
         value = {"ok": False, "error": {"code": "ORACLE_COMPREHENSIVE_FAILED", "message": str(exc)}}
     print(json.dumps(value, ensure_ascii=False, indent=2))
