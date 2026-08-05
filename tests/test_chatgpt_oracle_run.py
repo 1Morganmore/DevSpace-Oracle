@@ -1456,7 +1456,26 @@ def test_recovery_no_session_never_releases_submitted_unknown_run(tmp_path: Path
     assert settled["session_authority"] == "submitted_unknown"
 
 
-def test_user_confirmed_no_submission_is_hash_bound_idempotent_and_fail_closed(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("submission_failure", "task_outcome_reason"),
+    (
+        (
+            "ERROR: Prompt did not appear in conversation before timeout (send may have failed)",
+            "user-confirmed-no-submission-after-prompt-timeout",
+        ),
+        (
+            "ERROR: APP_MENTION_ROUTE_UNCONFIRMED\n"
+            "User error (browser-automation): APP_MENTION_ROUTE_UNCONFIRMED",
+            "user-confirmed-no-submission-after-app-route-unconfirmed",
+        ),
+    ),
+    ids=("prompt-timeout", "app-route-unconfirmed"),
+)
+def test_user_confirmed_no_submission_is_hash_bound_idempotent_and_fail_closed(
+    tmp_path: Path,
+    submission_failure: str,
+    task_outcome_reason: str,
+) -> None:
     runner = load_runner()
     run_id = "a" * 32
     workflow_id = "b4362f04-3cf2-4f5e-b6a2-8d9443175298"
@@ -1495,7 +1514,7 @@ def test_user_confirmed_no_submission_is_hash_bound_idempotent_and_fail_closed(t
         kwargs["stdout"].write(
             (
                 f"Session: {slug}\n"
-                "ERROR: Prompt did not appear in conversation before timeout (send may have failed)\n"
+                f"{submission_failure}\n"
             ).encode()
         )
         kwargs["stdout"].flush()
@@ -1523,6 +1542,18 @@ def test_user_confirmed_no_submission_is_hash_bound_idempotent_and_fail_closed(t
     )
 
     assert runner.exact_recovery_binding_unavailable(recovery_stdout, recovery_stderr) is True
+    if task_outcome_reason.endswith("app-route-unconfirmed"):
+        state["oracle"]["resolved_version"] = "0.16.1"
+        runner.STATE.write_json_atomic(state_path, state)
+        with pytest.raises(runner.STATE.OracleStateError) as exc:
+            runner.STATE.settle_user_confirmed_no_submission(
+                state_path,
+                confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION,
+                reason="user inspected the exact ChatGPT state and confirmed no submission",
+            )
+        assert exc.value.code == "NO_SUBMISSION_EVIDENCE_INCOMPLETE"
+        state["oracle"]["resolved_version"] = runner.STATE.ORACLE_ACTIVE_VERSION
+        runner.STATE.write_json_atomic(state_path, state)
     settled = runner.settle_user_confirmed_no_submission(
         run_dir,
         confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION,
@@ -1534,6 +1565,7 @@ def test_user_confirmed_no_submission_is_hash_bound_idempotent_and_fail_closed(t
     assert settled["ok"] is True
     assert settled["safe_for_fresh_run"] is True
     assert settled["result"]["session_authority"] == "pre_submit"
+    assert settled["result"]["task_outcome_reason"] == task_outcome_reason
     assert proof is not None
     assert proof["workflow_id"] == workflow_id
     assert proof["stage"] == "implementation"

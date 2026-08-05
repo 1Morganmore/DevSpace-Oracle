@@ -100,10 +100,12 @@ replace or resubmit it.
 Oracle's `Prompt did not appear in conversation before timeout (send may have
 failed)` message is likewise submission-uncertain. No-live-tab plus missing
 saved-URL recovery evidence does not mechanically prove non-submission. A
-maintenance owner may release that exact run only after explicit user
-confirmation through `chatgpt_oracle_run.py settle-no-submission` with the
-exact run directory, `--confirmation user-confirmed-no-submission`, and a
-concise reason. The settlement is hash-bound to
+validated Oracle 0.17.0 `APP_MENTION_ROUTE_UNCONFIRMED` rejection is also
+eligible because the compatibility contract clears the composer and throws
+before either send path. A maintenance owner may release either exact run only
+after explicit user confirmation through `chatgpt_oracle_run.py
+settle-no-submission` with the exact run directory, `--confirmation
+user-confirmed-no-submission`, and a concise reason. The settlement is hash-bound to
 project/workflow/stage/attempt/input evidence and does not launch Oracle;
 comprehensive mode may consume only one replacement for that binding.
 

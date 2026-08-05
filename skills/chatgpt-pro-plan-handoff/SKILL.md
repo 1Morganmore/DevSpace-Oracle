@@ -123,9 +123,10 @@ the maintenance owner run:
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_run.py" settle-no-submission --run-dir <exact-run-dir> --confirmation user-confirmed-no-submission --reason <concise-user-confirmation>
 ```
 
-The command never launches Oracle. It requires hash-valid prompt-timeout and
-recovery evidence, writes a workflow/stage/attempt/input-bound settlement, and
-lets comprehensive mode consume at most one replacement for that immutable
+The command never launches Oracle. It requires hash-valid prompt-timeout or
+pre-send app-route-rejection evidence plus exact recovery evidence, writes a
+workflow/stage/attempt/input-bound settlement, and lets comprehensive mode
+consume at most one replacement for that immutable
 binding. Missing or changed evidence restores fail-closed project ownership;
 a replacement failure never authorizes a second submission.
 

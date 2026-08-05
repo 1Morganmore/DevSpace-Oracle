@@ -63,6 +63,11 @@ BUCKETS = (
 SIGNATURE_RULES: tuple[tuple[str, str, str], ...] = (
     ("rsync", PRE_SUBMIT_HOST, "oracle-profile-copy-requires-rsync"),
     ("cannot be combined with", PRE_SUBMIT_HOST, "oracle-launch-flags-mutually-exclusive"),
+    (
+        "APP_MENTION_ROUTE_UNCONFIRMED",
+        PRE_SUBMIT_UI,
+        "app-mention-route-unconfirmed-before-send",
+    ),
     ("app mention suggestion did not appear", PRE_SUBMIT_UI, "app-mention-suggestion-absent"),
     ("app mention was not confirmed", PRE_SUBMIT_UI, "app-mention-not-confirmed"),
     ("Unable to find model option", PRE_SUBMIT_UI, "model-option-label-missing"),
@@ -155,7 +160,11 @@ def classify_run(
     if user_confirmed_no_submission:
         return {
             "bucket": PRE_SUBMIT_UI,
-            "signature": "user-confirmed-no-submission-after-prompt-timeout",
+            "signature": (
+                "user-confirmed-no-submission-after-app-route-unconfirmed"
+                if STATE.ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER in stdout_text
+                else "user-confirmed-no-submission-after-prompt-timeout"
+            ),
         }
     if str(state.get("transport_status") or "") == "post_submit_watchdog_timeout":
         return {

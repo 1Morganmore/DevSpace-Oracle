@@ -91,6 +91,7 @@ ORACLE_NO_SESSION_RE = re.compile(
 ORACLE_PROMPT_NOT_OBSERVED_MARKER = (
     "Prompt did not appear in conversation before timeout (send may have failed)"
 )
+ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER = "APP_MENTION_ROUTE_UNCONFIRMED"
 ORACLE_NO_LIVE_TAB_MARKER = "No live ChatGPT tab matched session"
 ORACLE_NO_RECOVERABLE_URL_MARKER = (
     "session metadata has no recoverable ChatGPT conversation URL"
@@ -960,12 +961,12 @@ def _artifact_bytes(state: dict[str, Any], name: str) -> tuple[Path, bytes] | No
 
 
 def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
-    """Return exact evidence for a user-adjudicable Oracle composer timeout.
+    """Return exact evidence for a user-adjudicable Oracle pre-submit failure.
 
-    The Oracle message is not mechanical proof of non-submission.  This helper
+    The accepted messages do not release ownership on their own.  This helper
     only proves that the run is eligible for an explicit user adjudication: no
-    output or conversation URL exists, Oracle reported that the prompt was not
-    observed, and exact recovery has neither a live tab nor a saved URL.
+    output or conversation URL exists, Oracle reported an eligible composer
+    failure, and exact recovery has neither a live tab nor a saved URL.
     """
     state = load_state(state_path)
     authority = str(state.get("session_authority") or "")
@@ -1000,7 +1001,22 @@ def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any]
         return None
     oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
     locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
-    if not locator or ORACLE_PROMPT_NOT_OBSERVED_MARKER not in stdout_text:
+    stdout_lines = {line.strip() for line in stdout_text.splitlines()}
+    app_route_unconfirmed = (
+        str(state.get("transport") or "").casefold() == "devspace"
+        and str(state.get("app_name") or "").casefold() == "devspace"
+        and normalize_oracle_version(oracle.get("resolved_version")) == ORACLE_ACTIVE_VERSION
+        and {
+            f"ERROR: {ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER}",
+            (
+                "User error (browser-automation): "
+                f"{ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER}"
+            ),
+        }.issubset(stdout_lines)
+    )
+    if not locator or not (
+        ORACLE_PROMPT_NOT_OBSERVED_MARKER in stdout_text or app_route_unconfirmed
+    ):
         return None
     if f"Session: {locator}" not in stdout_text:
         return None
@@ -1134,6 +1150,11 @@ def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any]
         "recovery_evidence": recovery_records,
         "output_absent": True,
         "conversation_url_absent": True,
+        "_task_outcome_reason": (
+            "user-confirmed-no-submission-after-app-route-unconfirmed"
+            if app_route_unconfirmed
+            else "user-confirmed-no-submission-after-prompt-timeout"
+        ),
         "_augmented_mission_path": str(source_mission),
         "_input_mission_path": str(input_mission),
         "_receipt_path": str(receipt_path),
@@ -1247,7 +1268,7 @@ def settle_user_confirmed_no_submission(
         "artifact_sha256": None,
         "transport_status": "not_submitted_user_confirmed",
         "task_outcome": "pending",
-        "task_outcome_reason": "user-confirmed-no-submission-after-prompt-timeout",
+        "task_outcome_reason": evidence["_task_outcome_reason"],
         "user_confirmed_no_submission": {
             "schema": "codex.chatgpt.oracle-settlement-reference/v1",
             "path": str(settlement_path),
@@ -1549,8 +1570,10 @@ def unresolved_project_sessions(
         settlement_derived = (
             "user_confirmed_no_submission" in payload
             or str(payload.get("transport_status") or "") == "not_submitted_user_confirmed"
-            or str(payload.get("task_outcome_reason") or "")
-            == "user-confirmed-no-submission-after-prompt-timeout"
+            or str(payload.get("task_outcome_reason") or "") in {
+                "user-confirmed-no-submission-after-prompt-timeout",
+                "user-confirmed-no-submission-after-app-route-unconfirmed",
+            }
             or settlement_artifact.exists()
         )
         invalid_settlement = False
