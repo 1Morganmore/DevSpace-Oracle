@@ -201,6 +201,7 @@ def _child_manifest(config: dict[str, Any], lane: dict[str, Any], parent_id: str
             "research": "off",
             "archive": "auto",
             "parallel_parent_id": parent_id,
+            **({"bound_inputs": lane["bound_inputs"]} if "bound_inputs" in lane else {}),
         },
     )
     return manifest
@@ -214,8 +215,13 @@ def _run_lane(
     dry_run: bool,
 ) -> dict[str, Any]:
     manifest = _child_manifest(config, lane, parent_id)
+    manifest_sha256 = hashlib.sha256(manifest.read_bytes()).hexdigest()
     _verified_bytes(lane["mission_path"], lane["mission_sha256"], "solver mission")
-    result = execute(manifest, dry_run=dry_run)
+    result = execute(
+        manifest,
+        expected_manifest_sha256=manifest_sha256,
+        dry_run=dry_run,
+    )
     output = None
     output_sha256 = None
     session_locator = None
@@ -310,15 +316,17 @@ def run_multi(
             _write_json(config["output_dir"] / "result.json", result)
             return {"ok": False, **result}
         merger_mission = _merger_transport(config, successful, parent_id) if not dry_run else config["merger_mission_path"]
-        merger_manifest = _child_manifest(
-            config,
-            {
-                "id": "merger",
-                "mission_path": merger_mission,
-                "mission_sha256": hashlib.sha256(merger_mission.read_bytes()).hexdigest(),
-            },
-            parent_id,
-        )
+        merger_lane = {
+            "id": "merger",
+            "mission_path": merger_mission,
+            "mission_sha256": hashlib.sha256(merger_mission.read_bytes()).hexdigest(),
+        }
+        if not dry_run:
+            merger_lane["bound_inputs"] = [
+                {"path": item["output_path"], "sha256": item["output_sha256"]}
+                for item in successful
+            ]
+        merger_manifest = _child_manifest(config, merger_lane, parent_id)
         _verified_bytes(
             config["merger_mission_path"], config["merger_mission_sha256"], "merger mission"
         )
@@ -327,7 +335,11 @@ def run_multi(
                 _verified_bytes(
                     Path(item["output_path"]), item["output_sha256"], "solver handoff"
                 )
-        merger = execute(merger_manifest, dry_run=dry_run)
+        merger = execute(
+            merger_manifest,
+            expected_manifest_sha256=hashlib.sha256(merger_manifest.read_bytes()).hexdigest(),
+            dry_run=dry_run,
+        )
     status = "complete" if merger.get("ok") and len(successful) == len(lanes) else (
         "partial" if merger.get("ok") else "failed"
     )

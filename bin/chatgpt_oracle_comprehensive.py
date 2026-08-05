@@ -1138,14 +1138,66 @@ def _recover_exact_oracle_stage(
     """Recover only the persisted Oracle run; this path never submits a prompt."""
     run_dir = Path(str(stored.get("oracle_run_dir") or "")).expanduser()
     expected_run_id = str(stored.get("oracle_run_id") or stored.get("current_attempt_id") or "")
-    if not run_dir.is_absolute() or not expected_run_id:
+    manifest_path = Path(str(stored.get("oracle_manifest_path") or "")).expanduser()
+    manifest_sha = str(stored.get("oracle_manifest_sha256") or "")
+    if not run_dir.is_absolute() or not expected_run_id or not manifest_path.is_absolute() or not manifest_sha:
         return {"ok": False, "error": "ORACLE_RECOVERY_IDENTITY_MISSING"}
     try:
+        if sha(manifest_path.resolve(strict=True)) != manifest_sha:
+            return {"ok": False, "error": "ORACLE_RECOVERY_MANIFEST_CHANGED"}
+        expected_config = RUNNER.STATE.load_manifest(
+            manifest_path.resolve(strict=True), expected_manifest_sha256=manifest_sha
+        )
         directory = run_dir.resolve(strict=True)
         run_state = RUNNER.STATE.load_state(directory / "state.json")
     except Exception as exc:
         return {"ok": False, "error": "ORACLE_RECOVERY_RUN_UNAVAILABLE", "detail": str(exc)}
-    if str(run_state.get("run_id") or "") != expected_run_id:
+    mission = run_state.get("mission") if isinstance(run_state.get("mission"), dict) else {}
+    run_manifest = run_state.get("manifest") if isinstance(run_state.get("manifest"), dict) else {}
+    run_attachments = run_state.get("attachments") if isinstance(run_state.get("attachments"), list) else []
+    run_bound_inputs = run_state.get("bound_inputs") if isinstance(run_state.get("bound_inputs"), list) else []
+    run_context = (
+        run_state.get("project_context_manifest")
+        if isinstance(run_state.get("project_context_manifest"), dict)
+        else {}
+    )
+    attachment_bindings = [
+        (str(item.get("path") or ""), str(item.get("sha256") or ""))
+        for item in run_attachments if isinstance(item, dict)
+    ]
+    expected_attachments = list(zip(
+        (str(path) for path in expected_config.attachments),
+        expected_config.attachment_sha256s,
+        strict=True,
+    ))
+    bound_input_bindings = [
+        (str(item.get("path") or ""), str(item.get("sha256") or ""))
+        for item in run_bound_inputs if isinstance(item, dict)
+    ]
+    expected_bound_inputs = list(zip(
+        (str(path) for path in expected_config.bound_inputs),
+        expected_config.bound_input_sha256s,
+        strict=True,
+    ))
+    expected_mission_path = str(stored.get("current_augmented_mission_path") or "")
+    expected_mission_sha = str(stored.get("current_augmented_mission_sha256") or "")
+    if any((
+        str(run_state.get("run_id") or "") != expected_run_id,
+        str(expected_config.requested_run_id or "") != expected_run_id,
+        str(run_manifest.get("path") or "") != str(manifest_path.resolve()),
+        str(run_manifest.get("actual_sha256") or "") != manifest_sha,
+        str(run_manifest.get("expected_sha256") or "") != manifest_sha,
+        str(expected_config.mission_path) != expected_mission_path,
+        expected_config.mission_sha256 != expected_mission_sha,
+        str(mission.get("path") or "") != expected_mission_path,
+        str(mission.get("sha256") or "") != expected_mission_sha,
+        len(attachment_bindings) != len(run_attachments),
+        attachment_bindings != expected_attachments,
+        len(bound_input_bindings) != len(run_bound_inputs),
+        bound_input_bindings != expected_bound_inputs,
+        str(run_context.get("path") or "") != str(expected_config.project_context_manifest_path or ""),
+        str(run_context.get("sha256") or "") != str(expected_config.project_context_manifest_sha256 or ""),
+    )):
         return {"ok": False, "error": "ORACLE_RECOVERY_IDENTITY_MISMATCH"}
     # Oracle harvest reports the exact saved conversation state.  The runner
     # discards a candidate when that state is still running and publishes it
@@ -1183,6 +1235,17 @@ def _recover_exact_multi_stage(stored: dict[str, Any]) -> dict[str, Any]:
     expected_receipt = Path(str(stored.get("multi_receipt_path") or "")).expanduser()
     if not result_path.is_absolute() or not expected_manifest_sha or not expected_parent or not expected_receipt.is_absolute():
         return {"ok": False, "error": "MULTI_RECOVERY_IDENTITY_MISSING"}
+    terminal_status = str(stored.get("multi_terminal_status") or "")
+    terminal_sha = str(stored.get("multi_result_sha256") or "")
+    if terminal_status:
+        if terminal_status not in {"partial", "failed"} or re.fullmatch(r"[0-9a-f]{64}", terminal_sha) is None:
+            return {"ok": False, "error": "MULTI_TERMINAL_SEAL_INVALID"}
+        try:
+            if sha(result_path.resolve(strict=True)) != terminal_sha:
+                return {"ok": False, "error": "MULTI_TERMINAL_RESULT_CHANGED"}
+        except Exception as exc:
+            return {"ok": False, "error": "MULTI_RESULT_UNAVAILABLE", "detail": str(exc)}
+        return {"ok": False, "error": "MULTI_TERMINAL_SEALED", "status": terminal_status}
     try:
         result = _json(result_path.resolve(strict=True))
     except Exception as exc:
@@ -1231,7 +1294,10 @@ def _run_workflow_locked(
         oracle_manifest = _oracle_manifest(
             config, mission, mission.parent, attempt_id, stage="plan", mission_sha=augmented_mission_sha
         )
-        preview = oracle_execute(oracle_manifest, dry_run=True)
+        oracle_manifest_sha = sha(oracle_manifest)
+        preview = oracle_execute(
+            oracle_manifest, expected_manifest_sha256=oracle_manifest_sha, dry_run=True
+        )
         return {
             "ok": bool(preview.get("ok")),
             "schema": STATE_SCHEMA,
@@ -1518,9 +1584,27 @@ def _run_workflow_locked(
             )
             records.append({"stage": stage, "result": multi_result})
             if not multi_result.get("ok"):
+                terminal_status = str(multi_result.get("status") or "")
+                if terminal_status not in {"partial", "failed"} or not multi_result_path.is_file():
+                    raise WorkflowError("web-multi terminal result is unavailable or invalid")
+                terminal_bytes = multi_result_path.read_bytes()
+                terminal_result = json.loads(terminal_bytes.decode("utf-8"))
+                if not isinstance(terminal_result, dict):
+                    raise WorkflowError("web-multi terminal result must be a JSON object")
+                if any((
+                    terminal_result.get("schema") != MULTI.RESULT_SCHEMA,
+                    str(terminal_result.get("status") or "") != terminal_status,
+                    str(terminal_result.get("parent_id") or "") != multi_execution_id,
+                    str(terminal_result.get("manifest_sha256") or "") != multi_manifest_sha,
+                    str(multi_result.get("parent_id") or "") != multi_execution_id,
+                    str(multi_result.get("manifest_sha256") or "") != multi_manifest_sha,
+                )):
+                    raise WorkflowError("web-multi terminal result identity mismatch")
                 blocked = {
                     **_json(state_path), "status": "attention_required", "records": records,
                     "blocker": "web-multi exact execution needs recovery; no replacement was submitted",
+                    "multi_terminal_status": terminal_status,
+                    "multi_result_sha256": hashlib.sha256(terminal_bytes).hexdigest(),
                 }
                 _write_workflow_state(state_path, config, blocked)
                 return {"ok": False, **blocked}
@@ -1569,6 +1653,7 @@ def _run_workflow_locked(
             config, mission, stage_dir, attempt_id, stage=stage, pro_attachments=pro_attachments,
             mission_sha=augmented_mission_sha,
         )
+        oracle_manifest_sha = sha(oracle_manifest)
         oracle_config = RUNNER.STATE.load_manifest(oracle_manifest)
         oracle_layout = RUNNER.STATE.create_layout(oracle_config, run_id=attempt_id)
         stage_pre_submit_retries = int(_json(state_path).get("pre_submit_retries") or 0)
@@ -1582,10 +1667,13 @@ def _run_workflow_locked(
             "current_augmented_mission_path": str(mission),
             "current_augmented_mission_sha256": augmented_mission_sha,
             **({"pro_attachments": _pro_attachment_state(pro_attachments)} if stage == "pro" else {}),
-            "oracle_run_id": attempt_id, "oracle_run_dir": str(oracle_layout.run_dir), "oracle_manifest_path": str(oracle_manifest),
+            "oracle_run_id": attempt_id, "oracle_run_dir": str(oracle_layout.run_dir),
+            "oracle_manifest_path": str(oracle_manifest), "oracle_manifest_sha256": oracle_manifest_sha,
             "next_index": index, "records": records, "pre_submit_retries": stage_pre_submit_retries,
         })
-        run = oracle_execute(oracle_manifest, dry_run=False)
+        run = oracle_execute(
+            oracle_manifest, expected_manifest_sha256=oracle_manifest_sha, dry_run=False
+        )
         records.append({"stage": stage, "run_dir": run.get("run_dir"), "ok": bool(run.get("ok"))})
         if stage == "pro" and run.get("ok") and not receipt_path.is_file():
             _materialize_pro_receipt(
@@ -1608,7 +1696,8 @@ def _run_workflow_locked(
                 "current_augmented_mission_path": str(mission),
                 "current_augmented_mission_sha256": augmented_mission_sha,
                 **({"pro_attachments": _pro_attachment_state(pro_attachments)} if stage == "pro" else {}),
-                "oracle_run_dir": run.get("run_dir"), "next_index": index, "records": records,
+                "oracle_run_dir": run.get("run_dir"), "oracle_manifest_path": str(oracle_manifest),
+                "oracle_manifest_sha256": oracle_manifest_sha, "next_index": index, "records": records,
             })
         if run.get("ok") and not receipt_path.is_file():
             return {"ok": False, **_json(state_path)}

@@ -27,6 +27,8 @@ Each lane receives its own Oracle slug/run/output and only `@DevSpace` plus its
 mission path. Lanes run in stable waves of at most five; a larger topology is
 not reduced. Successful handoffs are preserved with exact SHA-256 bindings and
 revalidated immediately before exactly one merger consumes them in lane order.
+The merger child manifest carries the same pairs as `bound_inputs` for one last
+runner check inside the submit mutex.
 A reduced topology preserves its partial artifacts, but returns `ok=false` and
 requires attention instead of advancing the comprehensive workflow. The parent
 holds same-project exclusion while child

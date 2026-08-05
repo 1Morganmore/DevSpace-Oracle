@@ -475,6 +475,7 @@ def historical_session_authority(run_dir: Path, state: dict[str, Any]) -> str:
 def execute_run(
     manifest_path: Path,
     *,
+    expected_manifest_sha256: str | None = None,
     dry_run: bool = False,
     run_factory: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     popen_factory: Callable[..., Any] = subprocess.Popen,
@@ -485,7 +486,11 @@ def execute_run(
     ),
     runtime_command_factory: Callable[[dict[str, Any], str], Sequence[str]] = validated_oracle_runtime_command,
 ) -> dict[str, Any]:
-    config = STATE.load_manifest(manifest_path, platform_name=platform_name)
+    config = STATE.load_manifest(
+        manifest_path,
+        expected_manifest_sha256=expected_manifest_sha256,
+        platform_name=platform_name,
+    )
     validate_oracle_attachment_sizes(config)
     validate_pro_context_preflight(config)
     layout = STATE.create_layout(config, run_id=config.requested_run_id)
@@ -616,6 +621,11 @@ def execute_run(
                             "attachment bytes changed after manifest validation",
                             {"path": str(attachment), "expected": expected, "actual": actual},
                         )
+                for bound_input, expected in zip(config.bound_inputs, config.bound_input_sha256s, strict=True):
+                    try:
+                        STATE.validate_bound_input(bound_input, expected, config.project_root)
+                    except STATE.OracleStateError as exc:
+                        raise OracleRunError(exc.code, str(exc), exc.evidence) from exc
                 validate_pro_context_preflight(config)
                 process = popen_factory(
                     argv,

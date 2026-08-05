@@ -67,7 +67,8 @@ def test_multi_uses_unique_child_manifests_waves_and_merger(tmp_path: Path) -> N
     module = load()
     calls = []
 
-    def fake_execute(path: Path, *, dry_run: bool):
+    def fake_execute(path: Path, *, expected_manifest_sha256: str, dry_run: bool):
+        assert expected_manifest_sha256 == digest(path)
         value = json.loads(path.read_text(encoding="utf-8"))
         calls.append(value)
         run_dir = path.parent / "fake-run"
@@ -96,7 +97,8 @@ def test_multi_uses_unique_child_manifests_waves_and_merger(tmp_path: Path) -> N
 def test_multi_preserves_partial_results_and_rejects_over_capacity(tmp_path: Path) -> None:
     module = load()
     manifest = make_manifest(tmp_path, 3)
-    def fake_execute(path: Path, *, dry_run: bool):
+    def fake_execute(path: Path, *, expected_manifest_sha256: str, dry_run: bool):
+        assert expected_manifest_sha256 == digest(path)
         run_dir = path.parent / "fake-run"
         run_dir.mkdir(parents=True, exist_ok=True)
         if path.parent.name == "s1":
@@ -180,7 +182,8 @@ def test_multi_rejects_merger_mission_changed_before_submission(tmp_path: Path) 
     manifest = make_manifest(tmp_path, 2)
     calls = []
 
-    def fake_execute(path: Path, *, dry_run: bool):
+    def fake_execute(path: Path, *, expected_manifest_sha256: str, dry_run: bool):
+        assert expected_manifest_sha256 == digest(path)
         calls.append(path)
         run_dir = path.parent / "fake-run"
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -209,7 +212,8 @@ def test_multi_rejects_handoff_changed_before_merger_submission(
             (config["output_dir"] / "handoffs" / "s0.md").write_text("stale", encoding="utf-8")
         return result
 
-    def fake_execute(path: Path, *, dry_run: bool):
+    def fake_execute(path: Path, *, expected_manifest_sha256: str, dry_run: bool):
+        assert expected_manifest_sha256 == digest(path)
         calls.append(path)
         run_dir = path.parent / "fake-run"
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -225,17 +229,59 @@ def test_multi_rejects_handoff_changed_before_merger_submission(
     assert all(path.parent.name != "merger" for path in calls)
 
 
+def test_merger_child_binds_handoffs_inside_runner_boundary(tmp_path: Path) -> None:
+    module = load()
+    calls = []
+    provider_calls = []
+
+    def fake_execute(path: Path, *, expected_manifest_sha256: str, dry_run: bool):
+        assert expected_manifest_sha256 == digest(path)
+        lane = path.parent.name
+        calls.append(lane)
+        if lane == "merger":
+            child = json.loads(path.read_text(encoding="utf-8"))
+            expected_inputs = [
+                {
+                    "path": str((tmp_path / "out" / "handoffs" / f"s{index}.md").resolve()),
+                    "sha256": digest(tmp_path / "out" / "handoffs" / f"s{index}.md"),
+                }
+                for index in range(2)
+            ]
+            assert child["bound_inputs"] == expected_inputs
+            Path(expected_inputs[0]["path"]).write_text("stale", encoding="utf-8")
+            for item in child["bound_inputs"]:
+                if digest(Path(item["path"])) != item["sha256"]:
+                    raise module.MultiError("simulated runner rejected stale bound input")
+            provider_calls.append(lane)
+            return {"ok": True}
+        run_dir = path.parent / "fake-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "output.md").write_text(f"answer {lane}", encoding="utf-8")
+        return {"ok": True, "run_dir": str(run_dir)}
+
+    with pytest.raises(module.MultiError, match="runner rejected stale bound input"):
+        module.run_multi(make_manifest(tmp_path, 2), execute=fake_execute)
+
+    assert sorted(calls[:-1]) == ["s0", "s1"]
+    assert calls[-1] == "merger"
+    assert provider_calls == []
+
+
 def test_multi_accepts_bound_manifest_and_missions(tmp_path: Path) -> None:
     module = load()
     manifest = make_manifest(tmp_path, 2)
     expected = module.load_manifest(manifest)["manifest_sha256"]
+
+    def fake_execute(path: Path, *, expected_manifest_sha256: str, dry_run: bool):
+        assert expected_manifest_sha256 == digest(path)
+        return {"ok": True}
 
     result = module.run_multi(
         manifest,
         expected_manifest_sha256=expected,
         parent_id="a" * 64,
         dry_run=True,
-        execute=lambda path, *, dry_run: {"ok": True},
+        execute=fake_execute,
     )
 
     assert result["ok"] is True

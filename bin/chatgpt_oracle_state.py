@@ -161,6 +161,11 @@ class OracleConfig:
     task_outcome_contract: str
     parallel_parent_id: str | None
     requested_run_id: str | None
+    manifest_path: Path
+    manifest_sha256: str
+    expected_manifest_sha256: str | None
+    bound_inputs: tuple[Path, ...]
+    bound_input_sha256s: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -211,6 +216,42 @@ def exact_regular_file(value: Any, *, label: str) -> Path:
     if not path.is_file():
         raise OracleStateError(file_code, f"{label} must identify a regular file", {"path": str(path)})
     return path
+
+
+def validate_bound_input(value: Any, expected_sha256: Any, project_root: Path) -> tuple[Path, str]:
+    raw = Path(str(value or "")).expanduser()
+    if not raw.is_absolute():
+        raise OracleStateError("BOUND_INPUT_PATH_ABSOLUTE_REQUIRED", "bound input path must be absolute")
+    if ".." in raw.parts:
+        raise OracleStateError("BOUND_INPUT_PATH_TRAVERSAL", "bound input must not contain parent traversal")
+    current = Path(raw.anchor)
+    for part in raw.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            raise OracleStateError(
+                "BOUND_INPUT_FILE_INVALID",
+                "bound input must not use symlink path components",
+                {"path": str(current)},
+            )
+    path = absolute_path(raw, label="bound_input_path", must_exist=True)
+    if not path.is_file():
+        raise OracleStateError("BOUND_INPUT_FILE_INVALID", "bound input must identify a regular file", {"path": str(path)})
+    if not is_within(project_root, path):
+        raise OracleStateError("BOUND_INPUT_OUTSIDE_PROJECT", "bound input must stay inside project_root", {"path": str(path)})
+    if not isinstance(expected_sha256, str) or SHA256_RE.fullmatch(expected_sha256) is None:
+        raise OracleStateError(
+            "BOUND_INPUT_SHA256_INVALID",
+            "bound input sha256 must be exactly 64 lowercase hexadecimal characters",
+            {"path": str(path)},
+        )
+    actual_sha256 = sha256_file(path)
+    if actual_sha256 != expected_sha256:
+        raise OracleStateError(
+            "BOUND_INPUT_SHA256_MISMATCH",
+            "bound input sha256 does not match the current file",
+            {"path": str(path), "expected": expected_sha256, "actual": actual_sha256},
+        )
+    return path, expected_sha256
 
 
 def is_within(root: Path, candidate: Path) -> bool:
@@ -300,10 +341,40 @@ def validate_oracle_args(values: Any) -> tuple[str, ...]:
     return tuple(values)
 
 
-def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConfig:
+def load_manifest(
+    path: Path,
+    *,
+    expected_manifest_sha256: str | None = None,
+    platform_name: str | None = None,
+) -> OracleConfig:
     manifest_path = absolute_path(path, label="manifest_path", must_exist=True)
     try:
-        payload = json.loads(read_utf8_strict(manifest_path))
+        manifest_bytes = manifest_path.read_bytes()
+    except OSError as exc:
+        raise OracleStateError("FILE_READ_FAILED", "file could not be read", {"path": str(manifest_path)}) from exc
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    if expected_manifest_sha256 is not None:
+        if not isinstance(expected_manifest_sha256, str) or SHA256_RE.fullmatch(expected_manifest_sha256) is None:
+            raise OracleStateError(
+                "MANIFEST_SHA256_INVALID",
+                "expected_manifest_sha256 must be exactly 64 lowercase hexadecimal characters",
+            )
+        if manifest_sha256 != expected_manifest_sha256:
+            raise OracleStateError(
+                "MANIFEST_SHA256_MISMATCH",
+                "expected_manifest_sha256 does not match the current Oracle manifest",
+                {"expected": expected_manifest_sha256, "actual": manifest_sha256},
+            )
+    try:
+        manifest_text = manifest_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise OracleStateError(
+            "UTF8_REQUIRED",
+            "file must be valid UTF-8",
+            {"path": str(manifest_path), "offset": exc.start},
+        ) from exc
+    try:
+        payload = json.loads(manifest_text)
     except json.JSONDecodeError as exc:
         raise OracleStateError("MANIFEST_JSON_INVALID", "manifest must contain one JSON object", {"line": exc.lineno, "column": exc.colno}) from exc
     if not isinstance(payload, dict) or payload.get("schema") != SCHEMA:
@@ -311,6 +382,22 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
     project_root = absolute_path(payload.get("project_root"), label="project_root", must_exist=True)
     if not project_root.is_dir():
         raise OracleStateError("PROJECT_ROOT_NOT_DIRECTORY", "project_root must identify a directory")
+    raw_bound_inputs = payload.get("bound_inputs", [])
+    if not isinstance(raw_bound_inputs, list):
+        raise OracleStateError("BOUND_INPUTS_INVALID", "bound_inputs must be a list")
+    validated_bound_inputs: list[tuple[Path, str]] = []
+    for index, item in enumerate(raw_bound_inputs):
+        if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
+            raise OracleStateError(
+                "BOUND_INPUT_INVALID",
+                "each bound input must contain only path and sha256",
+                {"index": index},
+            )
+        validated_bound_inputs.append(validate_bound_input(item["path"], item["sha256"], project_root))
+    bound_inputs = tuple(item[0] for item in validated_bound_inputs)
+    if len(set(bound_inputs)) != len(bound_inputs):
+        raise OracleStateError("BOUND_INPUTS_DUPLICATE", "bound input paths must be unique")
+    bound_input_sha256s = tuple(item[1] for item in validated_bound_inputs)
     mission_path = exact_regular_file(payload.get("mission_path"), label="mission_path")
     read_utf8_strict(mission_path)
     mission_sha256 = sha256_file(mission_path)
@@ -504,6 +591,11 @@ def load_manifest(path: Path, *, platform_name: str | None = None) -> OracleConf
         task_outcome_contract,
         parallel_parent_id,
         requested_run_id,
+        manifest_path,
+        manifest_sha256,
+        expected_manifest_sha256,
+        bound_inputs,
+        bound_input_sha256s,
     )
 
 
@@ -573,6 +665,11 @@ def state_payload(config: OracleConfig, layout: RunLayout, *, status: str, resol
             "archive": config.archive,
         },
         "parallel_parent_id": config.parallel_parent_id,
+        "manifest": {
+            "path": str(config.manifest_path),
+            "actual_sha256": config.manifest_sha256,
+            "expected_sha256": config.expected_manifest_sha256,
+        },
         "transport_status": "prepared",
         "task_outcome_contract": config.task_outcome_contract,
         "task_outcome": "not_applicable" if config.transport == "pro-attachment-only" else "pending",
@@ -585,6 +682,10 @@ def state_payload(config: OracleConfig, layout: RunLayout, *, status: str, resol
         "attachments": [
             {"path": str(path), "sha256": digest, "size_bytes": path.stat().st_size}
             for path, digest in zip(config.attachments, config.attachment_sha256s, strict=True)
+        ],
+        "bound_inputs": [
+            {"path": str(path), "sha256": digest}
+            for path, digest in zip(config.bound_inputs, config.bound_input_sha256s, strict=True)
         ],
         "project_context_manifest": (
             {

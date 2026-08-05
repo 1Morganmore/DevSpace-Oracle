@@ -95,6 +95,194 @@ def test_manifest_mission_sha256_rejects_stale_bytes(tmp_path: Path) -> None:
     }
 
 
+def test_expected_manifest_sha256_binds_exact_parsed_bytes(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    job = manifest(tmp_path, mission.resolve())
+    expected = state.sha256_file(job)
+
+    config = state.load_manifest(job, expected_manifest_sha256=expected)
+    layout = state.create_layout(config, run_id="20260725T151414Z-a3aeba967d99")
+    payload = state.state_payload(config, layout, status="prepared", resolved_version="oracle 0.17.0")
+
+    assert config.manifest_sha256 == expected
+    assert config.expected_manifest_sha256 == expected
+    assert payload["manifest"] == {
+        "path": str(job),
+        "actual_sha256": expected,
+        "expected_sha256": expected,
+    }
+
+
+def test_expected_manifest_sha256_requires_exact_lowercase_hex(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    job = manifest(tmp_path, mission.resolve())
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(job, expected_manifest_sha256="A" * 64)
+
+    assert exc.value.code == "MANIFEST_SHA256_INVALID"
+
+
+def test_expected_manifest_sha256_rejects_stale_manifest_before_parsing(tmp_path: Path) -> None:
+    state = load_state()
+    job = tmp_path / "job.json"
+    job.write_text("{", encoding="utf-8")
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(job.resolve(), expected_manifest_sha256="0" * 64)
+
+    assert exc.value.code == "MANIFEST_SHA256_MISMATCH"
+
+
+def test_bound_inputs_are_validated_and_persisted(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    bound = tmp_path / "handoff.md"
+    mission.write_text("work", encoding="utf-8")
+    bound.write_text("evidence", encoding="utf-8")
+    expected = state.sha256_file(bound)
+
+    config = state.load_manifest(manifest(
+        tmp_path,
+        mission.resolve(),
+        bound_inputs=[{"path": str(bound.resolve()), "sha256": expected}],
+    ))
+    layout = state.create_layout(config, run_id="20260725T151414Z-a3aeba967d99")
+
+    assert config.bound_inputs == (bound.resolve(),)
+    assert config.bound_input_sha256s == (expected,)
+    assert state.state_payload(config, layout, status="prepared", resolved_version="oracle 0.17.0")["bound_inputs"] == [
+        {"path": str(bound.resolve()), "sha256": expected}
+    ]
+
+
+def test_bound_inputs_use_a_closed_exact_schema(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    bound = tmp_path / "handoff.md"
+    mission.write_text("work", encoding="utf-8")
+    bound.write_text("evidence", encoding="utf-8")
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(tmp_path, mission.resolve(), bound_inputs=[{
+            "path": str(bound.resolve()), "sha256": state.sha256_file(bound), "extra": True,
+        }]))
+    assert exc.value.code == "BOUND_INPUT_INVALID"
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(tmp_path, mission.resolve(), bound_inputs=[{
+            "path": str(bound.resolve()), "sha256": "A" * 64,
+        }]))
+    assert exc.value.code == "BOUND_INPUT_SHA256_INVALID"
+
+
+def test_bound_input_must_stay_inside_project(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.md"
+    mission.write_text("work", encoding="utf-8")
+    outside.write_text("evidence", encoding="utf-8")
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(
+            tmp_path,
+            mission.resolve(),
+            bound_inputs=[{"path": str(outside.resolve()), "sha256": state.sha256_file(outside)}],
+        ))
+
+    assert exc.value.code == "BOUND_INPUT_OUTSIDE_PROJECT"
+
+
+def test_bound_input_must_not_be_a_symlink(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    target = tmp_path / "target.md"
+    link = tmp_path / "link.md"
+    mission.write_text("work", encoding="utf-8")
+    target.write_text("evidence", encoding="utf-8")
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(state.OracleStateError) as caught:
+        state.load_manifest(manifest(
+            tmp_path,
+            mission.resolve(),
+            bound_inputs=[{"path": str(link.absolute()), "sha256": state.sha256_file(target)}],
+        ))
+
+    assert caught.value.code == "BOUND_INPUT_FILE_INVALID"
+
+
+def test_bound_input_rejects_parent_traversal(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    bound = tmp_path / "handoff.md"
+    mission.write_text("work", encoding="utf-8")
+    bound.write_text("evidence", encoding="utf-8")
+
+    with pytest.raises(state.OracleStateError) as caught:
+        state.load_manifest(manifest(
+            tmp_path,
+            mission.resolve(),
+            bound_inputs=[{
+                "path": str(tmp_path / "unused" / ".." / bound.name),
+                "sha256": state.sha256_file(bound),
+            }],
+        ))
+
+    assert caught.value.code == "BOUND_INPUT_PATH_TRAVERSAL"
+
+
+def test_bound_input_rejects_ancestor_symlink(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    target = tmp_path / "target"
+    alias = tmp_path / "alias"
+    mission.write_text("work", encoding="utf-8")
+    target.mkdir()
+    bound = target / "handoff.md"
+    bound.write_text("evidence", encoding="utf-8")
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(state.OracleStateError) as caught:
+        state.load_manifest(manifest(
+            tmp_path,
+            mission.resolve(),
+            bound_inputs=[{
+                "path": str(alias / bound.name),
+                "sha256": state.sha256_file(bound),
+            }],
+        ))
+
+    assert caught.value.code == "BOUND_INPUT_FILE_INVALID"
+
+
+def test_bound_input_rejects_stale_hash(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    bound = tmp_path / "handoff.md"
+    mission.write_text("work", encoding="utf-8")
+    bound.write_text("current", encoding="utf-8")
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(
+            tmp_path,
+            mission.resolve(),
+            bound_inputs=[{"path": str(bound.resolve()), "sha256": "0" * 64}],
+        ))
+
+    assert exc.value.code == "BOUND_INPUT_SHA256_MISMATCH"
+
+
 def test_prompt_is_plain_app_plus_absolute_mission_instruction(tmp_path: Path) -> None:
     state = load_state()
     mission = tmp_path / "mission.md"

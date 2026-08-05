@@ -184,6 +184,27 @@ def test_validated_package_root_is_the_exact_runtime_popen_target(tmp_path: Path
     assert captured["command"][:2] == [str(node.resolve()), str(cli.resolve())]
 
 
+def test_execute_run_persists_out_of_band_manifest_identity(tmp_path: Path) -> None:
+    runner = load_runner()
+    job = manifest(tmp_path)
+    expected = hashlib.sha256(job.read_bytes()).hexdigest()
+
+    result = execute_run(
+        runner,
+        job,
+        expected_manifest_sha256=expected,
+        run_factory=version_runner,
+        popen_factory=popen_for(0, b"answer\nTASK_OUTCOME: EXECUTED\n", {}, []),
+    )
+    state = runner.STATE.load_state(Path(result["run_dir"]) / "state.json")
+
+    assert state["manifest"] == {
+        "path": str(job),
+        "actual_sha256": expected,
+        "expected_sha256": expected,
+    }
+
+
 def test_validated_runtime_rejects_an_unlisted_compatibility_root(tmp_path: Path) -> None:
     runner = load_runner()
     root = tmp_path / "oracle"
@@ -1152,6 +1173,38 @@ def test_pro_attachment_change_blocks_before_submit(tmp_path: Path) -> None:
     assert result["result"]["status"] == "failed"
     assert result["result"]["session_authority"] == "pre_submit"
     assert launched == []
+
+
+def test_bound_input_change_inside_submit_mutex_blocks_before_popen(tmp_path: Path) -> None:
+    runner = load_runner()
+    bound = tmp_path / "handoff.md"
+    bound.write_text("validated", encoding="utf-8")
+    launched = []
+    job = manifest(tmp_path, bound_inputs=[{
+        "path": str(bound.resolve()),
+        "sha256": hashlib.sha256(bound.read_bytes()).hexdigest(),
+    }])
+
+    class MutatingMutex:
+        def __enter__(self):
+            bound.write_text("changed", encoding="utf-8")
+
+        def __exit__(self, *args):
+            return None
+
+    runner.STATE.project_submit_mutex = lambda *args, **kwargs: MutatingMutex()
+
+    result = execute_run(
+        runner,
+        job,
+        run_factory=version_runner,
+        popen_factory=lambda *args, **kwargs: launched.append(True),
+    )
+
+    assert result["ok"] is False
+    assert result["result"]["session_authority"] == "pre_submit"
+    assert launched == []
+    assert "BOUND_INPUT_SHA256_MISMATCH" in (Path(result["run_dir"]) / "stderr.log").read_text(encoding="utf-8")
 
 
 def test_oracle_global_prompt_duplicate_is_proven_pre_submit_and_releases_project(tmp_path: Path) -> None:
