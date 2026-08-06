@@ -206,10 +206,14 @@ def test_setup_applies_hash_validated_devspace_compat_before_service_start(
     bash.write_text("", encoding="utf-8")
     monkeypatch.setenv("DEVSPACE_GIT_BASH", str(bash))
     calls: list[list[str]] = []
+    call_kwargs: list[dict] = []
     launched: list[list[str]] = []
+
+    monkeypatch.setattr(module, "windows_subprocess_kwargs", lambda: {"creationflags": 123})
 
     def runner(argv, **kwargs):
         calls.append(list(argv))
+        call_kwargs.append(dict(kwargs))
         if argv == ["tailscale", "funnel", "status", "--json"]:
             return SimpleNamespace(returncode=0, stdout=json.dumps({"Web": {}}), stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -224,6 +228,8 @@ def test_setup_applies_hash_validated_devspace_compat_before_service_start(
         "-lc",
         "exec npx --yes @waishnav/devspace@1.0.5 init",
     ]
+    assert "creationflags" not in call_kwargs[1]
+    assert call_kwargs[2]["creationflags"] == 123
     assert calls[2] == module.devspace_compat_argv()
     assert calls[3] == module.devspace_compat_argv(stop_exact_service=True)
     assert calls[4] == module.devspace_compat_argv(confirm_restarted=True)

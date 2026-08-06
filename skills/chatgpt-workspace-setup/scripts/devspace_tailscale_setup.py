@@ -162,8 +162,14 @@ def setup_plan(config: SetupConfig) -> dict[str, Any]:
     }
 
 
-def run_checked(argv: Sequence[str], *, runner: Callable[..., Any] = subprocess.run) -> None:
-    runner(list(argv), check=True, text=True, **windows_subprocess_kwargs())
+def run_checked(
+    argv: Sequence[str],
+    *,
+    runner: Callable[..., Any] = subprocess.run,
+    interactive: bool = False,
+) -> None:
+    kwargs = {} if interactive else windows_subprocess_kwargs()
+    runner(list(argv), check=True, text=True, **kwargs)
 
 
 def launch_hidden(argv: Sequence[str], *, popen_factory: Callable[..., Any] = subprocess.Popen) -> Any:
@@ -188,7 +194,11 @@ def apply_setup(
     slot = funnel_status(config, runner=runner, allow_absent=True)
     if slot.get("mapping") == "conflict":
         raise SetupError("TAILSCALE_FUNNEL_PORT_IN_USE")
-    run_checked(bash_argv(["npx", "--yes", DEVSPACE_PACKAGE, "init"]), runner=runner)
+    run_checked(
+        bash_argv(["npx", "--yes", DEVSPACE_PACKAGE, "init"]),
+        runner=runner,
+        interactive=True,
+    )
     run_checked(devspace_compat_argv(), runner=runner)
     run_checked(
         devspace_compat_argv(stop_exact_service=True, local_port=config.local_port),
