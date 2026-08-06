@@ -2105,169 +2105,7 @@ def test_delivery_timeout_after_visible_work_cannot_settle_a_terminal_harvest(tm
     assert not (run_dir / "recovery-live-candidate.md").exists()
 
 
-def provider_delivery_timeout_settlement_fixture(tmp_path: Path):
-    runner = load_runner()
-    initial = execute_run(
-        runner,
-        manifest(tmp_path),
-        run_factory=version_runner,
-        popen_factory=popen_for(4, None, {}, []),
-    )
-    run_dir = Path(initial["run_dir"])
-    state_path = run_dir / "state.json"
-    state = runner.STATE.load_state(state_path)
-    output = Path(state["artifacts"]["output"])
-    output.write_text("Message delivery timed out. Please try again.", encoding="utf-8")
-    (run_dir / "recovery-live-stdout.log").write_text(
-        "State: running\nState: completed\nMessage delivery timed out. Please try again.\n",
-        encoding="utf-8",
-    )
-    state.update({
-        "status": "running",
-        "session_authority": "live",
-        "terminal_harvested": False,
-        "transport_status": "post_submit_provider_delivery_timeout",
-        "task_outcome": "pending",
-    })
-    state["oracle"]["conversation_url"] = "https://chatgpt.com/c/exact-timeout-settlement"
-    runner.STATE.write_json_atomic(state_path, state)
-    evidence = tmp_path / "execution-proof.json"
-    evidence.write_text('{"executed":true}', encoding="utf-8")
-    return runner, run_dir, output, evidence
-
-
-def test_user_confirmed_delivery_timeout_execution_settlement_releases_exact_run(tmp_path: Path) -> None:
-    runner, run_dir, output, evidence = provider_delivery_timeout_settlement_fixture(tmp_path)
-
-    settled = runner.settle_user_confirmed_delivery_timeout_execution(
-        run_dir,
-        expected_output_sha256=runner.STATE.sha256_file(output),
-        confirmation=runner.STATE.USER_CONFIRMED_EXECUTION_ENDED,
-        reason="user confirmed the exact ChatGPT task ended after its BB-local artifacts were written",
-        execution_evidence=[(evidence, runner.STATE.sha256_file(evidence))],
-        process_alive=lambda _: False,
-    )
-
-    state = runner.STATE.load_state(run_dir / "state.json")
-    assert settled["ok"] is True
-    assert settled["safe_for_fresh_run"] is True
-    assert state["session_authority"] == "settled_executed"
-    assert state["terminal_harvested"] is False
-    assert state["transport_status"] == "post_submit_provider_delivery_timeout_settled"
-    assert state["task_outcome"] == "executed"
-    assert state["oracle"]["conversation_url"]
-    assert runner.STATE.proven_user_confirmed_execution_ended(run_dir / "state.json") is not None
-    assert runner.STATE.unresolved_project_sessions(run_dir.parent, tmp_path) == []
-
-
-def test_delivery_timeout_execution_settlement_reconstructs_stale_incomplete_terminal_ledger(tmp_path: Path) -> None:
-    runner, run_dir, output, evidence = provider_delivery_timeout_settlement_fixture(tmp_path)
-    # Timeline: an initial false terminal was repaired to the timeout state, then
-    # a later harvest replaced the top-level ledger and rotated its stream logs.
-    state = runner.STATE.load_state(run_dir / "state.json")
-    state.update({"status": "attention_required", "session_authority": "terminal", "transport_status": "incomplete"})
-    runner.STATE.write_json_atomic(run_dir / "state.json", state)
-    state.update({"status": "running", "session_authority": "live", "transport_status": "post_submit_provider_delivery_timeout"})
-    runner.STATE.write_json_atomic(run_dir / "state.json", state)
-    (run_dir / "transcript.md").write_text(
-        "State: running\nState: completed\nMessage delivery timed out. Please try again.\n",
-        encoding="utf-8",
-    )
-    for name in ("recovery-live-stdout.log", "recovery-harvest-stdout.log"):
-        (run_dir / name).write_text("No live ChatGPT tab matched session\n", encoding="utf-8")
-    state = runner.STATE.load_state(run_dir / "state.json")
-    state.update({
-        "status": "attention_required",
-        "session_authority": "terminal",
-        "terminal_harvested": False,
-        "transport_status": "incomplete",
-        "task_outcome": "pending",
-    })
-    runner.STATE.write_json_atomic(run_dir / "state.json", state)
-
-    settled = runner.settle_user_confirmed_delivery_timeout_execution(
-        run_dir,
-        expected_output_sha256=runner.STATE.sha256_file(output),
-        confirmation=runner.STATE.USER_CONFIRMED_EXECUTION_ENDED,
-        reason="user confirmed the exact task ended after its execution evidence was produced",
-        execution_evidence=[(evidence, runner.STATE.sha256_file(evidence))],
-        process_alive=lambda _: False,
-    )
-
-    assert settled["ok"] is True
-    assert settled["result"]["session_authority"] == "settled_executed"
-
-
-def test_delivery_timeout_execution_settlement_rejects_active_owned_process(tmp_path: Path) -> None:
-    runner, run_dir, output, evidence = provider_delivery_timeout_settlement_fixture(tmp_path)
-    state = runner.STATE.load_state(run_dir / "state.json")
-    state["host_watchdog"] = {"oracle_process_pid": 4242}
-    runner.STATE.write_json_atomic(run_dir / "state.json", state)
-
-    with pytest.raises(runner.OracleRunError) as exc:
-        runner.settle_user_confirmed_delivery_timeout_execution(
-            run_dir,
-            expected_output_sha256=runner.STATE.sha256_file(output),
-            confirmation=runner.STATE.USER_CONFIRMED_EXECUTION_ENDED,
-            reason="user confirmed completion",
-            execution_evidence=[(evidence, runner.STATE.sha256_file(evidence))],
-            process_alive=lambda pid: pid == 4242,
-        )
-    assert exc.value.code == "EXECUTION_ENDED_PROCESS_ACTIVE"
-
-
-def test_delivery_timeout_execution_settlement_rejects_wrong_hash_or_missing_confirmation(tmp_path: Path) -> None:
-    runner, run_dir, output, evidence = provider_delivery_timeout_settlement_fixture(tmp_path)
-    with pytest.raises(runner.OracleRunError) as wrong_hash:
-        runner.settle_user_confirmed_delivery_timeout_execution(
-            run_dir,
-            expected_output_sha256="0" * 64,
-            confirmation=runner.STATE.USER_CONFIRMED_EXECUTION_ENDED,
-            reason="user confirmed completion",
-            execution_evidence=[(evidence, runner.STATE.sha256_file(evidence))],
-            process_alive=lambda _: False,
-        )
-    assert wrong_hash.value.code == "EXECUTION_ENDED_OUTPUT_HASH_MISMATCH"
-    with pytest.raises(runner.OracleRunError) as missing_confirmation:
-        runner.settle_user_confirmed_delivery_timeout_execution(
-            run_dir,
-            expected_output_sha256=runner.STATE.sha256_file(output),
-            confirmation="",
-            reason="user confirmed completion",
-            execution_evidence=[(evidence, runner.STATE.sha256_file(evidence))],
-            process_alive=lambda _: False,
-        )
-    assert missing_confirmation.value.code == "EXECUTION_ENDED_CONFIRMATION_REQUIRED"
-
-
-def test_delivery_timeout_execution_settlement_rejects_absent_evidence_and_active_pending_run(tmp_path: Path) -> None:
-    runner, run_dir, output, evidence = provider_delivery_timeout_settlement_fixture(tmp_path)
-    with pytest.raises(runner.OracleRunError) as absent_evidence:
-        runner.settle_user_confirmed_delivery_timeout_execution(
-            run_dir,
-            expected_output_sha256=runner.STATE.sha256_file(output),
-            confirmation=runner.STATE.USER_CONFIRMED_EXECUTION_ENDED,
-            reason="user confirmed completion",
-            execution_evidence=[],
-            process_alive=lambda _: False,
-        )
-    assert absent_evidence.value.code == "EXECUTION_ENDED_EVIDENCE_REQUIRED"
-    state = runner.STATE.load_state(run_dir / "state.json")
-    state["transport_status"] = "incomplete"
-    runner.STATE.write_json_atomic(run_dir / "state.json", state)
-    with pytest.raises(runner.OracleRunError) as active_pending:
-        runner.settle_user_confirmed_delivery_timeout_execution(
-            run_dir,
-            expected_output_sha256=runner.STATE.sha256_file(output),
-            confirmation=runner.STATE.USER_CONFIRMED_EXECUTION_ENDED,
-            reason="user confirmed completion",
-            execution_evidence=[(evidence, runner.STATE.sha256_file(evidence))],
-            process_alive=lambda _: False,
-        )
-    assert active_pending.value.code == "EXECUTION_ENDED_TIMEOUT_STATE_REQUIRED"
-
-
-def test_later_exact_live_observation_restores_provisional_terminal_authority(tmp_path: Path) -> None:
+def test_terminal_observation_cannot_regress_to_live_and_later_harvest_settles(tmp_path: Path) -> None:
     runner = load_runner()
     result = execute_run(
         runner,
@@ -2292,8 +2130,8 @@ def test_later_exact_live_observation_restores_provisional_terminal_authority(tm
         action="live",
         popen_factory=observation("completed"),
     )
-    # A later exact live observer is stronger than the provisional terminal
-    # observation because there is still no durable terminal artifact.
+    # Reproduce state already regressed by the previously installed runner;
+    # the durable exact live-observer log must restore terminal authority.
     regressed = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
     regressed["status"] = "running"
     regressed["session_authority"] = "live"
@@ -2323,9 +2161,9 @@ def test_later_exact_live_observation_restores_provisional_terminal_authority(tm
 
     assert terminal["status"] == "terminal_observed"
     assert terminal["result"]["session_authority"] == "terminal_observed"
-    assert disagreement["status"] == "session_live"
-    assert disagreement["result"]["status"] == "running"
-    assert disagreement["result"]["session_authority"] == "live"
+    assert disagreement["status"] == "terminal_settle_disagreement"
+    assert disagreement["result"]["status"] == "attention_required"
+    assert disagreement["result"]["session_authority"] == "terminal_observed"
     assert disagreement["result"]["terminal_harvested"] is False
     assert output_absent_during_disagreement
     assert blocked_duplicate["ok"] is False
@@ -2381,14 +2219,21 @@ def test_pro_structured_mission_rejects_short_terminal_preamble(tmp_path: Path) 
         kwargs["stdout"].flush()
         return Process(0, [])
 
-    restored = recover_run(
+    # Exact session authority is monotonic: a later live observer cannot
+    # regress the persisted terminal_observed.  The disagreement stays
+    # attention_required under the same lock until a terminal harvest.
+    disagreement = recover_run(
         runner,
         run_dir,
         action="live",
         popen_factory=running_observer,
     )
-    assert restored["status"] == "session_live"
-    assert restored["result"]["session_authority"] == "live"
+    state_after_disagreement = runner.STATE.load_state(run_dir / "state.json")
+    assert disagreement["status"] == "terminal_settle_disagreement"
+    assert disagreement["result"]["status"] == "attention_required"
+    assert disagreement["result"]["session_authority"] == "terminal_observed"
+    assert state_after_disagreement["session_authority"] == "terminal_observed"
+    assert state_after_disagreement["terminal_harvested"] is False
 
 
 def test_pro_terminal_candidate_with_all_ticked_sections_promotes_without_browser(

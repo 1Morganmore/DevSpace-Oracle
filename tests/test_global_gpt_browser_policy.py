@@ -91,7 +91,7 @@ def test_pro_packet_builder_matches_oracle_one_mib_attachment_contract() -> None
     assert "ORACLE_PRO_ATTACHMENT_MAX_BYTES = 1024 * 1024" in runner
 
 
-def test_pro_requires_an_evidence_based_web_multi_decision_and_auto_handoff() -> None:
+def test_pro_requires_an_evidence_based_web_multi_decision_with_explicit_initiation() -> None:
     value = text(PRO)
     assert "WEB_MULTI_NEEDED: YES|NO" in value
     assert "WEB_MULTI_REASON: evidence-based reason" in value
@@ -99,7 +99,8 @@ def test_pro_requires_an_evidence_based_web_multi_decision_and_auto_handoff() ->
     assert "ready-to-run Web Multi-GPT Very\nHigh mission" in value
     assert "same project maximum-context evidence and the durable Pro answer" in value
     assert "stable lane order, and synthesis/judge criteria" in value
-    assert "automatically without a routine user\nchoice" in value
+    assert "explicit user initiation" in value
+    assert "No route enters Web Multi automatically or as a\nfallback" in value
     assert "trivial, single-answer, or purely mechanical question" in value
 
 

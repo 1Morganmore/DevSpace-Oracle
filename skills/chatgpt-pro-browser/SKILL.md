@@ -151,10 +151,12 @@ must use, stable lane order, and synthesis/judge criteria. The mission must
 preserve the exact project root, read-only evidence boundaries, and the normal
 same-project serialization contract.
 
-After a durable Pro answer says `WEB_MULTI_NEEDED: YES`, Codex starts that
-ready-to-run Oracle Web Multi mission automatically without a routine user
-choice. It waits for the exact Pro session to be terminal first, keeps the
-same-project lock/slug safety, and never resubmits or replaces the Pro session.
+After a durable Pro answer says `WEB_MULTI_NEEDED: YES`, Codex presents that
+ready-to-run Oracle Web Multi mission to the user and starts it only on
+explicit user initiation. No route enters Web Multi automatically or as a
+fallback. When initiated, it waits for the exact Pro session to be terminal
+first, keeps the same-project lock/slug safety, and never resubmits or
+replaces the Pro session.
 
 ## Preflight
 
