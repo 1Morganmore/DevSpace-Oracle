@@ -82,6 +82,57 @@ def test_exact_devspace_patch_is_hash_gated_idempotent_and_backed_up(
     assert (backup / "sample.txt").read_bytes() == b"before\n"
 
 
+def test_compatibility_inspection_requires_patched_exact_listener_without_writing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compat = load_compat()
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "package.json").write_text(json.dumps({"version": "1.0.5"}), encoding="utf-8")
+    target = package / "sample.txt"
+    target.write_bytes(b"after\n")
+    compat.PATCHES = {
+        "sample.txt": {
+            "patch": "unused.patch",
+            "pristine": digest(b"before\n"),
+            "patched": digest(b"after\n"),
+        }
+    }
+    monkeypatch.setenv("CODEX_DEVSPACE_COMPAT_STATE_ROOT", str(tmp_path / "state"))
+    identity = {
+        "pid": 22,
+        "command_line": f"node {package / 'dist' / 'cli.js'} serve",
+        "started_at_unix_ns": 1,
+        "local_port": 7676,
+    }
+
+    ready = compat.inspect_devspace_compatibility(
+        package_root=package,
+        service_probe=lambda port: identity,
+    )
+    before = target.read_bytes()
+    target.write_bytes(b"before\n")
+    patch_required = compat.inspect_devspace_compatibility(
+        package_root=package,
+        service_probe=lambda port: identity,
+    )
+    target.write_bytes(b"unknown\n")
+    drift = compat.inspect_devspace_compatibility(
+        package_root=package,
+        service_probe=lambda port: identity,
+    )
+
+    assert ready["ready"] is True
+    assert ready["service_status"] == "match"
+    assert patch_required["files"][0]["status"] == "patch_required"
+    assert patch_required["ready"] is False
+    assert drift["files"][0]["status"] == "drift"
+    assert drift["ready"] is False
+    assert before == b"after\n"
+    assert not (tmp_path / "backup").exists()
+
+
 def test_restart_confirmation_rejects_old_or_foreign_listener(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

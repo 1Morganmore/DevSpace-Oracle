@@ -202,6 +202,32 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_run.py" recover `
   --action harvest
 ```
 
+Inspect local runtime readiness without opening ChatGPT or creating run state:
+
+```powershell
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_run.py" preflight `
+  --manifest C:\project\.ai-bridge\oracle.json `
+  --expected-manifest-sha256 <oracle_manifest_sha256>
+```
+
+For DevSpace runs, preflight checks the exact Oracle and DevSpace package hashes,
+the signed-in profile seed, project ownership, the running DevSpace process,
+Tailscale Funnel, and exact local/public `/healthz` identity. It never opens a
+browser, submits a prompt, applies compatibility patches, or validates ChatGPT
+login/app UI. The Tailscale self hostname is detected automatically; use
+`--devspace-hostname` only when an explicit override is required.
+
+Classify or watch one exact persisted run without mutation:
+
+```powershell
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_diagnose.py" triage --run-dir C:\exact\oracle-run
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_diagnose.py" watch --run-dir C:\exact\oracle-run
+```
+
+Oracle continues to own normal desktop completion notifications. `watch` adds
+host-state visibility for `attention_required`, emits NDJSON only on meaningful
+state changes, and never recovers or resubmits.
+
 ## Update, rollback, and uninstall
 
 ```powershell

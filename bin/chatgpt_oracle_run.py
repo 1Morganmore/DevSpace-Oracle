@@ -17,6 +17,13 @@ from typing import Any, Callable, Sequence
 STATE_PATH = Path(__file__).resolve().with_name("chatgpt_oracle_state.py")
 COMPAT_PATH = Path(__file__).resolve().with_name("chatgpt_oracle_compat.py")
 DEVSPACE_COMPAT_PATH = Path(__file__).resolve().with_name("chatgpt_devspace_compat.py")
+DEVSPACE_SETUP_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "skills"
+    / "chatgpt-workspace-setup"
+    / "scripts"
+    / "devspace_tailscale_setup.py"
+)
 PRO_CONTEXT_BUILDER_PATH = (
     Path(__file__).resolve().parents[1]
     / "skills"
@@ -68,6 +75,22 @@ def load_devspace_compat_module():
 DEVSPACE_COMPAT = load_devspace_compat_module()
 
 
+def load_devspace_setup_module():
+    spec = importlib.util.spec_from_file_location(
+        "chatgpt_devspace_setup_runtime",
+        DEVSPACE_SETUP_PATH,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"DevSpace setup module unavailable: {DEVSPACE_SETUP_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+DEVSPACE_SETUP = load_devspace_setup_module()
+
+
 def load_pro_context_builder_module():
     spec = importlib.util.spec_from_file_location(
         "chatgpt_pro_context_builder_runtime",
@@ -95,6 +118,183 @@ class OracleRunError(RuntimeError):
 
 
 ORACLE_PRO_ATTACHMENT_MAX_BYTES = 1024 * 1024
+PREFLIGHT_SCHEMA = "codex.chatgpt.oracle-preflight/v1"
+
+
+def detect_tailscale_hostname(
+    *,
+    run_factory: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    platform_name: str | None = None,
+) -> str:
+    completed = run_factory(
+        ["tailscale", "status", "--json"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        **STATE.windows_subprocess_kwargs(platform_name=platform_name),
+    )
+    if completed.returncode != 0:
+        raise OracleRunError(
+            "TAILSCALE_STATUS_FAILED",
+            "Tailscale self hostname could not be resolved",
+            {"exit_code": completed.returncode},
+        )
+    try:
+        payload = json.loads(completed.stdout)
+        hostname = str(payload["Self"]["DNSName"]).strip().rstrip(".")
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise OracleRunError(
+            "TAILSCALE_HOSTNAME_INVALID",
+            "Tailscale status did not contain one self DNS name",
+        ) from exc
+    if not hostname:
+        raise OracleRunError("TAILSCALE_HOSTNAME_MISSING", "Tailscale self DNS name is empty")
+    return hostname
+
+
+def _preflight_check(name: str, operation: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    try:
+        result = operation()
+        ready = bool(result.get("ready", result.get("ok")))
+        return {"name": name, "ready": ready, "result": result}
+    except Exception as exc:  # noqa: BLE001 - every failed readiness check must remain visible
+        return {
+            "name": name,
+            "ready": False,
+            "error": {
+                "code": str(getattr(exc, "code", type(exc).__name__)),
+                "message": str(exc),
+                "evidence": getattr(exc, "evidence", {}),
+            },
+        }
+
+
+def preflight_run(
+    manifest_path: Path,
+    *,
+    expected_manifest_sha256: str,
+    devspace_hostname: str | None = None,
+    devspace_local_port: int = 7676,
+    devspace_public_port: int = 443,
+    run_factory: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    platform_name: str | None = None,
+    oracle_inspector: Callable[..., dict[str, Any]] = COMPAT.inspect_oracle_compatibility,
+    devspace_inspector: Callable[..., dict[str, Any]] = DEVSPACE_COMPAT.inspect_devspace_compatibility,
+    devspace_doctor: Callable[..., dict[str, Any]] = DEVSPACE_SETUP.doctor,
+) -> dict[str, Any]:
+    """Run exact local/runtime checks without creating a run or opening ChatGPT."""
+    config = STATE.load_manifest(
+        manifest_path,
+        expected_manifest_sha256=expected_manifest_sha256,
+        platform_name=platform_name,
+    )
+    validate_oracle_attachment_sizes(config)
+    validate_pro_context_preflight(config)
+    if config.transport == "pro-attachment-only" and devspace_hostname:
+        raise OracleRunError(
+            "PRO_DEVSPACE_PREFLIGHT_FORBIDDEN",
+            "Pro attachment-only preflight does not accept DevSpace endpoint options",
+        )
+    profile_ready = config.copy_profile is not None and config.copy_profile.is_dir()
+    checks: list[dict[str, Any]] = [{
+        "name": "profile_seed",
+        "ready": profile_ready,
+        "result": {
+            "path": str(config.copy_profile) if config.copy_profile else None,
+            "login_verified": False,
+            "reason": "browser UI is outside no-submission preflight",
+        },
+    }]
+    owners = STATE.unresolved_project_sessions(config.run_root, config.project_root)
+    checks.append({
+        "name": "project_ownership",
+        "ready": not owners,
+        "result": {"unresolved_owners": owners},
+    })
+    version_check = _preflight_check(
+        "oracle_version",
+        lambda: {
+            "ok": (
+                STATE.normalize_oracle_version(
+                    resolve_oracle_version(
+                        config.oracle_command,
+                        run_factory=run_factory,
+                        platform_name=platform_name,
+                    )
+                )
+                == STATE.ORACLE_ACTIVE_VERSION
+            ),
+            "expected": STATE.ORACLE_ACTIVE_VERSION,
+        },
+    )
+    checks.append(version_check)
+    if version_check["ready"]:
+        checks.append(_preflight_check(
+            "oracle_compatibility",
+            lambda: oracle_inspector(f"oracle {STATE.ORACLE_ACTIVE_VERSION}"),
+        ))
+    else:
+        checks.append({
+            "name": "oracle_compatibility",
+            "ready": False,
+            "skipped": "oracle version was not validated",
+        })
+    if config.transport == "devspace":
+        hostname_check = _preflight_check(
+            "tailscale_hostname",
+            lambda: {
+                "ok": True,
+                "hostname": devspace_hostname
+                or detect_tailscale_hostname(run_factory=run_factory, platform_name=platform_name),
+            },
+        )
+        checks.append(hostname_check)
+        checks.append(_preflight_check(
+            "devspace_compatibility",
+            lambda: devspace_inspector(local_port=devspace_local_port),
+        ))
+        if hostname_check["ready"]:
+            hostname = str(hostname_check["result"]["hostname"])
+            setup_config = DEVSPACE_SETUP.validate_config(
+                [str(config.project_root)],
+                hostname,
+                devspace_local_port,
+                devspace_public_port,
+            )
+            def endpoint_check() -> dict[str, Any]:
+                result = devspace_doctor(setup_config)
+                return {**result, "ok": result.get("next_action") == "READY"}
+
+            checks.append(_preflight_check(
+                "devspace_endpoint",
+                endpoint_check,
+            ))
+        else:
+            checks.append({
+                "name": "devspace_endpoint",
+                "ready": False,
+                "skipped": "Tailscale hostname was not resolved",
+            })
+    else:
+        checks.append({"name": "devspace", "ready": True, "not_applicable": True})
+    ready = all(check["ready"] for check in checks)
+    failed = [check["name"] for check in checks if not check["ready"]]
+    return {
+        "schema": PREFLIGHT_SCHEMA,
+        "ok": ready,
+        "status": "ready" if ready else "not_ready",
+        "manifest_path": str(config.manifest_path),
+        "manifest_sha256": config.manifest_sha256,
+        "project_root": str(config.project_root),
+        "transport": config.transport,
+        "checks": checks,
+        "failed_checks": failed,
+        "chatgpt_ui": {
+            "checked": False,
+            "reason": "no-submission preflight never opens a browser or inspects ChatGPT settings",
+        },
+    }
 
 
 def validate_oracle_attachment_sizes(config) -> None:
@@ -719,6 +919,13 @@ def execute_run(
     )
     validate_oracle_attachment_sizes(config)
     validate_pro_context_preflight(config)
+    if not dry_run and (platform_name or os.name).lower() == "nt" and (
+        config.copy_profile is None or not config.copy_profile.is_dir()
+    ):
+        raise OracleRunError(
+            "COPY_PROFILE_REQUIRED",
+            "Windows submissions require an existing signed-in Oracle profile seed",
+        )
     layout = STATE.create_layout(config, run_id=config.requested_run_id)
     transport_mission_path = layout.run_dir / "mission.md"
     # The app reads the project mission. The copied bytes below are host-only
@@ -1627,6 +1834,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--manifest", type=Path, required=True)
     run_parser.add_argument("--expected-manifest-sha256")
     run_parser.add_argument("--dry-run", action="store_true")
+    preflight_parser = commands.add_parser("preflight")
+    preflight_parser.add_argument("--manifest", type=Path, required=True)
+    preflight_parser.add_argument("--expected-manifest-sha256", required=True)
+    preflight_parser.add_argument("--devspace-hostname")
+    preflight_parser.add_argument("--devspace-local-port", type=int, default=7676)
+    preflight_parser.add_argument("--devspace-public-port", type=int, default=443)
     recover_parser = commands.add_parser("recover")
     recover_parser.add_argument("--run-dir", type=Path, required=True)
     recover_parser.add_argument("--action", choices=("harvest", "live"), required=True)
@@ -1680,6 +1893,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.manifest,
                 expected_manifest_sha256=args.expected_manifest_sha256,
                 dry_run=args.dry_run,
+            )
+        elif args.command == "preflight":
+            payload = preflight_run(
+                args.manifest,
+                expected_manifest_sha256=args.expected_manifest_sha256,
+                devspace_hostname=args.devspace_hostname,
+                devspace_local_port=args.devspace_local_port,
+                devspace_public_port=args.devspace_public_port,
             )
         elif args.command == "recover":
             payload = recover_run(

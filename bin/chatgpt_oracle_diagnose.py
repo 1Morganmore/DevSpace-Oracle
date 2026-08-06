@@ -13,8 +13,9 @@ import argparse
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, TextIO
 
 BIN = Path(__file__).resolve().parent
 
@@ -32,6 +33,8 @@ def _load(name: str, path: Path):
 STATE = _load("oracle_diagnose_state", BIN / "chatgpt_oracle_state.py")
 
 SCHEMA = "codex.chatgpt.oracle-diagnosis/v1"
+TRIAGE_SCHEMA = "codex.chatgpt.oracle-triage/v1"
+WATCH_SCHEMA = "codex.chatgpt.oracle-watch-event/v1"
 
 # Ordered, mutually exclusive buckets.  The first matching rule wins, so keep
 # pre-submit host/UI causes ahead of post-submit provider causes: a run that
@@ -196,8 +199,238 @@ def iter_run_dirs(state_root: Path) -> Iterable[Path]:
     return sorted(path.parent for path in projects.glob("*/runs/*/state.json"))
 
 
+def _state_root(value: Path | None) -> Path:
+    return (value or STATE.oracle_state_root()).expanduser().resolve()
+
+
+def _exact_run_dir(state_root: Path, value: Path) -> Path:
+    directory = value.expanduser().resolve(strict=True)
+    try:
+        relative = directory.relative_to(state_root)
+    except ValueError as exc:
+        raise ValueError("RUN_DIR_OUTSIDE_STATE_ROOT") from exc
+    if (
+        directory.is_symlink()
+        or not directory.is_dir()
+        or len(relative.parts) != 4
+        or relative.parts[0] != "projects"
+        or relative.parts[2] != "runs"
+        or not (directory / "state.json").is_file()
+    ):
+        raise ValueError("RUN_DIR_INVALID")
+    return directory
+
+
+def _run_record(run_dir: Path) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    state_path = run_dir / "state.json"
+    try:
+        state = STATE.load_state(state_path)
+    except Exception as exc:  # noqa: BLE001 - corrupt state must remain actionable
+        return None, {
+            "run_dir": str(run_dir),
+            "bucket": UNCLASSIFIED,
+            "signature": "state-unreadable",
+            "detail": type(exc).__name__,
+        }
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    output_path = Path(str(artifacts.get("output") or (run_dir / "output.md")))
+    lifecycle = STATE.resolve_lifecycle(state, output_is_present=_output_is_nonempty(output_path))
+    verdict = classify_run(
+        state,
+        stdout_text=_read_text(run_dir / "stdout.log"),
+        has_output=_output_is_nonempty(output_path),
+        transcript_text=_read_text(run_dir / "transcript.md"),
+        user_confirmed_no_submission=(
+            STATE.proven_user_confirmed_no_submission(state_path) is not None
+        ),
+        pre_submit_host_failure=STATE.proven_pre_submit_host_failure(state_path),
+    )
+    return state, {
+        "run_dir": str(run_dir),
+        "project_root": str(state.get("project_root") or ""),
+        "status": str(state.get("status") or ""),
+        "session_authority": str(state.get("session_authority") or ""),
+        "lifecycle": str(lifecycle["lifecycle"]),
+        "authority_source": str(lifecycle["authority_source"]),
+        "output_path": str(output_path),
+        **verdict,
+    }
+
+
+def _argv(script: str, *values: str) -> list[str]:
+    return [sys.executable, str(BIN / script), *values]
+
+
+def _next_action(
+    state_root: Path,
+    run_dir: Path,
+    state: dict[str, Any] | None,
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    bucket = str(record["bucket"])
+    lifecycle = str(record.get("lifecycle") or "needs_attention")
+    owners: list[dict[str, str]] = []
+    if state is not None and str(state.get("project_root") or ""):
+        owners = STATE.unresolved_project_sessions(
+            run_dir.parent,
+            Path(str(state["project_root"])),
+            exclude_run_id=str(state.get("run_id") or ""),
+        )
+    action: dict[str, Any] = {
+        "kind": "none",
+        "safe_for_fresh_run": False,
+        "reason": REMEDIATION.get(bucket, ""),
+        "argv": None,
+    }
+    if state is None or bucket == UNCLASSIFIED:
+        action.update({
+            "kind": "report_incident",
+            "argv": _argv("chatgpt_oracle_incident.py", "report", "--run-dir", str(run_dir)),
+        })
+    elif lifecycle == "running":
+        action.update({
+            "kind": "watch_exact_run",
+            "argv": _argv(
+                "chatgpt_oracle_diagnose.py",
+                "--state-root",
+                str(state_root),
+                "watch",
+                "--run-dir",
+                str(run_dir),
+            ),
+        })
+    elif bucket in {PRE_SUBMIT_HOST, PRE_SUBMIT_UI}:
+        if owners:
+            owner_dir = Path(owners[0]["state_path"]).parent
+            action.update({
+                "kind": "watch_exact_run",
+                "reason": "Another exact session still owns this project.",
+                "argv": _argv(
+                    "chatgpt_oracle_diagnose.py",
+                    "--state-root",
+                    str(state_root),
+                    "watch",
+                    "--run-dir",
+                    str(owner_dir),
+                ),
+            })
+        else:
+            action.update({"kind": "fix_then_fresh_run", "safe_for_fresh_run": True})
+    elif bucket in {BROWSER_LIFETIME, PROVIDER_INCOMPLETE}:
+        action.update({
+            "kind": "recover_live",
+            "argv": _argv(
+                "chatgpt_oracle_run.py", "recover", "--run-dir", str(run_dir), "--action", "live"
+            ),
+        })
+    elif bucket == RECOVERY_BINDING:
+        action.update({
+            "kind": "recover_harvest",
+            "argv": _argv(
+                "chatgpt_oracle_run.py", "recover", "--run-dir", str(run_dir), "--action", "harvest"
+            ),
+        })
+    elif bucket == TASK_NOT_EXECUTED or lifecycle == "abandoned":
+        action["kind"] = "inspect_output"
+    return {**action, "unresolved_owners": owners}
+
+
+def triage(
+    *,
+    state_root: Path | None = None,
+    project_root: Path | None = None,
+    run_dir: Path | None = None,
+) -> dict[str, Any]:
+    root = _state_root(state_root)
+    if (project_root is None) == (run_dir is None):
+        raise ValueError("CHOOSE_EXACTLY_ONE_OF_PROJECT_ROOT_OR_RUN_DIR")
+    if run_dir is not None:
+        directories = [_exact_run_dir(root, run_dir)]
+        selector = {"run_dir": str(directories[0])}
+    else:
+        requested = project_root.expanduser()
+        if not requested.is_absolute():
+            raise ValueError("PROJECT_ROOT_ABSOLUTE_REQUIRED")
+        expected = str(requested.resolve(strict=False)).casefold()
+        directories = []
+        for candidate in iter_run_dirs(root):
+            try:
+                state = STATE.load_state(candidate / "state.json")
+            except Exception:  # corrupt state cannot be safely attributed to a project
+                continue
+            if str(Path(str(state.get("project_root") or "")).resolve(strict=False)).casefold() == expected:
+                directories.append(candidate)
+        selector = {"project_root": str(requested.resolve(strict=False))}
+    entries: list[dict[str, Any]] = []
+    for directory in sorted(directories, key=lambda item: item.name, reverse=True):
+        state, record = _run_record(directory)
+        entries.append({
+            **record,
+            "next_action": _next_action(root, directory, state, record),
+        })
+    return {
+        "schema": TRIAGE_SCHEMA,
+        "state_root": str(root),
+        "selector": selector,
+        "run_count": len(entries),
+        "runs": entries,
+    }
+
+
+def watch(
+    run_dir: Path,
+    *,
+    state_root: Path | None = None,
+    poll_seconds: float = 2.0,
+    timeout_seconds: float = 0.0,
+    emit: Callable[[dict[str, Any]], None] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    stderr: TextIO = sys.stderr,
+) -> int:
+    if not 0.25 <= poll_seconds <= 60:
+        raise ValueError("POLL_SECONDS_OUT_OF_RANGE")
+    if timeout_seconds < 0:
+        raise ValueError("TIMEOUT_SECONDS_INVALID")
+    root = _state_root(state_root)
+    directory = _exact_run_dir(root, run_dir)
+    writer = emit or (lambda value: print(json.dumps(value, ensure_ascii=False), flush=True))
+    started = clock()
+    previous: tuple[str, ...] | None = None
+    while True:
+        report = triage(state_root=root, run_dir=directory)
+        record = report["runs"][0]
+        current = tuple(str(record.get(key) or "") for key in (
+            "status", "session_authority", "lifecycle", "bucket", "signature"
+        ))
+        lifecycle = str(record["lifecycle"])
+        if current != previous:
+            writer({
+                "schema": WATCH_SCHEMA,
+                "event": "snapshot" if previous is None else "changed",
+                "elapsed_seconds": round(clock() - started, 3),
+                "run": record,
+            })
+            previous = current
+        if lifecycle in {"complete", "needs_attention", "abandoned"}:
+            if getattr(stderr, "isatty", lambda: False)():
+                stderr.write("\a")
+                stderr.flush()
+            return 0 if lifecycle == "complete" else 2
+        elapsed = clock() - started
+        if timeout_seconds and elapsed >= timeout_seconds:
+            writer({
+                "schema": WATCH_SCHEMA,
+                "event": "timeout",
+                "elapsed_seconds": round(elapsed, 3),
+                "run_dir": str(directory),
+            })
+            return 3
+        sleep(min(poll_seconds, max(0.0, timeout_seconds - elapsed)) if timeout_seconds else poll_seconds)
+
+
 def diagnose(state_root: Path | None = None) -> dict[str, Any]:
-    root = (state_root or STATE.oracle_state_root()).expanduser().resolve()
+    root = _state_root(state_root)
     runs: list[dict[str, Any]] = []
     for run_dir in iter_run_dirs(root):
         try:
@@ -253,14 +486,48 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only Oracle failure-signature report.")
     parser.add_argument("--state-root", type=Path, default=None)
     parser.add_argument("--summary-only", action="store_true")
+    commands = parser.add_subparsers(dest="command")
+    triage_parser = commands.add_parser("triage", help="Classify one exact run or project and show safe next actions.")
+    triage_selector = triage_parser.add_mutually_exclusive_group(required=True)
+    triage_selector.add_argument("--project-root", type=Path)
+    triage_selector.add_argument("--run-dir", type=Path)
+    watch_parser = commands.add_parser("watch", help="Watch one exact persisted run without recovery or mutation.")
+    watch_parser.add_argument("--run-dir", type=Path, required=True)
+    watch_parser.add_argument("--poll-seconds", type=float, default=2.0)
+    watch_parser.add_argument("--timeout-seconds", type=float, default=0.0)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    report = diagnose(args.state_root)
-    if args.summary_only:
-        report = {key: value for key, value in report.items() if key != "unresolved_runs"}
+    try:
+        if args.command == "watch":
+            if args.summary_only:
+                raise ValueError("SUMMARY_ONLY_FOR_AGGREGATE_DIAGNOSIS")
+            return watch(
+                args.run_dir,
+                state_root=args.state_root,
+                poll_seconds=args.poll_seconds,
+                timeout_seconds=args.timeout_seconds,
+            )
+        if args.command == "triage":
+            if args.summary_only:
+                raise ValueError("SUMMARY_ONLY_FOR_AGGREGATE_DIAGNOSIS")
+            report = triage(
+                state_root=args.state_root,
+                project_root=args.project_root,
+                run_dir=args.run_dir,
+            )
+        else:
+            report = diagnose(args.state_root)
+            if args.summary_only:
+                report = {key: value for key, value in report.items() if key != "unresolved_runs"}
+    except (OSError, ValueError, STATE.OracleStateError) as exc:
+        print(json.dumps({
+            "ok": False,
+            "error": {"code": "ORACLE_DIAGNOSE_FAILED", "message": str(exc)},
+        }, ensure_ascii=False, indent=2))
+        return 1
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
 

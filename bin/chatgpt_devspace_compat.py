@@ -268,6 +268,69 @@ def _apply_patch(package_root: Path, patch_path: Path) -> None:
             )
 
 
+def inspect_devspace_compatibility(
+    *,
+    package_root: Path | None = None,
+    service_probe=current_devspace_service_identity,
+    local_port: int = 7676,
+) -> dict[str, Any]:
+    """Inspect exact package and listener identity without patching or restarting."""
+    roots = (
+        resolve_package_roots()
+        if package_root is None
+        else [package_root.expanduser().resolve(strict=True)]
+    )
+    files: list[dict[str, str]] = []
+    for root in roots:
+        if package_version(root) != SUPPORTED_VERSION:
+            raise DevSpaceCompatError(
+                "DEVSPACE_VERSION_UNVALIDATED",
+                "DevSpace compatibility is validated only for the tested version",
+                {"root": str(root), "supported": SUPPORTED_VERSION},
+            )
+        for relative, contract in PATCHES.items():
+            target = root / Path(relative)
+            current = sha256_file(target)
+            status = (
+                "patched"
+                if current == contract["patched"]
+                else "patch_required"
+                if current == contract["pristine"]
+                else "drift"
+            )
+            files.append({
+                "path": str(target),
+                "status": status,
+                "actual_sha256": current,
+                "expected_patched_sha256": str(contract["patched"]),
+            })
+    marker = restart_marker_path()
+    service_identity = service_probe(local_port)
+    service_status = "absent"
+    if service_identity is not None:
+        try:
+            service_identity = _assert_devspace_service_identity(service_identity, roots)
+            service_status = "match"
+        except DevSpaceCompatError:
+            service_status = "mismatch"
+    ready = (
+        all(item["status"] == "patched" for item in files)
+        and not marker.is_file()
+        and service_status == "match"
+    )
+    return {
+        "ok": True,
+        "ready": ready,
+        "version": SUPPORTED_VERSION,
+        "package_roots": [str(root) for root in roots],
+        "files": files,
+        "service_status": service_status,
+        "service_identity": service_identity,
+        "service_restart_required": marker.is_file(),
+        "restart_marker": str(marker),
+    }
+
+
 def ensure_devspace_compatibility(
     *,
     package_root: Path | None = None,

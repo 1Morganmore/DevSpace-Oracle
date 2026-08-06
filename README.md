@@ -195,6 +195,31 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_run.py" recover `
   --action harvest
 ```
 
+ChatGPT를 열거나 실행 상태를 만들지 않고 로컬 런타임 준비 상태를 확인하려면:
+
+```powershell
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_run.py" preflight `
+  --manifest C:\project\.ai-bridge\oracle.json `
+  --expected-manifest-sha256 <oracle_manifest_sha256>
+```
+
+DevSpace 실행의 preflight는 정확한 Oracle/DevSpace 패키지 해시, 로그인 프로필
+seed, 프로젝트 소유권, 실행 중인 DevSpace 프로세스, Tailscale Funnel, 로컬·공개
+`/healthz` identity를 확인합니다. 브라우저 실행, 프롬프트 제출, 호환성 패치 적용,
+ChatGPT 로그인·앱 UI 검사는 하지 않습니다. Tailscale 자체 호스트명은 자동 감지하며
+필요할 때만 `--devspace-hostname`으로 지정합니다.
+
+저장된 정확한 실행을 변경 없이 분류하거나 감시하려면:
+
+```powershell
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_diagnose.py" triage --run-dir C:\exact\oracle-run
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_diagnose.py" watch --run-dir C:\exact\oracle-run
+```
+
+정상 완료 데스크톱 알림은 기존 Oracle이 담당합니다. `watch`는
+`attention_required`를 포함한 host 상태 변화를 NDJSON으로 알리며 복구하거나
+재제출하지 않습니다.
+
 ## 업데이트와 제거
 
 ```powershell

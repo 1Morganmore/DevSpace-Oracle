@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,7 @@ def write_run(
     session_authority: str = "",
     terminal_harvested: bool = False,
     task_outcome: str = "",
+    project_root: Path | None = None,
 ) -> Path:
     run_dir = state_root / "projects" / "projectkey" / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -44,7 +46,7 @@ def write_run(
         "schema": "codex.chatgpt.oracle-run-state/v1",
         "status": status,
         "run_id": run_id,
-        "project_root": str(state_root / "project"),
+        "project_root": str(project_root or (state_root / "project")),
         "session_authority": session_authority,
         "terminal_harvested": terminal_harvested,
         "task_outcome": task_outcome,
@@ -418,3 +420,150 @@ def test_report_is_read_only_for_persisted_runs(tmp_path: Path) -> None:
     }
     assert after == before
     assert (run_dir / "state.json").is_file()
+
+
+def test_triage_filters_exact_project_and_returns_existing_safe_commands(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    selected = tmp_path / "selected"
+    sibling = tmp_path / "selected-child"
+    selected.mkdir()
+    sibling.mkdir()
+    live = write_run(
+        state_root,
+        "live0000",
+        status="running",
+        session_authority="live",
+        project_root=selected,
+    )
+    write_run(
+        state_root,
+        "other000",
+        status="running",
+        session_authority="live",
+        project_root=sibling,
+    )
+
+    report = module.triage(state_root=state_root, project_root=selected)
+
+    assert report["schema"] == "codex.chatgpt.oracle-triage/v1"
+    assert [item["run_dir"] for item in report["runs"]] == [str(live.resolve())]
+    action = report["runs"][0]["next_action"]
+    assert action["kind"] == "watch_exact_run"
+    assert action["safe_for_fresh_run"] is False
+    assert action["argv"][-2:] == ["--run-dir", str(live.resolve())]
+
+
+def test_triage_never_allows_fresh_run_while_another_exact_owner_exists(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    project = tmp_path / "project"
+    project.mkdir()
+    failed = write_run(
+        state_root,
+        "failed00",
+        status="failed",
+        stdout="ERROR: ChatGPT app mention was not confirmed in the composer.\n",
+        project_root=project,
+    )
+    owner = write_run(
+        state_root,
+        "owner000",
+        status="running",
+        session_authority="submitted_unknown",
+        project_root=project,
+    )
+
+    record = module.triage(state_root=state_root, run_dir=failed)["runs"][0]
+
+    assert record["next_action"]["safe_for_fresh_run"] is False
+    assert record["next_action"]["kind"] == "watch_exact_run"
+    assert record["next_action"]["argv"][-1] == str(owner.resolve())
+
+
+def test_triage_maps_provider_incomplete_to_exact_live_recovery(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    run_dir = write_run(
+        state_root,
+        "recover0",
+        status="failed",
+        stdout="ERROR: timed out before completion\n",
+    )
+
+    action = module.triage(state_root=state_root, run_dir=run_dir)["runs"][0]["next_action"]
+
+    assert action["kind"] == "recover_live"
+    assert action["argv"][-4:] == ["--run-dir", str(run_dir.resolve()), "--action", "live"]
+
+
+def test_triage_rejects_arbitrary_directories_outside_host_state(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "state.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="RUN_DIR_OUTSIDE_STATE_ROOT"):
+        module.triage(state_root=state_root, run_dir=outside)
+
+
+class TtyBuffer(StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def test_watch_returns_terminal_codes_bells_and_never_mutates_state(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    complete = write_run(
+        state_root,
+        "complete",
+        status="complete",
+        output="answer",
+        session_authority="terminal",
+        terminal_harvested=True,
+        task_outcome="executed",
+    )
+    attention = write_run(state_root, "attentn0", status="failed")
+    before = (complete / "state.json").read_bytes()
+
+    events: list[dict] = []
+    stderr = TtyBuffer()
+    assert module.watch(complete, state_root=state_root, emit=events.append, stderr=stderr) == 0
+    assert events[0]["event"] == "snapshot"
+    assert events[0]["run"]["lifecycle"] == "complete"
+    assert stderr.getvalue() == "\a"
+    assert (complete / "state.json").read_bytes() == before
+    assert module.watch(attention, state_root=state_root, emit=lambda value: None) == 2
+
+
+def test_watch_timeout_emits_one_snapshot_and_timeout(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    running = write_run(
+        state_root,
+        "running0",
+        status="running",
+        session_authority="live",
+    )
+    current = -0.25
+
+    def clock() -> float:
+        nonlocal current
+        current += 0.25
+        return current
+
+    events: list[dict] = []
+    code = module.watch(
+        running,
+        state_root=state_root,
+        poll_seconds=0.25,
+        timeout_seconds=0.5,
+        emit=events.append,
+        sleep=lambda seconds: None,
+        clock=clock,
+    )
+
+    assert code == 3
+    assert [event["event"] for event in events] == ["snapshot", "timeout"]

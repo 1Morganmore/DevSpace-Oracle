@@ -256,6 +256,59 @@ def _migrate_known_legacy_patch(
         shutil.copy2(staged_target, target)
 
 
+def inspect_oracle_compatibility(
+    resolved_version: str,
+    *,
+    package_root: Path | None = None,
+) -> dict[str, Any]:
+    """Inspect exact package hashes without patching or creating backups."""
+    version = resolved_version.strip().removeprefix("oracle ").strip()
+    contracts = VERSION_PATCHES.get(version)
+    if contracts is None:
+        raise OracleCompatError(
+            "ORACLE_VERSION_UNVALIDATED",
+            "Oracle compatibility is validated only for tested versions",
+            {"resolved": resolved_version, "supported": list(RECOVERABLE_VERSIONS)},
+        )
+    roots = (
+        resolve_package_roots(version)
+        if package_root is None
+        else [package_root.expanduser().resolve(strict=True)]
+    )
+    files: list[dict[str, str]] = []
+    for root in roots:
+        if package_version(root) != version:
+            raise OracleCompatError(
+                "ORACLE_VERSION_MISMATCH",
+                "Oracle package version does not match the resolved CLI version",
+            )
+        for relative, contract in contracts.items():
+            target = root / Path(relative)
+            current = sha256_file(target)
+            if current == contract["patched"]:
+                status = "patched"
+            elif current == contract["pristine"]:
+                status = "patch_required"
+            elif current in contract.get("legacy_patched", []):
+                status = "legacy_patch_required"
+            else:
+                status = "drift"
+            files.append({
+                "path": str(target),
+                "status": status,
+                "actual_sha256": current,
+                "expected_patched_sha256": str(contract["patched"]),
+            })
+    return {
+        "ok": True,
+        "ready": all(item["status"] == "patched" for item in files),
+        "version": version,
+        "package_root": str(roots[0]),
+        "package_roots": [str(root) for root in roots],
+        "files": files,
+    }
+
+
 def ensure_oracle_compatibility(
     resolved_version: str,
     *,

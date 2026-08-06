@@ -61,6 +61,8 @@ def test_doctor_orders_local_funnel_public_and_manual_failure_branch(tmp_path: P
     class Response:
         def __init__(self, status: int = 200):
             self.status = status
+        def read(self, limit):
+            return json.dumps({"ok": True, "name": "devspace"}).encode("utf-8")
         def __enter__(self):
             return self
         def __exit__(self, *args):
@@ -79,7 +81,7 @@ def test_doctor_orders_local_funnel_public_and_manual_failure_branch(tmp_path: P
         )
 
     report = module.doctor(current, opener=opener, runner=runner, chatgpt_call_failed=True)
-    assert seen == [current.local_mcp_url, current.registration_url]
+    assert seen == [current.local_health_url, current.public_health_url]
     assert report["next_action"] == "MANUAL_CHATGPT_REGISTRATION_CHECK"
     assert report["registration_url"] == current.registration_url
 
@@ -144,6 +146,28 @@ def test_doctor_rejects_404_and_unrelated_funnel_mapping(tmp_path: Path) -> None
     )
     assert report["ok"] is False
     assert report["error"] == "TAILSCALE_FUNNEL_MAPPING_MISSING"
+
+
+def test_doctor_requires_exact_devspace_health_identity(tmp_path: Path) -> None:
+    module, current = config(tmp_path)
+
+    class Response:
+        status = 200
+        def read(self, limit):
+            return json.dumps({"ok": True, "name": "another-service"}).encode("utf-8")
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+
+    report = module.doctor(
+        current,
+        opener=lambda *args, **kwargs: Response(),
+        runner=lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="{}", stderr=""),
+    )
+
+    assert report["next_action"] == "CHECK_DEVSPACE_LOCAL_SERVICE"
+    assert report["local"]["error"] == "DEVSPACE_HEALTH_IDENTITY_INVALID"
 
 
 def test_nondefault_public_port_is_explicit_and_existing_mapping_is_not_overwritten(tmp_path: Path) -> None:

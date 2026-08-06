@@ -389,6 +389,36 @@ def test_exact_version_patch_is_hash_gated_idempotent_and_backed_up(
     assert (backup / "sample.txt").read_bytes() == b"before\n"
 
 
+def test_compatibility_inspection_classifies_hashes_without_writing(tmp_path: Path) -> None:
+    compat = load_compat()
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "package.json").write_text(json.dumps({"version": "0.17.0"}), encoding="utf-8")
+    target = package / "sample.txt"
+    compat.VERSION_PATCHES = {"0.17.0": {
+        "sample.txt": {
+            "patch": "unused.patch",
+            "pristine": digest(b"before\n"),
+            "patched": digest(b"after\n"),
+            "legacy_patched": [digest(b"legacy\n")],
+        }
+    }}
+
+    for content, expected in (
+        (b"after\n", "patched"),
+        (b"before\n", "patch_required"),
+        (b"legacy\n", "legacy_patch_required"),
+        (b"unknown\n", "drift"),
+    ):
+        target.write_bytes(content)
+        before = target.read_bytes()
+        result = compat.inspect_oracle_compatibility("oracle 0.17.0", package_root=package)
+        assert result["files"][0]["status"] == expected
+        assert result["ready"] is (expected == "patched")
+        assert target.read_bytes() == before
+        assert not (tmp_path / "backup").exists()
+
+
 def test_patch_application_tolerates_only_line_ending_drift_before_hash_validation(
     tmp_path: Path,
 ) -> None:

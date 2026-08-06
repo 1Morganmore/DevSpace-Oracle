@@ -76,6 +76,26 @@ adds a short grace for a wedged CDP call; if it expires, the runner returns
 `post_submit_watchdog_timeout`, preserves the exact process/session and browser
 evidence, and remains unsafe for a fresh submission.
 
+## Preflight and triage
+
+After the exact dry-run preview, validate the same manifest and hash without a
+browser or submission:
+
+```powershell
+python skills/chatgpt-oracle-runtime/scripts/run_chatgpt_oracle.py preflight --manifest C:\absolute\oracle-job.json --expected-manifest-sha256 <manifest.actual_sha256>
+```
+
+Preflight invokes the pinned Oracle version, inspects exact compatibility hashes,
+requires the signed-in profile seed, checks unresolved project ownership, and for
+DevSpace validates the exact listener plus local/public `/healthz` identity and
+Tailscale Funnel mapping. It does not patch packages, create run state, inspect
+ChatGPT UI, or submit. A failed check is `not_ready`; fix it and rerun preflight.
+
+Use `chatgpt_oracle_diagnose.py triage --run-dir <exact-run>` for a bounded next
+action and `watch --run-dir <exact-run>` for read-only NDJSON lifecycle changes.
+Only execute the returned exact recovery argv when triage identifies that action;
+an active session is watched, never recovered or replaced.
+
 ## Recovery
 
 Recovery always reuses the stored Oracle slug and never restarts or submits:

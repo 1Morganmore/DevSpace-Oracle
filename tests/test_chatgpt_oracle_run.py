@@ -136,6 +136,102 @@ def version_timeout_runner(command, **kwargs):
     raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 30))
 
 
+def test_no_submission_preflight_checks_runtime_without_creating_run_state(tmp_path: Path) -> None:
+    runner = load_runner()
+    profile = tmp_path.parent / f"{tmp_path.name}-profile"
+    profile.mkdir()
+    job = manifest(tmp_path, copy_profile=str(profile.resolve()))
+    host_state = Path(os.environ["CODEX_ORACLE_STATE_ROOT"])
+    doctor_calls = []
+
+    result = runner.preflight_run(
+        job,
+        expected_manifest_sha256=hashlib.sha256(job.read_bytes()).hexdigest(),
+        devspace_hostname="device.tailnet.ts.net",
+        run_factory=version_runner,
+        oracle_inspector=lambda version: {"ok": True, "ready": True, "version": version},
+        devspace_inspector=lambda **kwargs: {"ok": True, "ready": True},
+        devspace_doctor=lambda config: doctor_calls.append(config) or {"next_action": "READY"},
+    )
+
+    assert result["schema"] == "codex.chatgpt.oracle-preflight/v1"
+    assert result["ok"] is True
+    assert result["status"] == "ready"
+    assert result["failed_checks"] == []
+    assert result["chatgpt_ui"]["checked"] is False
+    assert len(doctor_calls) == 1
+    assert doctor_calls[0].registration_url == "https://device.tailnet.ts.net/mcp"
+    assert not host_state.exists()
+
+
+def test_preflight_reports_missing_profile_and_devspace_without_browser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_runner()
+    monkeypatch.setenv("ORACLE_BROWSER_PROFILE_DIR", str(tmp_path / "missing-profile"))
+    job = manifest(tmp_path)
+
+    result = runner.preflight_run(
+        job,
+        expected_manifest_sha256=hashlib.sha256(job.read_bytes()).hexdigest(),
+        devspace_hostname="device.tailnet.ts.net",
+        run_factory=version_runner,
+        oracle_inspector=lambda version: {"ok": True, "ready": True},
+        devspace_inspector=lambda **kwargs: {"ok": True, "ready": False},
+        devspace_doctor=lambda config: {"next_action": "CHECK_DEVSPACE_LOCAL_SERVICE"},
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "not_ready"
+    assert {"profile_seed", "devspace_compatibility", "devspace_endpoint"}.issubset(
+        result["failed_checks"]
+    )
+
+
+def test_windows_live_submission_requires_profile_seed_before_run_layout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_runner()
+    monkeypatch.setenv("ORACLE_BROWSER_PROFILE_DIR", str(tmp_path / "missing-profile"))
+    job = manifest(tmp_path)
+    run_root = runner.STATE.load_manifest(job, platform_name="nt").run_root
+
+    with pytest.raises(runner.OracleRunError) as error:
+        execute_run(runner, job, platform_name="nt")
+
+    assert error.value.code == "COPY_PROFILE_REQUIRED"
+    assert not run_root.exists()
+
+
+def test_pro_preflight_skips_devspace_and_rejects_endpoint_options(tmp_path: Path) -> None:
+    runner = load_runner()
+    profile = tmp_path.parent / f"{tmp_path.name}-profile"
+    profile.mkdir()
+    job = pro_manifest(tmp_path, copy_profile=str(profile.resolve()))
+    expected = hashlib.sha256(job.read_bytes()).hexdigest()
+
+    result = runner.preflight_run(
+        job,
+        expected_manifest_sha256=expected,
+        run_factory=version_runner,
+        oracle_inspector=lambda version: {"ok": True, "ready": True},
+    )
+
+    assert result["ok"] is True
+    assert next(check for check in result["checks"] if check["name"] == "devspace")["not_applicable"] is True
+    with pytest.raises(runner.OracleRunError) as error:
+        runner.preflight_run(
+            job,
+            expected_manifest_sha256=expected,
+            devspace_hostname="device.tailnet.ts.net",
+            run_factory=version_runner,
+            oracle_inspector=lambda version: {"ok": True, "ready": True},
+        )
+    assert error.value.code == "PRO_DEVSPACE_PREFLIGHT_FORBIDDEN"
+
+
 def test_version_resolution_allows_a_bounded_slow_valid_oracle_0170() -> None:
     runner = load_runner()
     captured = {}

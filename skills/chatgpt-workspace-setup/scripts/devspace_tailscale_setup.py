@@ -52,6 +52,15 @@ class SetupConfig:
     def local_mcp_url(self) -> str:
         return f"http://127.0.0.1:{self.local_port}/mcp"
 
+    @property
+    def local_health_url(self) -> str:
+        return f"http://127.0.0.1:{self.local_port}/healthz"
+
+    @property
+    def public_health_url(self) -> str:
+        suffix = "" if self.public_port == 443 else f":{self.public_port}"
+        return f"https://{self.hostname}{suffix}/healthz"
+
 
 def redact(value: str) -> str:
     return SECRET_PATTERN.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", value)
@@ -210,6 +219,35 @@ def http_probe(url: str, *, opener: Callable[..., Any] = urllib.request.urlopen)
         return {"ok": False, "error": type(error).__name__, "url": url}
 
 
+def devspace_health_probe(
+    url: str,
+    *,
+    opener: Callable[..., Any] = urllib.request.urlopen,
+) -> dict[str, Any]:
+    request = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
+    try:
+        with opener(request, timeout=5) as response:
+            raw = response.read(4097)
+            if response.status != 200 or len(raw) > 4096:
+                return {"ok": False, "status": response.status, "url": url}
+    except urllib.error.HTTPError as error:
+        return {"ok": False, "status": error.code, "url": url}
+    except OSError as error:
+        return {"ok": False, "error": type(error).__name__, "url": url}
+    try:
+        payload = json.loads(raw.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {"ok": False, "error": "DEVSPACE_HEALTH_IDENTITY_INVALID", "url": url}
+    exact = isinstance(payload, dict) and payload.get("ok") is True and payload.get("name") == "devspace"
+    return {
+        "ok": exact,
+        "status": 200,
+        "url": url,
+        "identity": payload if exact else None,
+        **({} if exact else {"error": "DEVSPACE_HEALTH_IDENTITY_INVALID"}),
+    }
+
+
 def funnel_status(
     config: SetupConfig | None = None,
     *,
@@ -250,7 +288,7 @@ def funnel_status(
 
 
 def doctor(config: SetupConfig, *, opener: Callable[..., Any] = urllib.request.urlopen, runner: Callable[..., Any] = subprocess.run, chatgpt_call_failed: bool = False) -> dict[str, Any]:
-    local = http_probe(config.local_mcp_url, opener=opener)
+    local = devspace_health_probe(config.local_health_url, opener=opener)
     if not local.get("ok"):
         return {
             "local": local,
@@ -267,7 +305,7 @@ def doctor(config: SetupConfig, *, opener: Callable[..., Any] = urllib.request.u
             "recommended_app_name": APP_NAME,
             "next_action": "CHECK_TAILSCALE_FUNNEL",
         }
-    public = http_probe(config.registration_url, opener=opener)
+    public = devspace_health_probe(config.public_health_url, opener=opener)
     report: dict[str, Any] = {
         "local": local,
         "funnel": funnel,
