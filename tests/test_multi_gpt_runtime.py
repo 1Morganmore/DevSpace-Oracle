@@ -13,6 +13,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "mcp_servers" / "multi-gpt" / "server.mjs"
+MCP_PROCESS_TIMEOUT_SECONDS = 30
 
 
 @pytest.fixture
@@ -47,7 +48,9 @@ def mcp_response(method: str, params: dict, *, env: dict[str, str] | None = None
         text=True,
         capture_output=True,
         check=True,
-        timeout=30,
+        # CI can take longer than a local shell to cold-start Node and load the
+        # MCP server. Keep this bounded so a genuinely hung server still fails.
+        timeout=MCP_PROCESS_TIMEOUT_SECONDS,
         env=env,
     )
     return json.loads(completed.stdout.strip())

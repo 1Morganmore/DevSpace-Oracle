@@ -37,8 +37,10 @@ def write_run(
     output_path = run_dir / "output.md"
     if output is not None:
         output_path.write_text(output, encoding="utf-8")
-    (run_dir / "stdout.log").write_text(stdout, encoding="utf-8")
-    (run_dir / "stderr.log").write_text("", encoding="utf-8")
+    stdout_path = run_dir / "stdout.log"
+    stderr_path = run_dir / "stderr.log"
+    stdout_path.write_text(stdout, encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
     (run_dir / "state.json").write_text(json.dumps({
         "schema": "codex.chatgpt.oracle-run-state/v1",
         "status": status,
@@ -46,11 +48,7 @@ def write_run(
         "project_root": str(project_root),
         "session_authority": session_authority,
         "terminal_harvested": terminal_harvested,
-        "artifacts": {
-            "output": str(output_path),
-            "stdout": str(run_dir / "stdout.log"),
-            "stderr": str(run_dir / "stderr.log"),
-        },
+        "artifacts": {"output": str(output_path), "stdout": str(stdout_path), "stderr": str(stderr_path)},
         "oracle": {"slug": "oracle-project-abc", "conversation_url": "https://chatgpt.com/c/exact"},
     }), encoding="utf-8")
     return run_dir
@@ -76,17 +74,35 @@ def test_packet_carries_exact_run_bucket_and_evidence(tmp_path: Path) -> None:
     assert str(run_dir / "state.json") in packet["evidence_paths"]
 
 
-def test_compatibility_version_drift_incident_is_safe_to_retry(tmp_path: Path) -> None:
+def test_version_resolution_prelaunch_incident_is_safe_to_retry(tmp_path: Path) -> None:
     module = load()
     run_dir = write_run(tmp_path, "v" * 8, status="attention_required")
     state_path = run_dir / "state.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["pre_submit_failure"] = {
+        "code": "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED",
+        "output_absent": True,
+        "conversation_url_absent": True,
+    }
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    packet = module.build_packet(run_dir)
+
+    assert packet["bucket"] == "pre-submit-host-environment"
+    assert packet["signature"] == "oracle-version-resolution-prelaunch-timeout"
+    assert packet["safe_for_fresh_run"] is True
+
+
+def test_version_compatibility_drift_incident_is_safe_to_retry(tmp_path: Path) -> None:
+    module = load()
+    run_dir = write_run(tmp_path, "c" * 8, status="failed")
+    state_path = run_dir / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["oracle"] = {"resolved_version": "unresolved"}
     state["session_authority"] = "pre_submit"
-    state["oracle"]["resolved_version"] = "unresolved"
-    state["oracle"]["conversation_url"] = ""
     state_path.write_text(json.dumps(state), encoding="utf-8")
     (run_dir / "stderr.log").write_text(
-        "version resolution failed: Oracle compatibility is validated only for tested versions\n",
+        "version resolution failed: Oracle compatibility is validated only for the tested version\n",
         encoding="utf-8",
     )
 

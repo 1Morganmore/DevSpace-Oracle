@@ -91,6 +91,18 @@ def test_pro_packet_builder_matches_oracle_one_mib_attachment_contract() -> None
     assert "ORACLE_PRO_ATTACHMENT_MAX_BYTES = 1024 * 1024" in runner
 
 
+def test_pro_requires_an_evidence_based_web_multi_decision_and_auto_handoff() -> None:
+    value = text(PRO)
+    assert "WEB_MULTI_NEEDED: YES|NO" in value
+    assert "WEB_MULTI_REASON: evidence-based reason" in value
+    assert "three to five materially independent" in value
+    assert "ready-to-run Web Multi-GPT Very\nHigh mission" in value
+    assert "same project maximum-context evidence and the durable Pro answer" in value
+    assert "stable lane order, and synthesis/judge criteria" in value
+    assert "automatically without a routine user\nchoice" in value
+    assert "trivial, single-answer, or purely mechanical question" in value
+
+
 def test_deep_research_uses_oracle_deep_without_silent_fallback() -> None:
     value = text(RESEARCH)
     assert "chatgpt_oracle_dispatch.py" in value

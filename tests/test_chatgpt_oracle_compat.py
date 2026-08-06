@@ -389,9 +389,41 @@ def test_exact_version_patch_is_hash_gated_idempotent_and_backed_up(
     assert (backup / "sample.txt").read_bytes() == b"before\n"
 
 
-def test_unknown_oracle_version_or_file_hash_fails_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_patch_application_tolerates_only_line_ending_drift_before_hash_validation(
+    tmp_path: Path,
 ) -> None:
+    compat = load_compat()
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "package.json").write_text(json.dumps({"version": "0.16.1"}), encoding="utf-8")
+    (package / "sample.txt").write_bytes(b"before\r\n")
+    patches = tmp_path / "patches"
+    patches.mkdir()
+    (patches / "sample.patch").write_text(
+        "diff --git a/sample.txt b/sample.txt\n"
+        "--- a/sample.txt\n"
+        "+++ b/sample.txt\n"
+        "@@ -1 +1 @@\n"
+        "-before\n"
+        "+after\n",
+        encoding="utf-8",
+    )
+    compat.VERSION_PATCHES = {
+        "0.16.1": {
+            "sample.txt": {
+                "patch": "sample.patch",
+                "pristine": digest(b"before\r\n"),
+                "patched": digest(b"after\n"),
+            }
+        }
+    }
+    compat.patch_root = lambda version: patches
+    result = compat.ensure_oracle_compatibility("oracle 0.16.1", package_root=package)
+    assert result["changed"] == ["sample.txt"]
+    assert (package / "sample.txt").read_bytes() == b"after\n"
+
+
+def test_unknown_oracle_version_or_file_hash_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     compat = load_compat()
     with pytest.raises(compat.OracleCompatError) as version:
         compat.ensure_oracle_compatibility("oracle 0.18.0", package_root=tmp_path)
@@ -801,6 +833,40 @@ def test_copy_profile_recovery_patch_reuses_only_the_persisted_profile_seed() ->
     assert "wrapEphemeralRecoveryChrome" in patch
     assert contract["pristine"] == "d7e39d21acf07e6d227e761944519e11cd8d93930629cc87555d7de75a42d1ca"
     assert contract["patched"] == "cc2a036f6e2409ae7edceee1f381a5062cd6cc5cd1618af465a1b384081ed69e"
+
+
+def test_legacy_recover_conversation_patch_sets_the_longer_ready_budget() -> None:
+    compat = load_compat()
+    contract = compat.VERSION_PATCHES["0.16.1"]["dist/src/browser/recoverConversation.js"]
+    patch = (
+        compat.patch_root("0.16.1")
+        / contract["patch"]
+    ).read_text(encoding="utf-8")
+
+    assert "const DEFAULT_READY_TIMEOUT_MS = 90_000;" in patch
+    assert contract["pristine"] == "8c7d841bc078af20c8922ec435f62e00df7a40605583fbd89334696b3ddb386b"
+    assert contract["patched"] == "168d665fa7c6cc0ef5094a990e94e7a3ae57f2d3bebcc5c2625cb6cff0cb89b1"
+    assert "650ffe9bdbbaf799510e8cacaa8ba8407322bbbb175e790a3cf7777fa14772fe" in contract["legacy_patched"]
+
+
+def test_live_tail_patch_keeps_one_recovered_browser_connection_until_its_deadline() -> None:
+    compat = load_compat()
+    contract = compat.VERSION_PATCHES["0.16.1"]["dist/src/cli/browserTabs.js"]
+    patch = (
+        MODULE_PATH.parent
+        / "oracle-compat"
+        / "0.16.1"
+        / contract["patch"]
+    ).read_text(encoding="utf-8")
+
+    assert "ORACLE_LIVE_TERMINAL_TIMEOUT_MS" in patch
+    assert "const terminalDeadlineMs" in patch
+    assert "Date.now() < terminalDeadlineMs" in patch
+    assert "recoveredContentDeadlineMs = holdRecoveredConnection" in patch
+    assert "? terminalDeadlineMs" in patch
+    assert contract["legacy_patched"] == ["1a6d3b9d7044d84300f630fe669b16d9cfec3925c427cfb4c3d1291205406dab"]
+    assert contract["legacy_patch"] == "browserTabs.pre-readiness.patch"
+    assert contract["pristine"] == "05256692ffa9b35415346963adde5ff42aeacd78ce46dd6f484496678f5d0281"
 
 
 def test_hidden_window_patch_supports_windows_without_headless_mode() -> None:

@@ -131,6 +131,31 @@ arithmetic, and next actions. Preflight fails closed if a required category is
 missing without an explicit omission record, if hashes are stale, or if the
 packet cannot be tied to the exact project root and question.
 
+## Required Web Multi decision
+
+Every Pro mission must end by requiring this exact decision block in the Pro
+answer:
+
+```text
+WEB_MULTI_NEEDED: YES|NO
+WEB_MULTI_REASON: evidence-based reason tied to the decision and alternatives
+```
+
+Pro must choose `YES` only when three to five materially independent regular
+GPT investigations would improve a non-trivial decision; it must not use Web
+Multi for a trivial, single-answer, or purely mechanical question. If the
+answer is `YES`, Pro must additionally author a ready-to-run Web Multi-GPT Very
+High mission that specifies: three to five independent roles and questions,
+the same project maximum-context evidence and the durable Pro answer each role
+must use, stable lane order, and synthesis/judge criteria. The mission must
+preserve the exact project root, read-only evidence boundaries, and the normal
+same-project serialization contract.
+
+After a durable Pro answer says `WEB_MULTI_NEEDED: YES`, Codex starts that
+ready-to-run Oracle Web Multi mission automatically without a routine user
+choice. It waits for the exact Pro session to be terminal first, keeps the
+same-project lock/slug safety, and never resubmits or replaces the Pro session.
+
 ## Preflight
 
 1. Do not run the resource guard as a routine or pressure gate.
@@ -181,7 +206,9 @@ python "$env:USERPROFILE\.codex\skills\chatgpt-oracle-runtime\scripts\run_chatgp
 
 Completion requires exact Oracle Pro model evidence, attachment evidence, exit
 zero, a fresh nonempty host-only `output.md`, immutable hashes, and a refreshed
-transcript. Oracle archives only after the durable one-shot output is saved.
+transcript. Oracle waits on the original submitted session for its bounded
+90-minute answer budget. Oracle archives only after the durable one-shot output
+is saved.
 
 ## Recovery
 
@@ -194,6 +221,11 @@ python "$env:USERPROFILE\.codex\skills\chatgpt-oracle-runtime\scripts\run_chatgp
 Use `live` only to continue following that same stored session. Recovery never
 restarts, resubmits, changes the model, changes attachments, or creates a
 replacement. A zero exit without nonempty output remains `attention_required`.
+If the initial run reports `post_submit_response_timeout`, the submitted Pro
+response was still pending at Oracle's deadline: retain the exact lock and
+wait passively. Do not launch repeated `live`/`harvest` recovery while the
+conversation is visibly working; use exact recovery only after the original
+observer/browser is no longer available.
 
 For an already persisted agbrowse Pro run only, the former exact
 `chatgpt_agbrowse_run.py --observe-run|--recover-run <run-dir>` commands remain

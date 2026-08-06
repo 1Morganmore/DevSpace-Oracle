@@ -44,6 +44,7 @@ SESSION_AUTHORITY_RANK = {
     "live": 2,
     "terminal_observed": 3,
     "terminal": 4,
+    "settled_executed": 5,
 }
 WAIT_OBJECT_0 = 0
 WAIT_ABANDONED = 0x80
@@ -97,7 +98,12 @@ ORACLE_NO_RECOVERABLE_URL_MARKER = (
     "session metadata has no recoverable ChatGPT conversation URL"
 )
 USER_CONFIRMED_NO_SUBMISSION = "user-confirmed-no-submission"
+USER_CONFIRMED_EXECUTION_ENDED = "user-confirmed-task-ended"
 ORACLE_RECOVERY_STATE_RE = re.compile(r"(?im)^\s*State:\s*[a-z][a-z0-9_-]*\s*$")
+ORACLE_PROFILE_COPY_EBUSY_RE = re.compile(
+    r"(?im)^(?:ERROR:\s*|User error \(browser-automation\):\s*)?"
+    r"EBUSY: resource busy or locked, copyfile ['\"](?P<source>[^'\"]+)['\"] -> ['\"](?P<destination>[^'\"]+)['\"]\s*$"
+)
 # Upstream Oracle copies a signed-in browser profile with rsync.  On POSIX
 # hosts without rsync the copy fails after launch, so feasibility is decided
 # while loading the manifest instead of crashing mid-launch.  The pinned
@@ -123,6 +129,8 @@ MODEL_RE = re.compile(r"^[a-zA-Z0-9._ -]+$")
 PARENT_ID_RE = re.compile(r"^[a-f0-9]{32,64}$")
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{7,95}$")
+WEB_MULTI_CHILD_RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[a-f0-9]{12}$")
+CHATGPT_CONVERSATION_URL_RE = re.compile(r"https://chatgpt\.com/c/[A-Za-z0-9_-]+", re.IGNORECASE)
 _THREAD_MUTEXES: dict[str, threading.Lock] = {}
 _THREAD_MUTEXES_GUARD = threading.Lock()
 
@@ -167,6 +175,8 @@ class OracleConfig:
     expected_manifest_sha256: str | None
     bound_inputs: tuple[Path, ...]
     bound_input_sha256s: tuple[str, ...]
+    web_multi_child_provenance_path: Path | None
+    web_multi_child_provenance_sha256: str | None
 
 
 @dataclass(frozen=True)
@@ -613,6 +623,9 @@ def load_manifest(
     requested_run_id = str(payload.get("run_id") or "").strip() or None
     if requested_run_id is not None and RUN_ID_RE.fullmatch(requested_run_id) is None:
         raise OracleStateError("RUN_ID_INVALID", "run_id must be a safe 8-96 character identifier")
+    provenance_raw = payload.get("web_multi_child_provenance_path")
+    provenance_path = exact_regular_file(provenance_raw, label="web_multi_child_provenance_path") if provenance_raw else None
+    provenance_sha256 = sha256_file(provenance_path) if provenance_path else None
     return OracleConfig(
         project_root,
         mission_path,
@@ -642,6 +655,8 @@ def load_manifest(
         expected_manifest_sha256,
         bound_inputs,
         bound_input_sha256s,
+        provenance_path,
+        provenance_sha256,
     )
 
 
@@ -716,6 +731,11 @@ def state_payload(config: OracleConfig, layout: RunLayout, *, status: str, resol
             "actual_sha256": config.manifest_sha256,
             "expected_sha256": config.expected_manifest_sha256,
         },
+        "requested_run_id": config.requested_run_id,
+        "web_multi_child_provenance": (
+            {"path": str(config.web_multi_child_provenance_path), "sha256": config.web_multi_child_provenance_sha256}
+            if config.web_multi_child_provenance_path else None
+        ),
         "transport_status": "prepared",
         "task_outcome_contract": config.task_outcome_contract,
         "task_outcome": "not_applicable" if config.transport == "pro-attachment-only" else "pending",
@@ -874,6 +894,7 @@ def update_state(
     host_watchdog: dict[str, Any] | None = None,
     conversation_url: str | None = None,
     conversation_url_conflict: dict[str, str] | None = None,
+    exact_live_observation: bool = False,
 ) -> dict[str, Any]:
     if status not in STATUSES:
         raise OracleStateError("STATUS_INVALID", "invalid Oracle run status")
@@ -886,10 +907,22 @@ def update_state(
         current_authority = str(payload.get("session_authority") or "")
         current_rank = SESSION_AUTHORITY_RANK.get(current_authority, -1)
         requested_rank = SESSION_AUTHORITY_RANK.get(session_authority, -1)
-        payload["session_authority"] = (
-            current_authority if current_rank > requested_rank else session_authority
+        # A terminal observation without a harvested artifact is provisional:
+        # an exact later live observation is stronger evidence that the same
+        # conversation is still generating.  Never apply this exception to a
+        # durably harvested terminal result.
+        restore_live = (
+            exact_live_observation
+            and current_authority == "terminal_observed"
+            and session_authority == "live"
+            and payload.get("terminal_harvested") is not True
         )
-        if current_rank > requested_rank and status == "running":
+        payload["session_authority"] = (
+            session_authority
+            if restore_live or current_rank <= requested_rank
+            else current_authority
+        )
+        if current_rank > requested_rank and not restore_live and status == "running":
             payload["status"] = (
                 "complete"
                 if current_authority == "terminal" and payload.get("terminal_harvested") is True
@@ -960,8 +993,8 @@ def _artifact_bytes(state: dict[str, Any], name: str) -> tuple[Path, bytes] | No
         return None
 
 
-def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
-    """Return exact evidence for a user-adjudicable Oracle pre-submit failure.
+def _comprehensive_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
+    """Return exact evidence for a user-adjudicable Oracle composer timeout.
 
     The accepted messages do not release ownership on their own.  This helper
     only proves that the run is eligible for an explicit user adjudication: no
@@ -1161,6 +1194,226 @@ def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any]
     }
 
 
+def _web_multi_child_provenance(
+    state: dict[str, Any], run_dir: Path, project_root: Path, source_path: Path, parent_id: str, locator: str,
+) -> dict[str, Any] | None:
+    """Validate new provenance, or the exact legacy result/lane pair when present."""
+    raw = state.get("web_multi_child_provenance")
+    candidates: list[tuple[Path, dict[str, Any] | None, Path | None]] = []
+    if isinstance(raw, dict):
+        path = Path(str(raw.get("path") or ""))
+        try:
+            if not path.is_absolute() or path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != str(raw.get("sha256") or ""):
+                return None
+            candidates.append((path, json.loads(path.read_text(encoding="utf-8", errors="strict")), None))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+    else:
+        # Legacy Oracle Multi did not copy lane provenance into state.  Its
+        # run-owned result entry and lane manifest are sufficient only when
+        # they identify this exact run directory and Oracle locator.
+        for result_path in project_root.glob("runtime/*/oracle_output/result.json"):
+            try:
+                result = json.loads(result_path.read_text(encoding="utf-8", errors="strict"))
+                lanes = result.get("lanes") if isinstance(result.get("lanes"), list) else []
+                matching = [lane for lane in lanes if isinstance(lane, dict) and Path(str(lane.get("run_dir") or "")).resolve() == run_dir and str(lane.get("session_locator") or "") == locator]
+                if result.get("schema") != "codex.chatgpt.oracle-multi-result/v1" or str(result.get("parent_id") or "") != parent_id or len(matching) != 1:
+                    continue
+                lane_id = str(matching[0].get("id") or "")
+                lane_manifest = result_path.parent / "lanes" / lane_id / "oracle.json"
+                candidates.append((lane_manifest, json.loads(lane_manifest.read_text(encoding="utf-8", errors="strict")), result_path))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                return None
+    if len(candidates) != 1:
+        return None
+    path, value, legacy_result_path = candidates[0]
+    if not isinstance(value, dict):
+        return None
+    if value.get("schema") == "codex.chatgpt.oracle-multi-child-provenance/v1":
+        parent_manifest = Path(str(value.get("parent_manifest_path") or ""))
+        try:
+            if hashlib.sha256(parent_manifest.read_bytes()).hexdigest() != str(value.get("parent_manifest_sha256") or ""):
+                return None
+            parent = json.loads(parent_manifest.read_text(encoding="utf-8", errors="strict"))
+            lanes = parent.get("solvers") if isinstance(parent.get("solvers"), list) else []
+            lane = next((item for item in lanes if isinstance(item, dict) and str(item.get("id") or "") == str(value.get("lane_id") or "")), None)
+            if not isinstance(lane, dict) or parent.get("schema") != "codex.chatgpt.oracle-multi/v1":
+                return None
+            if Path(str(parent.get("project_root") or "")).resolve() != project_root or Path(str(lane.get("mission_path") or "")).resolve() != source_path:
+                return None
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+    else:
+        lane = value
+    if str(value.get("parent_id") or value.get("parallel_parent_id") or "") != parent_id:
+        return None
+    if Path(str(value.get("project_root") or "")).resolve() != project_root or Path(str(value.get("mission_path") or "")).resolve() != source_path:
+        return None
+    if value.get("schema") == "codex.chatgpt.oracle-multi-child-provenance/v1":
+        return {
+            "provenance_mode": "new-child-provenance/v1",
+            "child_provenance_path": str(path.resolve()), "child_provenance_sha256": sha256_file(path),
+            "parent_manifest_path": str(parent_manifest.resolve()), "parent_manifest_sha256": sha256_file(parent_manifest),
+        }
+    if legacy_result_path is None:
+        return None
+    return {
+        "provenance_mode": "legacy-result-lane/v1",
+        "legacy_result_path": str(legacy_result_path.resolve()), "legacy_result_sha256": sha256_file(legacy_result_path),
+        "legacy_lane_manifest_path": str(path.resolve()), "legacy_lane_manifest_sha256": sha256_file(path),
+    }
+
+
+def _web_multi_child_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
+    """Return fail-closed settlement evidence for a direct Oracle Multi child."""
+    state = load_state(state_path)
+    if str(state.get("session_authority") or "") not in {"submitted_unknown", "pre_submit"}:
+        return None
+    parent_id = str(state.get("parallel_parent_id") or "").strip().casefold()
+    run_id = str(state.get("run_id") or "")
+    if PARENT_ID_RE.fullmatch(parent_id) is None or WEB_MULTI_CHILD_RUN_ID_RE.fullmatch(run_id) is None or state.get("requested_run_id") is not None:
+        return None
+    if state.get("terminal_harvested") is True or _state_has_conversation_url(state):
+        return None
+    run_dir = state_path.parent
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    output = Path(str(artifacts.get("output") or ""))
+    if output.resolve() != (run_dir / "output.md").resolve() or output.is_symlink() or output_is_nonempty(output):
+        return None
+    stdout_record = _artifact_bytes(state, "stdout")
+    stderr_record = _artifact_bytes(state, "stderr")
+    if stdout_record is None or stderr_record is None:
+        return None
+    stdout_path, stdout_bytes = stdout_record
+    stderr_path, stderr_bytes = stderr_record
+    if (stdout_path.resolve() != (run_dir / "stdout.log").resolve() or stderr_path.resolve() != (run_dir / "stderr.log").resolve() or stdout_path.is_symlink() or stderr_path.is_symlink()):
+        return None
+    try:
+        stdout_text = stdout_bytes.decode("utf-8", errors="strict")
+        stderr_text = stderr_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    transcript_record = _artifact_bytes(state, "transcript")
+    if transcript_record is None:
+        return None
+    transcript_path, transcript_bytes = transcript_record
+    try:
+        transcript_text = transcript_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    if transcript_path.resolve() != (run_dir / "transcript.md").resolve() or transcript_path.is_symlink() or any(CHATGPT_CONVERSATION_URL_RE.search(text) for text in (stdout_text, stderr_text, transcript_text)):
+        return None
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
+    if not locator or ORACLE_PROMPT_NOT_OBSERVED_MARKER not in stdout_text or f"Session: {locator}" not in stdout_text:
+        return None
+    mission = state.get("mission") if isinstance(state.get("mission"), dict) else {}
+    source_path = Path(str(mission.get("path") or ""))
+    transport_path = Path(str(mission.get("transport_path") or ""))
+    try:
+        project_root = Path(str(state.get("project_root") or "")).resolve(strict=True)
+        if not project_root.is_dir() or not source_path.is_absolute() or not transport_path.is_absolute() or source_path.is_symlink() or transport_path.is_symlink():
+            return None
+        source_path = source_path.resolve(strict=True)
+        transport_path = transport_path.resolve(strict=True)
+        if not source_path.is_file() or transport_path != (run_dir / "mission.md").resolve() or not is_within(project_root, source_path):
+            return None
+        source_bytes = source_path.read_bytes()
+        transport_bytes = transport_path.read_bytes()
+    except OSError:
+        return None
+    mission_sha256 = str(mission.get("sha256") or "")
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    transport_sha256 = hashlib.sha256(transport_bytes).hexdigest()
+    if not re.fullmatch(r"[a-f0-9]{64}", mission_sha256) or source_sha256 != mission_sha256 or transport_sha256 != mission_sha256 or source_bytes != transport_bytes:
+        return None
+    provenance = _web_multi_child_provenance(state, run_dir, project_root, source_path, parent_id, locator)
+    if provenance is None:
+        return None
+    recovery_records: list[dict[str, str]] = []
+    for recovery_stdout in sorted(run_dir.glob("recovery-*-stdout.log"), key=lambda item: item.name):
+        recovery_stderr = recovery_stdout.with_name(recovery_stdout.name.replace("-stdout.log", "-stderr.log"))
+        try:
+            if recovery_stdout.is_symlink() or recovery_stderr.is_symlink():
+                continue
+            recovery_stdout_bytes = recovery_stdout.read_bytes()
+            recovery_stderr_bytes = recovery_stderr.read_bytes()
+            recovery_text = b"\n".join((recovery_stdout_bytes, recovery_stderr_bytes)).decode("utf-8", errors="strict")
+        except (OSError, UnicodeDecodeError):
+            return None
+        if CHATGPT_CONVERSATION_URL_RE.search(recovery_text) or ORACLE_RECOVERY_STATE_RE.search(recovery_text) or ORACLE_NO_LIVE_TAB_MARKER not in recovery_text or f'"{locator}"' not in recovery_text or ORACLE_NO_RECOVERABLE_URL_MARKER not in recovery_text:
+            return None
+        recovery_records.append({"stdout_name": recovery_stdout.name, "stdout_sha256": hashlib.sha256(recovery_stdout_bytes).hexdigest(), "stderr_name": recovery_stderr.name, "stderr_sha256": hashlib.sha256(recovery_stderr_bytes).hexdigest()})
+    if not recovery_records:
+        return None
+    return {
+        "settlement_eligibility": "oracle-web-multi-child/v1",
+        "project_root": str(project_root), "run_id": run_id, "parallel_parent_id": parent_id,
+        "source_mission_path": str(source_path), "source_mission_sha256": source_sha256,
+        "transport_mission_path": str(transport_path), "transport_mission_sha256": transport_sha256,
+        "mission_sha256": mission_sha256, "oracle_locator": locator,
+        **provenance,
+        "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(), "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+        "recovery_evidence": recovery_records, "output_absent": True, "conversation_url_absent": True,
+        "_task_outcome_reason": "user-confirmed-no-submission-after-prompt-timeout",
+        "_source_mission_path": str(source_path), "_transport_mission_path": str(transport_path),
+    }
+
+
+def _settlement_logs_have_conversation_url(state_path: Path) -> bool:
+    state = load_state(state_path)
+    for name in ("stdout", "stderr"):
+        record = _artifact_bytes(state, name)
+        if record is None:
+            continue
+        try:
+            if CHATGPT_CONVERSATION_URL_RE.search(record[1].decode("utf-8", errors="strict")):
+                return True
+        except UnicodeDecodeError:
+            return True
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    transcript_raw = str(artifacts.get("transcript") or "").strip()
+    canonical_transcript = state_path.parent / "transcript.md"
+    if transcript_raw:
+        try:
+            if Path(transcript_raw).resolve() != canonical_transcript.resolve():
+                return True
+        except OSError:
+            return True
+    if canonical_transcript.is_symlink():
+        return True
+    if canonical_transcript.exists():
+        try:
+            if CHATGPT_CONVERSATION_URL_RE.search(canonical_transcript.read_text(encoding="utf-8", errors="strict")):
+                return True
+        except (OSError, UnicodeDecodeError):
+            return True
+    try:
+        for path in state_path.parent.glob("recovery-*-*.log"):
+            if path.is_symlink() or CHATGPT_CONVERSATION_URL_RE.search(path.read_text(encoding="utf-8", errors="strict")):
+                return True
+    except (OSError, UnicodeDecodeError):
+        return True
+    return False
+
+
+def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
+    """Return exact evidence for a comprehensive stage or direct Web Multi child."""
+    if _settlement_logs_have_conversation_url(state_path):
+        return None
+    comprehensive = _comprehensive_no_submission_evidence(state_path)
+    if comprehensive is not None:
+        return comprehensive
+    try:
+        mission_text = (state_path.parent / "mission.md").read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
+        return None
+    # A partial or malformed comprehensive contract must never fall through.
+    if "[HOST_STAGE_CONTRACT]" in mission_text or "[DEVSPACE_WORKSPACE_ENTRY_CONTRACT]" in mission_text:
+        return None
+    return _web_multi_child_no_submission_evidence(state_path)
+
+
 def proven_user_confirmed_no_submission(state_path: Path) -> dict[str, Any] | None:
     """Revalidate a persisted user confirmation against immutable run artifacts."""
     state = load_state(state_path)
@@ -1194,10 +1447,6 @@ def proven_user_confirmed_no_submission(state_path: Path) -> dict[str, Any] | No
     for key in (
         "project_root",
         "run_id",
-        "workflow_id",
-        "stage",
-        "attempt_id",
-        "input_mission_sha256",
         "mission_sha256",
         "oracle_locator",
         "stdout_sha256",
@@ -1208,12 +1457,22 @@ def proven_user_confirmed_no_submission(state_path: Path) -> dict[str, Any] | No
     ):
         if recorded.get(key) != current.get(key):
             return None
-    return {
-        **recorded,
-        "_augmented_mission_path": current["_augmented_mission_path"],
-        "_input_mission_path": current["_input_mission_path"],
-        "_receipt_path": current["_receipt_path"],
-    }
+    if current.get("settlement_eligibility") == "oracle-web-multi-child/v1":
+        required = (
+            "settlement_eligibility", "parallel_parent_id", "source_mission_path",
+            "source_mission_sha256", "transport_mission_path", "transport_mission_sha256",
+        )
+        if current.get("provenance_mode") == "new-child-provenance/v1":
+            required += ("provenance_mode", "child_provenance_path", "child_provenance_sha256", "parent_manifest_path", "parent_manifest_sha256")
+        elif current.get("provenance_mode") == "legacy-result-lane/v1":
+            required += ("provenance_mode", "legacy_result_path", "legacy_result_sha256", "legacy_lane_manifest_path", "legacy_lane_manifest_sha256")
+        else:
+            return None
+    else:
+        required = ("workflow_id", "stage", "attempt_id", "input_mission_sha256")
+    if any(recorded.get(key) != current.get(key) for key in required):
+        return None
+    return {**recorded, **{key: value for key, value in current.items() if key.startswith("_")}}
 
 
 def settle_user_confirmed_no_submission(
@@ -1279,6 +1538,70 @@ def settle_user_confirmed_no_submission(
     return payload
 
 
+def proven_user_confirmed_execution_ended(state_path: Path) -> dict[str, Any] | None:
+    """Revalidate the narrow post-submit timeout settlement before releasing a lock."""
+    state = load_state(state_path)
+    reference = state.get("user_confirmed_execution_ended")
+    expected_path = state_path.parent / "user-confirmed-execution-ended.json"
+    if (
+        not isinstance(reference, dict)
+        or reference.get("schema") != "codex.chatgpt.oracle-settlement-reference/v1"
+        or Path(str(reference.get("path") or "")).resolve() != expected_path.resolve()
+        or expected_path.is_symlink()
+    ):
+        return None
+    try:
+        raw = expected_path.read_bytes()
+        if sha256_file(expected_path) != str(reference.get("sha256") or ""):
+            return None
+        recorded = json.loads(raw.decode("utf-8", errors="strict"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if (
+        recorded.get("schema") != "codex.chatgpt.oracle-user-confirmed-execution-ended/v1"
+        or recorded.get("code") != "ORACLE_USER_CONFIRMED_EXECUTION_ENDED"
+        or recorded.get("confirmation") != USER_CONFIRMED_EXECUTION_ENDED
+        or not str(recorded.get("reason") or "").strip()
+        or str(state.get("session_authority") or "") != "settled_executed"
+        or state.get("terminal_harvested") is not False
+        or str(state.get("transport_status") or "") != "post_submit_provider_delivery_timeout_settled"
+        or str(state.get("task_outcome") or "") != "executed"
+    ):
+        return None
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    output = Path(str(artifacts.get("output") or ""))
+    project_root = Path(str(state.get("project_root") or ""))
+    if (
+        not output.is_file()
+        or output.is_symlink()
+        or sha256_file(output) != str(recorded.get("output_sha256") or "")
+        or not project_root.is_dir()
+        or recorded.get("run_id") != state.get("run_id")
+        or recorded.get("project_root") != str(project_root.resolve())
+        or recorded.get("conversation_url") != str((state.get("oracle") or {}).get("conversation_url") or "")
+    ):
+        return None
+    evidence = recorded.get("execution_evidence")
+    if not isinstance(evidence, list) or not evidence:
+        return None
+    for item in evidence:
+        if not isinstance(item, dict):
+            return None
+        path = Path(str(item.get("path") or ""))
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError:
+            return None
+        if (
+            path.is_symlink()
+            or not resolved.is_file()
+            or not is_within(project_root.resolve(), resolved)
+            or sha256_file(resolved) != str(item.get("sha256") or "")
+        ):
+            return None
+    return recorded
+
+
 def proven_pre_submit_rejection(state_path: Path) -> dict[str, Any] | None:
     """Return immutable evidence only for Oracle's own pre-submit prompt dedup rejection."""
     state = load_state(state_path)
@@ -1316,8 +1639,6 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
     if authority not in {"pre_submit", "submitted_unknown"}:
         return None
     oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
-    if str(oracle.get("resolved_version") or "") != "unresolved":
-        return None
     if _state_has_conversation_url(state):
         return None
     artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
@@ -1330,27 +1651,48 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
         return None
     _, stdout_bytes = stdout_record
     _, stderr_bytes = stderr_record
-    if stdout_bytes.strip():
+    # Oracle prints this version banner before validating local attachments;
+    # it is not browser/session evidence.  Any other stdout remains fail-closed.
+    stdout_text = stdout_bytes.decode("utf-8", errors="replace").strip()
+    attachment_limit_banner_only = stdout_text == "🧿 oracle 0.16.1 — Questions in, clarity out."
+    if stdout_text and not attachment_limit_banner_only:
         return None
     try:
         stderr_text = stderr_bytes.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
         return None
     normalized_error = stderr_text.lstrip()
-    if not normalized_error.startswith("version resolution failed:"):
+    if (
+        str(state.get("transport") or "") == "pro-attachment-only"
+        and "The following files exceed the 1 MB limit:" in normalized_error
+        and attachment_limit_banner_only
+    ):
+        attachments = state.get("attachments")
+        if not isinstance(attachments, list) or not any(
+            isinstance(item, dict) and int(item.get("size_bytes") or 0) > 1024 * 1024
+            for item in attachments
+        ):
+            return None
+        failure_reason = "oracle-attachment-size-limit"
+        code = "ORACLE_ATTACHMENT_SIZE_PRELAUNCH_FAILED"
+    elif str(oracle.get("resolved_version") or "") != "unresolved":
         return None
-    if "Oracle compatibility is validated only for tested versions" in normalized_error:
+    elif not normalized_error.startswith("version resolution failed:"):
+        return None
+    elif "Oracle compatibility is validated only for the tested version" in normalized_error:
         failure_reason = "compatibility-version-drift"
+        code = "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED"
     elif (
         "ORACLE_VERSION_TIMEOUT:" in normalized_error
         or ("--version" in normalized_error and "timed out after" in normalized_error)
     ):
         failure_reason = "version-resolution-timeout"
+        code = "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED"
     else:
         return None
     return {
         "schema": "codex.chatgpt.oracle-pre-submit-host-failure/v1",
-        "code": "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED",
+        "code": code,
         "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
         "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
         "output_absent": True,
@@ -1360,9 +1702,62 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
     }
 
 
+def proven_pre_submit_profile_copy_ebusy(state_path: Path) -> dict[str, Any] | None:
+    """Prove Oracle failed while copying its profile, before it could open ChatGPT."""
+    state = load_state(state_path)
+    if str(state.get("session_authority") or "") not in {"pre_submit", "submitted_unknown"}:
+        return None
+    if state.get("terminal_harvested") is True or _state_has_conversation_url(state):
+        return None
+    profile = state.get("profile") if isinstance(state.get("profile"), dict) else {}
+    copy_profile = Path(str(profile.get("copy_profile") or ""))
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    browser_temp = Path(str(artifacts.get("browser_temp") or ""))
+    output = Path(str(artifacts.get("output") or ""))
+    stdout_record = _artifact_bytes(state, "stdout")
+    stderr_record = _artifact_bytes(state, "stderr")
+    if (
+        not str(copy_profile)
+        or not str(browser_temp)
+        or output_is_nonempty(output)
+        or stdout_record is None
+        or stderr_record is None
+    ):
+        return None
+    _, stdout_bytes = stdout_record
+    _, stderr_bytes = stderr_record
+    text = (stdout_bytes + b"\n" + stderr_bytes).decode("utf-8", errors="replace")
+    if "https://chatgpt.com/c/" in text.casefold():
+        return None
+    match = ORACLE_PROFILE_COPY_EBUSY_RE.search(text)
+    if match is None:
+        return None
+    source = Path(match.group("source"))
+    destination = Path(match.group("destination"))
+    expected_source = copy_profile / "Default" / "Network" / "Cookies"
+    if (
+        source.resolve() != expected_source.resolve()
+        or not is_within(browser_temp.resolve(), destination.resolve())
+        or destination.name.casefold() != "cookies"
+    ):
+        return None
+    return {
+        "schema": "codex.chatgpt.oracle-pre-submit-host-failure/v1",
+        "code": "ORACLE_PROFILE_COPY_EBUSY_PRELAUNCH_FAILED",
+        "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+        "output_absent": True,
+        "conversation_url_absent": True,
+        "failure_reason": "oracle-profile-copy-ebusy",
+        "copy_source": str(source.resolve()),
+        "copy_destination": str(destination.resolve()),
+    }
+
+
 def proven_pre_submit_failure(state_path: Path) -> dict[str, Any] | None:
     return (
         proven_pre_submit_rejection(state_path)
+        or proven_pre_submit_profile_copy_ebusy(state_path)
         or proven_pre_submit_host_failure(state_path)
         or proven_user_confirmed_no_submission(state_path)
     )
@@ -1399,6 +1794,8 @@ def settle_proven_pre_submit_failure(state_path: Path) -> dict[str, Any] | None:
         return load_state(state_path)
     evidence = proven_pre_submit_host_failure(state_path)
     if evidence is None:
+        evidence = proven_pre_submit_profile_copy_ebusy(state_path)
+    if evidence is None:
         return None
     payload = load_state(state_path)
     payload.update({
@@ -1408,8 +1805,12 @@ def settle_proven_pre_submit_failure(state_path: Path) -> dict[str, Any] | None:
         "terminal_harvested": False,
         "artifact_sha256": None,
         "transport_status": "failed_pre_submit",
-        "task_outcome": "pending",
-        "task_outcome_reason": "prelaunch-host-failure",
+        "task_outcome": "not_executed" if evidence["code"] == "ORACLE_PROFILE_COPY_EBUSY_PRELAUNCH_FAILED" else "pending",
+        "task_outcome_reason": (
+            "oracle-profile-copy-ebusy-pre-submit"
+            if evidence["code"] == "ORACLE_PROFILE_COPY_EBUSY_PRELAUNCH_FAILED"
+            else "prelaunch-host-failure"
+        ),
         "pre_submit_failure": evidence,
     })
     write_json_atomic(state_path, payload)
@@ -1491,6 +1892,8 @@ def resolve_lifecycle(state: dict[str, Any], *, output_is_present: bool | None =
     if status == "abandoned":
         return {"lifecycle": "abandoned", "authority_source": "explicit-abandonment"}
     # 1. Exact terminal web evidence.
+    if authority == "settled_executed" and outcome == "executed":
+        return {"lifecycle": "complete", "authority_source": "user-confirmed-execution-settlement"}
     if authority == "terminal" and harvested and has_output:
         if outcome == "not_executed":
             return {"lifecycle": "needs_attention", "authority_source": "exact-terminal-evidence"}
@@ -1567,6 +1970,7 @@ def unresolved_project_sessions(
             continue
         authority = str(payload.get("session_authority") or "").strip().casefold()
         settlement_artifact = candidate.parent / "user-confirmed-no-submission.json"
+        execution_settlement_artifact = candidate.parent / "user-confirmed-execution-ended.json"
         settlement_derived = (
             "user_confirmed_no_submission" in payload
             or str(payload.get("transport_status") or "") == "not_submitted_user_confirmed"
@@ -1575,6 +1979,12 @@ def unresolved_project_sessions(
                 "user-confirmed-no-submission-after-app-route-unconfirmed",
             }
             or settlement_artifact.exists()
+        )
+        execution_settlement_derived = (
+            "user_confirmed_execution_ended" in payload
+            or str(payload.get("transport_status") or "")
+            == "post_submit_provider_delivery_timeout_settled"
+            or execution_settlement_artifact.exists()
         )
         invalid_settlement = False
         if (
@@ -1585,6 +1995,13 @@ def unresolved_project_sessions(
             # A missing or changed settlement artifact revokes the release and
             # restores fail-closed ownership before any new submission.
             authority = "submitted_unknown"
+            invalid_settlement = True
+        if (
+            authority == "settled_executed"
+            and execution_settlement_derived
+            and proven_user_confirmed_execution_ended(candidate) is None
+        ):
+            authority = "live"
             invalid_settlement = True
         # Legacy running records fail closed because the provider may still be
         # active. Legacy attention-required records predate explicit session

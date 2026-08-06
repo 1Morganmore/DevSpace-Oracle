@@ -210,13 +210,17 @@ def build_oracle_argv(
     wait_args = ["--wait"] if STATE.normalize_oracle_version(
         resolved_version or STATE.ORACLE_ACTIVE_VERSION
     ) == "0.17.0" else []
-    # The compatibility patch makes `--browser-timeout` one overall answer
-    # budget, including recovery.  The old 20m upstream default was too short
-    # for heavy Extra High DevSpace lanes.  Pro keeps upstream timing.
+    # Upstream waits `--browser-timeout` for the answer and then gives its
+    # recovery pass the same budget, so the effective ceiling is twice this
+    # value.  Oracle's upstream default can cut a submitted Pro response while
+    # ChatGPT is still visibly working, so every new Oracle lane gets the same
+    # explicit, bounded original-session budget.  The 0.17.0 compatibility
+    # patch makes `--browser-timeout` one overall answer budget, including
+    # recovery.  The old 20m upstream default was too short for heavy Extra
+    # High DevSpace lanes.  Pro keeps upstream timing.
     answer_timeout_args = (
         []
-        if config.transport == "pro-attachment-only"
-        or any(
+        if any(
             item == "--browser-timeout" or item.startswith("--browser-timeout=")
             for item in config.oracle_args
         )
@@ -256,17 +260,36 @@ def build_oracle_argv(
 
 _BROWSER_TIMEOUT_RE = re.compile(r"^(?P<value>[0-9]+(?:\.[0-9]+)?)(?P<unit>ms|s|m|h)?$", re.IGNORECASE)
 MAX_HOST_WATCHDOG_SECONDS = 7 * 24 * 60 * 60
+# Oracle 0.16.1 rejects an individual browser attachment above this upstream
+# input limit before it can create a ChatGPT conversation.  Keep this narrow:
+# context-packet construction may retain its broader configured envelope.
+ORACLE_0161_ATTACHMENT_MAX_BYTES = 1024 * 1024
+
+
+def validate_oracle_attachment_sizes(config) -> None:
+    """Reject Pro attachments Oracle 0.16.1 cannot submit before any launch."""
+    if config.transport != "pro-attachment-only":
+        return
+    oversized = [
+        {"path": str(path), "size_bytes": path.stat().st_size, "limit_bytes": ORACLE_0161_ATTACHMENT_MAX_BYTES}
+        for path in config.attachments
+        if path.stat().st_size > ORACLE_0161_ATTACHMENT_MAX_BYTES
+    ]
+    if oversized:
+        raise OracleRunError(
+            "ORACLE_ATTACHMENT_SIZE_PRELAUNCH_FAILED",
+            "Oracle 0.16.1 Pro attachments must not exceed 1 MiB each",
+            {"limit_bytes": ORACLE_0161_ATTACHMENT_MAX_BYTES, "attachments": oversized},
+        )
 
 
 def host_watchdog_timeout_seconds(config, argv: Sequence[str]) -> float | None:
-    """Return one host wall-clock ceiling without changing Pro timing.
+    """Return one host wall-clock ceiling without changing Oracle's process.
 
     A tested Oracle browser run can remain inside a blocked CDP evaluation after its own
     browser deadline.  The host deadline is therefore independent and only
     releases the caller; it never terminates the submitted Oracle process.
     """
-    if config.transport == "pro-attachment-only":
-        return None
     values: list[str] = []
     for index, item in enumerate(argv):
         if item == "--browser-timeout":
@@ -278,7 +301,7 @@ def host_watchdog_timeout_seconds(config, argv: Sequence[str]) -> float | None:
     if len(values) != 1:
         raise OracleRunError(
             "BROWSER_TIMEOUT_INVALID",
-            "regular Oracle runs require exactly one browser timeout",
+            "Oracle runs require exactly one browser timeout",
             {"values": values},
         )
     match = _BROWSER_TIMEOUT_RE.fullmatch(values[0].strip())
@@ -395,6 +418,15 @@ def append_error(path: Path, message: str) -> None:
 SESSION_STATE_RE = re.compile(r"(?im)^\s*State:\s*([a-z][a-z0-9_-]*)\s*$")
 SESSION_URL_RE = re.compile(r"(?im)^\s*URL:\s*(https://chatgpt\.com/c/[^\s?#]+)\s*$")
 LIVE_SESSION_STATES = {"running", "streaming", "thinking", "active", "stalled"}
+# Oracle's observer may emit ``stalled`` after a quiet DOM interval even while
+# ChatGPT is still visibly working in the exact conversation.  It is therefore
+# not terminal evidence and must retain the exact-slug lock and live authority.
+POST_SUBMIT_RESPONSE_TIMEOUT_MARKER = "assistant response timed out before completion"
+# This is emitted by ChatGPT's delivery surface after an interrupted response.
+# Oracle may still report ``State: completed`` and write the visible error as an
+# assistant artifact, but neither is evidence that the DevSpace task settled.
+PROVIDER_DELIVERY_TIMEOUT_MARKER = "message delivery timed out. please try again."
+RECOVERY_BROWSER_PID_RE = re.compile(r"Launched Chrome \(pid (?P<pid>\d+)\)")
 TERMINAL_SESSION_STATES = {
     "complete", "completed", "done", "finished", "failed", "error", "cancelled", "canceled",
 }
@@ -459,22 +491,241 @@ def exact_recovery_binding_unavailable(*paths: Path) -> bool:
     return all(marker in value for marker in RECOVERY_BINDING_UNAVAILABLE_MARKERS)
 
 
+def post_submit_response_timed_out(*paths: Path) -> bool:
+    """Return true only for Oracle's explicit post-send assistant timeout.
+
+    This is live evidence, not terminal evidence: ChatGPT can keep working
+    after Oracle's observer exhausts its deadline.  The caller must preserve
+    the exact session and wait passively instead of launching recovery loops.
+    """
+    for path in paths:
+        try:
+            if POST_SUBMIT_RESPONSE_TIMEOUT_MARKER in path.read_text(
+                encoding="utf-8", errors="replace"
+            ).casefold():
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def provider_delivery_timed_out(*paths: Path) -> bool:
+    """Return true for ChatGPT's visible delivery-timeout error in observer streams.
+
+    A delivery timeout is provider-side incomplete evidence, even when Oracle's
+    final observer line says ``State: completed``.  It must retain exact-session
+    ownership rather than promote that error text to a terminal harvest.
+    """
+    for path in paths:
+        try:
+            if PROVIDER_DELIVERY_TIMEOUT_MARKER in path.read_text(
+                encoding="utf-8", errors="replace"
+            ).casefold():
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def provider_delivery_timeout_evidence(run_dir: Path, state: dict[str, Any]) -> bool:
+    """Find exact-run timeout evidence despite later recovery log rotation."""
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    durable_paths = [
+        run_dir / "transcript.md",
+        Path(str(artifacts.get("output") or "")),
+    ]
+    recovery_streams = [
+        stream
+        for pattern in ("recovery-*-stdout.log", "recovery-*-stderr.log")
+        for stream in run_dir.glob(pattern)
+    ]
+    return provider_delivery_timed_out(*recovery_streams, *durable_paths)
+
+
+def run_owned_process_ids(run_dir: Path, state: dict[str, Any]) -> tuple[int, ...]:
+    """Return only PIDs durably attributed to this exact Oracle run."""
+    pids: set[int] = set()
+    watchdog = state.get("host_watchdog") if isinstance(state.get("host_watchdog"), dict) else {}
+    value = watchdog.get("oracle_process_pid")
+    if isinstance(value, int) and value > 0:
+        pids.add(value)
+    for path in run_dir.glob("*.log"):
+        try:
+            pids.update(int(match.group("pid")) for match in RECOVERY_BROWSER_PID_RE.finditer(
+                path.read_text(encoding="utf-8", errors="replace")
+            ))
+        except OSError:
+            continue
+    return tuple(sorted(pids))
+
+
+def process_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def historical_session_authority(run_dir: Path, state: dict[str, Any]) -> str:
     """Recover the strongest exact-session authority from durable observer logs."""
     current = str(state.get("session_authority") or "submitted_unknown")
+    # A previously persisted false terminal must be repairable from its exact
+    # recovery evidence.  Do this before honoring terminal_harvested so the
+    # state cannot become permanently monotonic on provider error text.
+    if provider_delivery_timeout_evidence(run_dir, state):
+        return "live"
     if (
         current == "terminal"
         and state.get("terminal_harvested") is True
         and STATE.output_is_nonempty(Path(str(state["artifacts"]["output"])))
     ):
         return "terminal"
+    # Recovery logs are exact observer evidence.  A later `running` observation
+    # supersedes an earlier provisional `completed`; only a harvested artifact
+    # may make terminal authority irreversible.
     strongest = current
-    for path in sorted(run_dir.glob("recovery-*-stdout.log"), key=lambda item: item.name):
+    for path in sorted(
+        run_dir.glob("recovery-*-stdout.log"), key=lambda item: (item.stat().st_mtime_ns, item.name)
+    ):
         observed = exact_session_state(path)
         if observed in TERMINAL_SESSION_STATES:
             strongest = "terminal_observed"
-            break
+        elif observed in LIVE_SESSION_STATES:
+            strongest = "live"
     return strongest
+
+
+def pro_required_answer_labels(mission_path: Path) -> tuple[str, ...]:
+    """Return the explicit structured-answer labels, if a Pro mission requires them."""
+    try:
+        mission = mission_path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
+        return ()
+    marker = re.search(r"(?im)^\s*#+\s*Required answer schema\s*$", mission)
+    if marker is None:
+        return ()
+    section = mission[marker.end():]
+    next_heading = re.search(r"(?m)^\s*#+\s+", section)
+    if next_heading is not None:
+        section = section[:next_heading.start()]
+    labels = re.findall(
+        r"(?m)^\s*\d+\.\s+`([A-Z][A-Z0-9_]+)(?::[^`]*)?`",
+        section,
+    )
+    return tuple(dict.fromkeys(labels))
+
+
+def pro_output_satisfies_required_schema(state: dict[str, Any], output_path: Path) -> bool:
+    """Require every declared Pro section to be a nonempty Markdown heading.
+
+    A body mention is not a schema section: terminal preambles must remain
+    ineligible for promotion. Both plain labels and labels wrapped in Markdown
+    code ticks are accepted because the Pro response contract uses both forms.
+    """
+    if str(state.get("transport") or "") != "pro-attachment-only":
+        return True
+    mission = state.get("mission") if isinstance(state.get("mission"), dict) else {}
+    mission_path = Path(str(mission.get("transport_path") or mission.get("path") or ""))
+    labels = pro_required_answer_labels(mission_path)
+    if not labels:
+        return True
+    try:
+        output = output_path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
+        return False
+    heading_re = re.compile(
+        r"(?m)^\s{0,3}(?P<level>#{1,6})\s+(?:\d+\.\s+)?(?:`(?P<ticked>[A-Z][A-Z0-9_]+)(?::[^`]*)?`|(?P<plain>[A-Z][A-Z0-9_]+)(?::\s*[^\r\n]*)?)\s*$"
+    )
+    headings = list(heading_re.finditer(output))
+    sections: dict[str, str] = {}
+    for index, heading in enumerate(headings):
+        label = (heading.group("ticked") or heading.group("plain") or "").casefold()
+        level = len(heading.group("level"))
+        next_start = next(
+            (item.start() for item in headings[index + 1:] if len(item.group("level")) <= level),
+            len(output),
+        )
+        if label and output[heading.end():next_start].strip():
+            sections[label] = "present"
+    return all(label.casefold() in sections for label in labels)
+
+
+def promote_terminal_harvest_candidate(
+    run_dir: Path,
+    *,
+    candidate_path: Path,
+    expected_candidate_sha256: str,
+) -> dict[str, Any]:
+    """Promote one already observed terminal candidate without launching Oracle."""
+    directory = run_dir.expanduser().resolve(strict=True)
+    state_path = directory / "state.json"
+    state = STATE.load_state(state_path)
+    if str(state.get("session_authority") or "") != "terminal_observed":
+        raise OracleRunError(
+            "PROMOTION_TERMINAL_OBSERVATION_REQUIRED",
+            "only an exact terminal observation may promote a harvested candidate",
+        )
+    if state.get("terminal_harvested") is True:
+        raise OracleRunError("PROMOTION_ALREADY_HARVESTED", "the exact run is already harvested")
+    candidate = candidate_path.expanduser().resolve(strict=True)
+    if not STATE.is_within(directory, candidate) or not re.fullmatch(
+        r"recovery-(?:harvest|live)-candidate\.md", candidate.name
+    ):
+        raise OracleRunError(
+            "PROMOTION_CANDIDATE_INVALID",
+            "candidate must be the exact run's persisted recovery candidate",
+        )
+    actual_sha256 = STATE.sha256_file(candidate)
+    if actual_sha256 != expected_candidate_sha256.strip().casefold():
+        raise OracleRunError(
+            "PROMOTION_CANDIDATE_HASH_MISMATCH",
+            "candidate bytes differ from the supplied exact hash",
+            {"expected": expected_candidate_sha256, "actual": actual_sha256},
+        )
+    if not STATE.output_is_nonempty(candidate) or not pro_output_satisfies_required_schema(state, candidate):
+        raise OracleRunError(
+            "PROMOTION_CANDIDATE_SCHEMA_INCOMPLETE",
+            "candidate does not satisfy the exact Pro required-answer schema",
+        )
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    output_path = Path(str(artifacts.get("output") or directory / "output.md")).resolve()
+    if output_path != (directory / "output.md").resolve() or output_path.exists():
+        raise OracleRunError("PROMOTION_OUTPUT_PATH_INVALID", "exact run output path is unavailable")
+    temporary = output_path.with_name(f".{output_path.name}.promote-{os.getpid()}.tmp")
+    try:
+        with candidate.open("rb") as source, temporary.open("xb") as destination:
+            shutil.copyfileobj(source, destination)
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.replace(temporary, output_path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    layout = STATE.RunLayout(
+        str(state["run_id"]), str((state.get("oracle") or {}).get("slug") or ""), directory,
+        state_path, output_path, Path(str(artifacts.get("transcript") or directory / "transcript.md")),
+        Path(str(artifacts.get("stdout") or directory / "stdout.log")),
+        Path(str(artifacts.get("stderr") or directory / "stderr.log")),
+        Path(str(artifacts.get("browser_temp") or directory / "browser-temp")).resolve(),
+    )
+    STATE.write_transcript(layout)
+    task_outcome = STATE.classify_task_outcome(
+        output_path,
+        contract=str(state.get("task_outcome_contract") or "legacy"),
+        transport=str(state.get("transport") or "devspace"),
+    )
+    updated = STATE.update_state(
+        state_path, status="complete", exit_code=state.get("exit_code"), session_authority="terminal",
+        terminal_harvested=True, artifact_sha256=actual_sha256, transport_status="complete",
+        task_outcome=task_outcome, task_outcome_reason="deterministic-terminal-candidate-promotion",
+    )
+    return {"ok": True, "status": "complete", "run_dir": str(directory), "output_path": str(output_path),
+            "candidate_path": str(candidate), "artifact_sha256": actual_sha256, "result": updated}
 
 
 def execute_run(
@@ -539,7 +790,7 @@ def execute_run(
         if STATE.normalize_oracle_version(version) != STATE.ORACLE_ACTIVE_VERSION:
             raise OracleRunError(
                 "ORACLE_NEW_RUN_VERSION_UNVALIDATED",
-                "Oracle compatibility is validated only for tested versions on new submissions",
+                "Oracle compatibility is validated only for the tested version on new submissions",
                 {"resolved": version, "active": STATE.ORACLE_ACTIVE_VERSION},
             )
         compatibility = compat_factory(version)
@@ -716,11 +967,17 @@ def execute_run(
             "run_dir": str(layout.run_dir),
             "result": pre_submit_failure,
         }
-    # Once Oracle has been launched, a nonzero local exit (including the
-    # browser response timeout) does not prove that the exact web session
-    # failed or stopped. Preserve same-project ownership and require exact-slug
-    # recovery instead of presenting a terminal local failure.
-    transport_complete = exit_code == 0 and STATE.output_is_nonempty(layout.output_path)
+    # Once Oracle has been launched, a nonzero local exit does not prove that
+    # the exact web session failed or stopped.  In particular, Oracle's
+    # explicit assistant-response timeout is evidence that the response was
+    # still pending at the observer deadline. Preserve live authority and
+    # wait passively; do not prompt a harvest/live relaunch while it works.
+    delivery_timeout = provider_delivery_timed_out(layout.stdout_path, layout.stderr_path)
+    transport_complete = (
+        exit_code == 0
+        and STATE.output_is_nonempty(layout.output_path)
+        and not delivery_timeout
+    )
     task_outcome = (
         STATE.classify_task_outcome(
             layout.output_path,
@@ -760,13 +1017,29 @@ def execute_run(
         )
         STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
     else:
+        response_timeout = post_submit_response_timed_out(
+            layout.stdout_path, layout.stderr_path
+        )
         state = STATE.update_state(
             layout.state_path,
-            status=status,
+            status="running" if response_timeout or delivery_timeout else status,
             exit_code=exit_code,
-            session_authority="submitted_unknown",
-            transport_status="failed" if exit_code else "incomplete",
+            session_authority="live" if response_timeout or delivery_timeout else "submitted_unknown",
+            transport_status=(
+                "post_submit_response_timeout"
+                if response_timeout
+                else "post_submit_provider_delivery_timeout"
+                if delivery_timeout
+                else "failed" if exit_code else "incomplete"
+            ),
             task_outcome=task_outcome,
+            task_outcome_reason=(
+                "assistant-response-timeout-passive-wait"
+                if response_timeout
+                else "provider-delivery-timeout-passive-wait"
+                if delivery_timeout
+                else None
+            ),
             host_watchdog={
                 "status": "process-exited",
                 "timeout_seconds": watchdog_timeout_seconds,
@@ -774,6 +1047,20 @@ def execute_run(
                 "process_action": "none",
             },
         )
+    if not transport_complete and post_submit_response_timed_out(
+        layout.stdout_path, layout.stderr_path
+    ):
+        return {
+            "ok": False,
+            "status": "post_submit_response_timeout",
+            "safe_for_fresh_run": False,
+            "run_dir": str(layout.run_dir),
+            "next_action": (
+                "keep passive ownership of the original exact session until terminal output is "
+                "available; do not relaunch recovery, replace, or resubmit while ChatGPT is working"
+            ),
+            "result": state,
+        }
     return {"ok": status == "complete", "run_dir": str(layout.run_dir), "result": state}
 
 
@@ -800,6 +1087,7 @@ def _recover_run_locked(
     platform_name: str | None = None,
     compat_factory: Callable[[str], dict[str, Any]] = COMPAT.ensure_oracle_compatibility,
     runtime_command_factory: Callable[[dict[str, Any], str], Sequence[str]] = validated_oracle_runtime_command,
+    live_settle_timeout_seconds: float = 0,
 ) -> dict[str, Any]:
     directory = run_dir.expanduser().resolve(strict=True)
     state = STATE.load_state(directory / "state.json")
@@ -817,13 +1105,20 @@ def _recover_run_locked(
         }
     historical_authority = historical_session_authority(directory, state)
     historical_url = historical_conversation_url(directory, state)
+    terminal_evidence_revoked = (
+        historical_authority == "live"
+        and str(state.get("session_authority") or "") in {"terminal_observed", "terminal"}
+    )
     if (
         STATE.SESSION_AUTHORITY_RANK.get(historical_authority, -1)
         > STATE.SESSION_AUTHORITY_RANK.get(str(state.get("session_authority") or ""), -1)
         or (historical_url and not str((state.get("oracle") or {}).get("conversation_url") or "").strip())
+        or terminal_evidence_revoked
     ):
         reconciled_status = (
-            "complete"
+            "running"
+            if terminal_evidence_revoked
+            else "complete"
             if state.get("status") == "complete"
             and state.get("session_authority") == "terminal"
             and state.get("terminal_harvested") is True
@@ -835,6 +1130,19 @@ def _recover_run_locked(
             status=reconciled_status,
             exit_code=state.get("exit_code"),
             session_authority=historical_authority,
+            terminal_harvested=False if terminal_evidence_revoked else state.get("terminal_harvested"),
+            artifact_sha256=None if terminal_evidence_revoked else state.get("artifact_sha256"),
+            transport_status=(
+                "post_submit_provider_delivery_timeout"
+                if terminal_evidence_revoked
+                else state.get("transport_status")
+            ),
+            task_outcome="pending" if terminal_evidence_revoked else state.get("task_outcome"),
+            task_outcome_reason=(
+                "provider-delivery-timeout-passive-wait"
+                if terminal_evidence_revoked
+                else state.get("task_outcome_reason")
+            ),
             conversation_url=historical_url,
         )
     if (
@@ -931,6 +1239,13 @@ def _recover_run_locked(
     stderr_path = directory / f"recovery-{action}-stderr.log"
     recovery_browser_temp = directory / f"recovery-{action}-browser-temp"
     recovery_env = STATE.browser_temp_environment(recovery_browser_temp, platform_name=platform_name)
+    if action == "live" and live_settle_timeout_seconds > 0:
+        # The compatibility-patched Oracle live tail owns one recovered browser
+        # connection until this deadline.  Do not turn a live recovery into a
+        # sequence of short probes that each reopen the exact conversation.
+        recovery_env["ORACLE_LIVE_TERMINAL_TIMEOUT_MS"] = str(
+            max(1, round(live_settle_timeout_seconds * 1000))
+        )
     try:
         with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
             process = popen_factory(
@@ -1017,6 +1332,33 @@ def _recover_run_locked(
                 "then resume exact-slug recovery; never replace or resubmit"
             ),
         }
+    if provider_delivery_timed_out(stdout_path, stderr_path):
+        if argv_output.exists():
+            argv_output.unlink()
+        updated = STATE.update_state(
+            directory / "state.json",
+            status="running",
+            exit_code=exit_code,
+            session_authority="live",
+            terminal_harvested=False,
+            artifact_sha256=None,
+            transport_status="post_submit_provider_delivery_timeout",
+            task_outcome="pending",
+            task_outcome_reason="provider-delivery-timeout-passive-wait",
+            conversation_url=observed_conversation_url,
+        )
+        return {
+            "ok": False,
+            "status": "provider_delivery_timeout",
+            "run_dir": str(directory),
+            "action": action,
+            "exit_code": exit_code,
+            "exact_session_state": observed_session_state,
+            "result": updated,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "next_action": "preserve and continue exact-session live monitoring; never replace or resubmit",
+        }
     if observed_session_state in LIVE_SESSION_STATES:
         if argv_output.exists():
             argv_output.unlink()
@@ -1027,6 +1369,7 @@ def _recover_run_locked(
             exit_code=exit_code,
             session_authority="live",
             conversation_url=observed_conversation_url,
+            exact_live_observation=True,
         )
         settle_disagreement = str(updated.get("session_authority") or "") in {
             "terminal_observed", "terminal",
@@ -1044,7 +1387,13 @@ def _recover_run_locked(
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
         }
-    if action == "live":
+    candidate_satisfies_schema = pro_output_satisfies_required_schema(state, argv_output)
+    if action == "live" and not (
+        exit_code == 0
+        and observed_session_state in TERMINAL_SESSION_STATES
+        and STATE.output_is_nonempty(argv_output)
+        and candidate_satisfies_schema
+    ):
         if argv_output.exists():
             argv_output.unlink()
         authority = "terminal_observed" if observed_session_state in TERMINAL_SESSION_STATES else "submitted_unknown"
@@ -1070,6 +1419,7 @@ def _recover_run_locked(
         exit_code == 0
         and observed_session_state in TERMINAL_SESSION_STATES
         and STATE.output_is_nonempty(argv_output)
+        and candidate_satisfies_schema
     ):
         os.replace(argv_output, output_path)
     layout = STATE.RunLayout(
@@ -1088,6 +1438,7 @@ def _recover_run_locked(
         exit_code == 0
         and observed_session_state in TERMINAL_SESSION_STATES
         and STATE.output_is_nonempty(output_path)
+        and candidate_satisfies_schema
     )
     # A failed recovery process is also not web-terminal evidence. Only an
     # exact terminal observation plus a nonempty durable output may complete.
@@ -1139,7 +1490,11 @@ def _recover_run_locked(
         STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
     return {
         "ok": status == "complete",
-        "status": status,
+        "status": "pro_output_incomplete" if (
+            not harvested
+            and observed_session_state in TERMINAL_SESSION_STATES
+            and not candidate_satisfies_schema
+        ) else status,
         "run_dir": str(directory),
         "action": action,
         "exit_code": exit_code,
@@ -1203,6 +1558,138 @@ def adjudicate_task_outcome(
         "output_sha256": actual,
         "task_outcome": normalized,
         "safe_for_fresh_retry": normalized == "not_executed",
+        "result": updated,
+    }
+
+
+def settle_user_confirmed_delivery_timeout_execution(
+    run_dir: Path,
+    *,
+    expected_output_sha256: str,
+    confirmation: str,
+    reason: str,
+    execution_evidence: Sequence[tuple[Path, str]],
+    process_alive: Callable[[int], bool] = process_is_alive,
+    platform_name: str | None = None,
+) -> dict[str, Any]:
+    """Settle one ended, post-submit delivery-timeout run without terminalizing it.
+
+    This is deliberately not a recovery, harvest, or retry path.  It releases
+    only a user-confirmed, hash-bound executed task after all run-owned Oracle
+    and recovery-browser PIDs are gone.
+    """
+    if confirmation.strip().casefold() != STATE.USER_CONFIRMED_EXECUTION_ENDED:
+        raise OracleRunError(
+            "EXECUTION_ENDED_CONFIRMATION_REQUIRED",
+            f"confirmation must be exactly {STATE.USER_CONFIRMED_EXECUTION_ENDED}",
+        )
+    normalized_reason = reason.strip()
+    if not normalized_reason:
+        raise OracleRunError("EXECUTION_ENDED_REASON_REQUIRED", "user confirmation reason is required")
+    directory = run_dir.expanduser().resolve(strict=True)
+    state_path = directory / "state.json"
+    state = STATE.load_state(state_path)
+    timeout_evidence = provider_delivery_timeout_evidence(directory, state)
+    direct_timeout_state = (
+        str(state.get("transport_status") or "") == "post_submit_provider_delivery_timeout"
+        and str(state.get("session_authority") or "") == "live"
+    )
+    stale_timeout_ledger = (
+        timeout_evidence
+        and str(state.get("transport_status") or "") == "incomplete"
+        and str(state.get("session_authority") or "") in {"terminal_observed", "terminal"}
+        and state.get("terminal_harvested") is False
+    )
+    if not (direct_timeout_state or stale_timeout_ledger) or state.get("terminal_harvested") is True:
+        raise OracleRunError(
+            "EXECUTION_ENDED_TIMEOUT_STATE_REQUIRED",
+            "settlement requires a live provider-timeout state or its exact stale incomplete ledger",
+        )
+    if not timeout_evidence:
+        raise OracleRunError(
+            "EXECUTION_ENDED_TIMEOUT_EVIDENCE_REQUIRED",
+            "exact run does not retain provider delivery-timeout evidence",
+        )
+    active_pids = [pid for pid in run_owned_process_ids(directory, state) if process_alive(pid)]
+    if active_pids:
+        raise OracleRunError(
+            "EXECUTION_ENDED_PROCESS_ACTIVE",
+            "run-owned Oracle or recovery-browser process is still active",
+            {"active_pids": active_pids},
+        )
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    output_path = Path(str(artifacts.get("output") or "")).expanduser().resolve()
+    if not output_path.is_file() or not STATE.is_within(STATE.oracle_state_root(), output_path):
+        raise OracleRunError("EXECUTION_ENDED_OUTPUT_INVALID", "exact run output is unavailable or outside host state")
+    output_sha256 = STATE.sha256_file(output_path)
+    if output_sha256 != expected_output_sha256.strip().casefold():
+        raise OracleRunError(
+            "EXECUTION_ENDED_OUTPUT_HASH_MISMATCH",
+            "exact timeout output changed before execution settlement",
+            {"expected": expected_output_sha256, "actual": output_sha256},
+        )
+    project_root = Path(str(state.get("project_root") or "")).expanduser().resolve(strict=True)
+    bound_evidence: list[dict[str, str]] = []
+    seen_paths: set[Path] = set()
+    for candidate, expected_hash in execution_evidence:
+        path = candidate.expanduser().resolve(strict=True)
+        if candidate.is_symlink() or not path.is_file() or not STATE.is_within(project_root, path):
+            raise OracleRunError("EXECUTION_ENDED_EVIDENCE_INVALID", "execution evidence must be a regular project file")
+        if path in seen_paths:
+            raise OracleRunError("EXECUTION_ENDED_EVIDENCE_DUPLICATE", "execution evidence paths must be unique")
+        actual = STATE.sha256_file(path)
+        if actual != expected_hash.strip().casefold():
+            raise OracleRunError(
+                "EXECUTION_ENDED_EVIDENCE_HASH_MISMATCH",
+                "execution evidence changed before settlement",
+                {"path": str(path), "expected": expected_hash, "actual": actual},
+            )
+        seen_paths.add(path)
+        bound_evidence.append({"path": str(path), "sha256": actual})
+    if not bound_evidence:
+        raise OracleRunError("EXECUTION_ENDED_EVIDENCE_REQUIRED", "at least one hash-bound execution evidence file is required")
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    conversation_url = str(oracle.get("conversation_url") or "").strip()
+    if not conversation_url:
+        raise OracleRunError("EXECUTION_ENDED_CONVERSATION_REQUIRED", "exact conversation URL is required")
+    recorded = {
+        "schema": "codex.chatgpt.oracle-user-confirmed-execution-ended/v1",
+        "code": "ORACLE_USER_CONFIRMED_EXECUTION_ENDED",
+        "confirmation": STATE.USER_CONFIRMED_EXECUTION_ENDED,
+        "reason": normalized_reason,
+        "run_id": state.get("run_id"),
+        "project_root": str(project_root),
+        "conversation_url": conversation_url,
+        "output_path": str(output_path),
+        "output_sha256": output_sha256,
+        "execution_evidence": bound_evidence,
+        "run_owned_pids_checked": list(run_owned_process_ids(directory, state)),
+    }
+    settlement_path = directory / "user-confirmed-execution-ended.json"
+    STATE.write_json_atomic(settlement_path, recorded)
+    updated = STATE.update_state(
+        state_path,
+        status="complete",
+        exit_code=state.get("exit_code"),
+        session_authority="settled_executed",
+        terminal_harvested=False,
+        artifact_sha256=output_sha256,
+        transport_status="post_submit_provider_delivery_timeout_settled",
+        task_outcome="executed",
+        task_outcome_reason="user-confirmed-execution-ended-after-provider-delivery-timeout",
+    )
+    updated["user_confirmed_execution_ended"] = {
+        "schema": "codex.chatgpt.oracle-settlement-reference/v1",
+        "path": str(settlement_path),
+        "sha256": STATE.sha256_file(settlement_path),
+    }
+    STATE.write_json_atomic(state_path, updated)
+    return {
+        "ok": True,
+        "status": "post_submit_execution_user_confirmed",
+        "safe_for_fresh_run": True,
+        "run_dir": str(directory),
+        "output_sha256": output_sha256,
         "result": updated,
     }
 
@@ -1297,64 +1784,23 @@ def recover_run(
             platform_name=platform_name,
             compat_factory=compat_factory,
             runtime_command_factory=runtime_command_factory,
+            live_settle_timeout_seconds=settle_timeout_seconds if action == "live" else 0,
         )
-        if dry_run or action != "live" or settle_timeout_seconds <= 0:
-            return result
-        deadline = time.monotonic() + settle_timeout_seconds
-        while True:
-            if result.get("ok"):
-                return result
-            if result.get("status") in {
-                "recovery_binding_unavailable",
-                "recovery_preflight_failed",
-            }:
-                return result
-            if result.get("status") == "terminal_observed":
-                return _recover_run_locked(
-                    directory,
-                    action="harvest",
-                    dry_run=False,
-                    oracle_command=oracle_command,
-                    run_factory=run_factory,
-                    popen_factory=popen_factory,
-                    platform_name=platform_name,
-                    compat_factory=compat_factory,
-                    runtime_command_factory=runtime_command_factory,
-                )
-            current = result.get("result") if isinstance(result.get("result"), dict) else {}
-            authority = str(current.get("session_authority") or "")
-            exact_state = str(result.get("exact_session_state") or "").casefold()
-            still_live_or_unsettled = (
-                result.get("status") in {"session_live", "terminal_settle_disagreement"}
-                or authority in {"live", "submitted_unknown"}
-                and exact_state in {"", *LIVE_SESSION_STATES}
-            )
-            if not still_live_or_unsettled:
-                return result
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return {
-                    **result,
-                    "ok": False,
-                    "status": "live_settle_timeout",
-                    "settle_timeout_seconds": settle_timeout_seconds,
-                    "next_action": (
-                        "keep the existing exact-slug recovery ownership attached until a later terminal "
-                        "harvest; do not relaunch, replace, or resubmit the conversation"
-                    ),
-                }
-            sleep(min(settle_interval_seconds, remaining))
-            result = _recover_run_locked(
-                directory,
-                action="live",
-                dry_run=False,
-                oracle_command=oracle_command,
-                run_factory=run_factory,
-                popen_factory=popen_factory,
-                platform_name=platform_name,
-                compat_factory=compat_factory,
-                runtime_command_factory=runtime_command_factory,
-            )
+        if (
+            action == "live"
+            and settle_timeout_seconds > 0
+            and result.get("status") in {"session_live", "terminal_settle_disagreement"}
+        ):
+            return {
+                **result,
+                "status": "live_settle_timeout",
+                "settle_timeout_seconds": settle_timeout_seconds,
+                "next_action": (
+                    "the one exact-slug live recovery connection reached its bounded deadline; "
+                    "preserve this session and do not relaunch, replace, or resubmit"
+                ),
+            }
+        return result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1389,6 +1835,10 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     adjudicate_parser.add_argument("--reason", required=True)
+    promote_parser = commands.add_parser("promote-harvest-candidate")
+    promote_parser.add_argument("--run-dir", type=Path, required=True)
+    promote_parser.add_argument("--candidate-path", type=Path, required=True)
+    promote_parser.add_argument("--expected-candidate-sha256", required=True)
     settle_parser = commands.add_parser("settle-no-submission")
     settle_parser.add_argument("--run-dir", type=Path, required=True)
     settle_parser.add_argument(
@@ -1397,6 +1847,21 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     settle_parser.add_argument("--reason", required=True)
+    execution_settle_parser = commands.add_parser("settle-executed-timeout")
+    execution_settle_parser.add_argument("--run-dir", type=Path, required=True)
+    execution_settle_parser.add_argument("--expected-output-sha256", required=True)
+    execution_settle_parser.add_argument(
+        "--confirmation",
+        choices=(STATE.USER_CONFIRMED_EXECUTION_ENDED,),
+        required=True,
+    )
+    execution_settle_parser.add_argument("--reason", required=True)
+    execution_settle_parser.add_argument(
+        "--execution-evidence",
+        action="append",
+        metavar="PATH=SHA256",
+        required=True,
+    )
     return parser
 
 
@@ -1430,11 +1895,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                 task_outcome=args.task_outcome,
                 reason=args.reason,
             )
-        else:
+        elif args.command == "promote-harvest-candidate":
+            payload = promote_terminal_harvest_candidate(
+                args.run_dir,
+                candidate_path=args.candidate_path,
+                expected_candidate_sha256=args.expected_candidate_sha256,
+            )
+        elif args.command == "settle-no-submission":
             payload = settle_user_confirmed_no_submission(
                 args.run_dir,
                 confirmation=args.confirmation,
                 reason=args.reason,
+            )
+        else:
+            evidence: list[tuple[Path, str]] = []
+            for value in args.execution_evidence:
+                path_text, separator, digest = value.rpartition("=")
+                if not separator or not path_text.strip() or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+                    raise OracleRunError(
+                        "EXECUTION_ENDED_EVIDENCE_ARGUMENT_INVALID",
+                        "execution evidence must use PATH=64-character-SHA256",
+                    )
+                evidence.append((Path(path_text), digest.casefold()))
+            payload = settle_user_confirmed_delivery_timeout_execution(
+                args.run_dir,
+                expected_output_sha256=args.expected_output_sha256,
+                confirmation=args.confirmation,
+                reason=args.reason,
+                execution_evidence=evidence,
             )
     except STATE.OracleStateError as exc:
         payload = exc.envelope()

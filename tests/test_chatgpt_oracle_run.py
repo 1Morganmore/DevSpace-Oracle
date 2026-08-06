@@ -74,13 +74,13 @@ def rebind_manifest_mission(path: Path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def pro_manifest(tmp_path: Path, **extra) -> Path:
+def pro_manifest(tmp_path: Path, prompt_text: str = "pro instructions", **extra) -> Path:
     builder = load_pro_context_builder()
     prompt = tmp_path / "prompt.txt"
     packet = tmp_path / "packet.zip"
     evidence = tmp_path / "evidence.txt"
     context_manifest = tmp_path / "project-context-manifest.json"
-    prompt.write_text("pro instructions", encoding="utf-8")
+    prompt.write_text(prompt_text, encoding="utf-8")
     evidence.write_text("implementation evidence", encoding="utf-8")
     context_manifest.write_text(json.dumps({
         "schema": builder.SCHEMA,
@@ -239,6 +239,17 @@ def test_validated_runtime_rejects_an_unlisted_compatibility_root(tmp_path: Path
     assert exc.value.code == "ORACLE_COMPATIBILITY_ROOT_UNBOUND"
 
 
+def test_default_oracle_command_is_pinned_to_the_hash_validated_version() -> None:
+    runner = load_runner()
+
+    assert runner.STATE.default_oracle_command(platform_name="nt") == (
+        "npx.cmd", "-y", "@steipete/oracle@0.17.0",
+    )
+    with pytest.raises(runner.STATE.OracleStateError) as exc:
+        runner.STATE.validate_oracle_command(["npx.cmd", "-y", "@steipete/oracle@0.16.1"])
+    assert exc.value.code == "ORACLE_COMMAND_FORBIDDEN"
+
+
 def test_conversation_url_helpers_preserve_exact_binding_and_detect_conflicts(tmp_path: Path) -> None:
     runner = load_runner()
     observer = tmp_path / "recovery-live-stdout.log"
@@ -324,6 +335,16 @@ def duplicate_prompt_popen(command, **kwargs):
         b'(oracle-global-agent-instructio-f39cc47ba5). Reattach with '
         b'"oracle session oracle-global-agent-instructio-f39cc47ba5" or rerun with '
         b'--force to start another run.\n'
+    )
+    kwargs["stdout"].flush()
+    return Process(1, [])
+
+
+def profile_copy_ebusy_popen(command, **kwargs):
+    source = Path(command[command.index("--copy-profile") + 1]) / "Default" / "Network" / "Cookies"
+    destination = Path(kwargs["env"]["TEMP"]) / "oracle-browser-test" / "Default" / "Network" / "Cookies"
+    kwargs["stdout"].write(
+        f"ERROR: EBUSY: resource busy or locked, copyfile '{source}' -> '{destination}'\n".encode("utf-8")
     )
     kwargs["stdout"].flush()
     return Process(1, [])
@@ -513,13 +534,14 @@ def test_answer_timeout_must_produce_a_finite_bounded_host_deadline(
     assert exc.value.code in {"BROWSER_TIMEOUT_INVALID", "BROWSER_TIMEOUT_OUT_OF_RANGE"}
 
 
-def test_pro_keeps_upstream_answer_timing(tmp_path: Path) -> None:
+def test_pro_uses_the_bounded_original_session_answer_wait(tmp_path: Path) -> None:
     runner = load_runner()
 
     result = execute_run(runner, pro_manifest(tmp_path), dry_run=True)
 
-    assert "--browser-timeout" not in result["argv"]
-    assert result["host_watchdog_timeout_seconds"] is None
+    assert result["argv"].count("--browser-timeout") == 1
+    assert result["argv"][result["argv"].index("--browser-timeout") + 1] == "90m"
+    assert result["host_watchdog_timeout_seconds"] == 5430
 
 
 def test_pro_dry_run_uses_oracle_attachments_and_no_app_mention(tmp_path: Path) -> None:
@@ -793,6 +815,40 @@ def test_post_submit_nonzero_requires_exact_recovery_and_never_restarts(tmp_path
         assert "--no-recover" not in recovery["argv"]
         assert "restart" not in recovery["argv"]
         assert "--prompt" not in recovery["argv"]
+
+
+def test_post_submit_response_timeout_retains_passive_live_authority(tmp_path: Path) -> None:
+    runner = load_runner()
+    launches: list[list[str]] = []
+
+    def response_timeout_popen(command, **kwargs):
+        launches.append(list(command))
+        kwargs["stdout"].write(b"Session: exact\nprompt submitted; response streaming\n")
+        kwargs["stderr"].write(
+            b"ERROR: Assistant response timed out before completion; reattach later to capture the answer.\n"
+        )
+        kwargs["stdout"].flush()
+        kwargs["stderr"].flush()
+        return Process(1, [])
+
+    result = execute_run(
+        runner,
+        pro_manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=response_timeout_popen,
+    )
+
+    state = result["result"]
+    assert result["ok"] is False
+    assert result["status"] == "post_submit_response_timeout"
+    assert result["safe_for_fresh_run"] is False
+    assert "do not relaunch recovery" in result["next_action"]
+    assert len(launches) == 1
+    assert state["status"] == "running"
+    assert state["session_authority"] == "live"
+    assert state["terminal_harvested"] is False
+    assert state["transport_status"] == "post_submit_response_timeout"
+    assert state["task_outcome_reason"] == "assistant-response-timeout-passive-wait"
 
 
 @pytest.mark.parametrize("parallel_parent_id", [None, "d" * 64])
@@ -1311,6 +1367,68 @@ def test_oracle_global_prompt_duplicate_is_proven_pre_submit_and_releases_projec
     assert launches
 
 
+def test_profile_copy_ebusy_is_proven_pre_submit_and_releases_project(tmp_path: Path) -> None:
+    runner = load_runner()
+    seed = tmp_path.parent / f"{tmp_path.name}-profile"
+    cookies = seed / "Default" / "Network" / "Cookies"
+    cookies.parent.mkdir(parents=True)
+    cookies.write_text("seed", encoding="utf-8")
+    result = execute_run(
+        runner,
+        pro_manifest(tmp_path, run_id="c" * 32, copy_profile=str(seed)),
+        run_factory=version_runner,
+        popen_factory=profile_copy_ebusy_popen,
+    )
+    run_dir = Path(result["run_dir"])
+    state = runner.STATE.load_state(run_dir / "state.json")
+
+    assert result["status"] == "pre_submit_failed"
+    assert result["safe_for_fresh_run"] is True
+    assert state["session_authority"] == "pre_submit"
+    assert state["transport_status"] == "failed_pre_submit"
+    assert state["task_outcome"] == "not_executed"
+    assert state["pre_submit_failure"]["code"] == "ORACLE_PROFILE_COPY_EBUSY_PRELAUNCH_FAILED"
+    assert runner.STATE.unresolved_project_sessions(
+        runner.STATE.load_manifest(pro_manifest(tmp_path)).run_root,
+        tmp_path,
+    ) == []
+
+
+def test_recovery_repairs_legacy_profile_copy_ebusy_without_oracle_call(tmp_path: Path) -> None:
+    runner = load_runner()
+    seed = tmp_path.parent / f"{tmp_path.name}-profile"
+    cookies = seed / "Default" / "Network" / "Cookies"
+    cookies.parent.mkdir(parents=True)
+    cookies.write_text("seed", encoding="utf-8")
+    initial = execute_run(
+        runner,
+        pro_manifest(tmp_path, run_id="d" * 32, copy_profile=str(seed)),
+        run_factory=version_runner,
+        popen_factory=profile_copy_ebusy_popen,
+    )
+    run_dir = Path(initial["run_dir"])
+    state_path = run_dir / "state.json"
+    legacy = runner.STATE.load_state(state_path)
+    legacy.update({"session_authority": "submitted_unknown", "transport_status": "failed", "task_outcome": "pending"})
+    legacy.pop("pre_submit_failure", None)
+    runner.STATE.write_json_atomic(state_path, legacy)
+    calls: list[bool] = []
+
+    recovered = runner.recover_run(
+        run_dir,
+        action="harvest",
+        oracle_command=["oracle"],
+        popen_factory=lambda *args, **kwargs: calls.append(True),
+    )
+    settled = runner.STATE.load_state(state_path)
+
+    assert recovered["status"] == "pre_submit_failed"
+    assert recovered["safe_for_fresh_run"] is True
+    assert settled["session_authority"] == "pre_submit"
+    assert settled["task_outcome"] == "not_executed"
+    assert calls == []
+
+
 def test_recovery_settles_legacy_duplicate_prompt_lock_without_oracle_call(tmp_path: Path) -> None:
     runner = load_runner()
     initial = execute_run(
@@ -1712,6 +1830,172 @@ def test_user_confirmation_cannot_replace_missing_recovery_evidence(tmp_path: Pa
     assert exc.value.code == "NO_SUBMISSION_EVIDENCE_INCOMPLETE"
 
 
+def test_direct_web_multi_child_no_submission_settlement_is_hash_bound(tmp_path: Path) -> None:
+    runner = load_runner()
+    parent_id = "d" * 64
+    manifest_path = manifest(tmp_path, parallel_parent_id=parent_id)
+    (tmp_path / "mission.md").write_text("direct web multi lane", encoding="utf-8")
+    rebind_manifest_mission(manifest_path)
+
+    def prompt_not_observed(command, **kwargs):
+        slug = command[command.index("--slug") + 1]
+        kwargs["stdout"].write((f"Session: {slug}\nERROR: Prompt did not appear in conversation before timeout (send may have failed)\n").encode())
+        kwargs["stdout"].flush()
+        return Process(1, [])
+
+    failed = execute_run(runner, manifest_path, run_factory=version_runner, popen_factory=prompt_not_observed)
+    run_dir = Path(failed["run_dir"])
+    state_path = run_dir / "state.json"
+    state = runner.STATE.load_state(state_path)
+    slug = state["oracle"]["slug"]
+    oracle_output = tmp_path / "runtime" / "legacy" / "oracle_output"
+    lane_dir = oracle_output / "lanes" / "lane"
+    lane_dir.mkdir(parents=True)
+    (lane_dir / "oracle.json").write_text(json.dumps({
+        "schema": "codex.chatgpt.oracle-run/v1", "project_root": str(tmp_path.resolve()),
+        "mission_path": str((tmp_path / "mission.md").resolve()), "parallel_parent_id": parent_id,
+    }), encoding="utf-8")
+    (oracle_output / "result.json").write_text(json.dumps({
+        "schema": "codex.chatgpt.oracle-multi-result/v1", "parent_id": parent_id,
+        "lanes": [{"id": "lane", "run_dir": str(run_dir), "session_locator": slug}],
+    }), encoding="utf-8")
+    (run_dir / "recovery-harvest-stdout.log").write_text(
+        f'No live ChatGPT tab matched session "{slug}". Attempting recovery.\n', encoding="utf-8"
+    )
+    (run_dir / "recovery-harvest-stderr.log").write_text(
+        "Cannot recover conversation: session metadata has no recoverable ChatGPT conversation URL.\n", encoding="utf-8"
+    )
+
+    settled = runner.settle_user_confirmed_no_submission(
+        run_dir, confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION, reason="exact child inspected"
+    )
+    proof = runner.STATE.proven_user_confirmed_no_submission(state_path)
+
+    assert settled["result"]["session_authority"] == "pre_submit"
+    assert proof is not None
+    assert proof["settlement_eligibility"] == "oracle-web-multi-child/v1"
+    assert proof["provenance_mode"] == "legacy-result-lane/v1"
+    assert proof["parallel_parent_id"] == parent_id
+    assert proof["source_mission_sha256"] == proof["transport_mission_sha256"]
+    assert proof["legacy_result_sha256"]
+    assert proof["legacy_lane_manifest_sha256"]
+    for path in (
+        run_dir / "stdout.log", run_dir / "stderr.log", run_dir / "transcript.md",
+        run_dir / "recovery-harvest-stdout.log", run_dir / "recovery-harvest-stderr.log",
+    ):
+        original = path.read_text(encoding="utf-8")
+        path.write_text(original + "https://chatgpt.com/c/exact-child\n", encoding="utf-8")
+        assert runner.STATE.proven_user_confirmed_no_submission(state_path) is None
+        path.write_text(original, encoding="utf-8")
+    for path, replacement in (
+        (tmp_path / "mission.md", "changed source"),
+        (run_dir / "mission.md", "changed transport"),
+        (oracle_output / "lanes" / "lane" / "oracle.json", "{}"),
+        (oracle_output / "result.json", "{}"),
+    ):
+        original = path.read_text(encoding="utf-8")
+        path.write_text(replacement, encoding="utf-8")
+        assert runner.STATE.proven_user_confirmed_no_submission(state_path) is None
+        path.write_text(original, encoding="utf-8")
+    (run_dir / "output.md").write_text("unexpected output", encoding="utf-8")
+    assert runner.STATE.proven_user_confirmed_no_submission(state_path) is None
+
+
+def test_direct_web_multi_child_settlement_requires_recovery_pair(tmp_path: Path) -> None:
+    runner = load_runner()
+    parent_id = "f" * 64
+    config = runner.STATE.load_manifest(manifest(tmp_path, parallel_parent_id=parent_id))
+    layout = runner.STATE.create_layout(config)
+    layout.run_dir.mkdir(parents=True)
+    layout.output_path.touch()
+    layout.stdout_path.write_text(f"Session: {layout.slug}\nERROR: Prompt did not appear in conversation before timeout (send may have failed)\n", encoding="utf-8")
+    layout.stderr_path.touch()
+    layout.transcript_path.touch()
+    (layout.run_dir / "mission.md").write_bytes(config.mission_path.read_bytes())
+    oracle_output = tmp_path / "runtime" / "legacy" / "oracle_output"
+    lane_dir = oracle_output / "lanes" / "lane"
+    lane_dir.mkdir(parents=True)
+    (lane_dir / "oracle.json").write_text(json.dumps({"schema": "codex.chatgpt.oracle-run/v1", "project_root": str(tmp_path.resolve()), "mission_path": str(config.mission_path), "parallel_parent_id": parent_id}), encoding="utf-8")
+    (oracle_output / "result.json").write_text(json.dumps({"schema": "codex.chatgpt.oracle-multi-result/v1", "parent_id": parent_id, "lanes": [{"id": "lane", "run_dir": str(layout.run_dir), "session_locator": layout.slug}]}), encoding="utf-8")
+    state = runner.STATE.state_payload(config, layout, status="attention_required", resolved_version="0.16.1")
+    state["session_authority"] = "submitted_unknown"
+    runner.STATE.write_json_atomic(layout.state_path, state)
+
+    with pytest.raises(runner.STATE.OracleStateError) as exc:
+        runner.settle_user_confirmed_no_submission(layout.run_dir, confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION, reason="no recovery")
+    assert exc.value.code == "NO_SUBMISSION_EVIDENCE_INCOMPLETE"
+
+
+def test_settlement_transcript_scan_uses_canonical_path_not_state_mapping(tmp_path: Path) -> None:
+    runner = load_runner()
+    config = runner.STATE.load_manifest(manifest(tmp_path))
+    layout = runner.STATE.create_layout(config)
+    layout.run_dir.mkdir(parents=True)
+    layout.stdout_path.touch()
+    layout.stderr_path.touch()
+    state = runner.STATE.state_payload(config, layout, status="attention_required", resolved_version="0.16.1")
+    runner.STATE.write_json_atomic(layout.state_path, state)
+    layout.transcript_path.write_text("https://chatgpt.com/c/hidden-in-canonical\n", encoding="utf-8")
+    state["artifacts"].pop("transcript")
+    runner.STATE.write_json_atomic(layout.state_path, state)
+    assert runner.STATE._settlement_logs_have_conversation_url(layout.state_path) is True
+
+    layout.transcript_path.unlink()
+    state["artifacts"]["transcript"] = str(tmp_path / "foreign.md")
+    runner.STATE.write_json_atomic(layout.state_path, state)
+    assert runner.STATE._settlement_logs_have_conversation_url(layout.state_path) is True
+    state["artifacts"]["transcript"] = str(layout.transcript_path)
+    runner.STATE.write_json_atomic(layout.state_path, state)
+    assert runner.STATE._settlement_logs_have_conversation_url(layout.state_path) is False
+
+    layout.transcript_path.write_bytes(b"\xff")
+    assert runner.STATE._settlement_logs_have_conversation_url(layout.state_path) is True
+    layout.transcript_path.unlink()
+    target = tmp_path / "transcript-target.md"
+    target.write_text("no url", encoding="utf-8")
+    try:
+        layout.transcript_path.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this Windows host")
+    assert runner.STATE._settlement_logs_have_conversation_url(layout.state_path) is True
+
+
+@pytest.mark.parametrize("field", ["parallel_parent_id", "mission_sha256", "oracle_locator", "requested_run_id"])
+def test_direct_web_multi_child_settlement_rejects_identity_mismatch(tmp_path: Path, field: str) -> None:
+    runner = load_runner()
+    config = runner.STATE.load_manifest(manifest(tmp_path, parallel_parent_id="b" * 64))
+    layout = runner.STATE.create_layout(config, run_id=config.requested_run_id)
+    layout.run_dir.mkdir(parents=True)
+    (layout.run_dir / "mission.md").write_bytes(config.mission_path.read_bytes())
+    layout.output_path.touch()
+    layout.transcript_path.touch()
+    layout.stdout_path.write_text(f"Session: {layout.slug}\nERROR: Prompt did not appear in conversation before timeout (send may have failed)\n", encoding="utf-8")
+    layout.stderr_path.touch()
+    (layout.run_dir / "recovery-harvest-stdout.log").write_text(f'No live ChatGPT tab matched session "{layout.slug}".\n', encoding="utf-8")
+    (layout.run_dir / "recovery-harvest-stderr.log").write_text("Cannot recover conversation: session metadata has no recoverable ChatGPT conversation URL.\n", encoding="utf-8")
+    oracle_output = tmp_path / "runtime" / "legacy" / "oracle_output"
+    lane_dir = oracle_output / "lanes" / "lane"
+    lane_dir.mkdir(parents=True)
+    (lane_dir / "oracle.json").write_text(json.dumps({"schema": "codex.chatgpt.oracle-run/v1", "project_root": str(tmp_path.resolve()), "mission_path": str(config.mission_path), "parallel_parent_id": "b" * 64}), encoding="utf-8")
+    (oracle_output / "result.json").write_text(json.dumps({"schema": "codex.chatgpt.oracle-multi-result/v1", "parent_id": "b" * 64, "lanes": [{"id": "lane", "run_dir": str(layout.run_dir), "session_locator": layout.slug}]}), encoding="utf-8")
+    state = runner.STATE.state_payload(config, layout, status="attention_required", resolved_version="0.16.1")
+    state["session_authority"] = "submitted_unknown"
+    if field == "parallel_parent_id":
+        state[field] = "invalid"
+    elif field == "mission_sha256":
+        state["mission"]["sha256"] = "0" * 64
+    else:
+        if field == "oracle_locator":
+            state["oracle"]["session_locator"] = "oracle-foreign"
+        else:
+            state["requested_run_id"] = layout.run_id
+    runner.STATE.write_json_atomic(layout.state_path, state)
+
+    with pytest.raises((runner.STATE.OracleStateError, runner.OracleRunError)) as exc:
+        runner.settle_user_confirmed_no_submission(layout.run_dir, confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION, reason="identity mismatch")
+    assert exc.value.code in {"NO_SUBMISSION_EVIDENCE_INCOMPLETE", "SETTLEMENT_PARALLEL_PARENT_ID_INVALID"}
+
+
 def test_recovery_captures_output_and_updates_state(tmp_path: Path) -> None:
     runner = load_runner()
     result = execute_run(
@@ -1780,7 +2064,210 @@ def test_running_exact_session_cannot_publish_partial_harvest(tmp_path: Path) ->
     assert not (run_dir / "recovery-harvest-candidate.md").exists()
 
 
-def test_terminal_observation_cannot_regress_to_live_and_later_harvest_settles(tmp_path: Path) -> None:
+def test_delivery_timeout_after_visible_work_cannot_settle_a_terminal_harvest(tmp_path: Path) -> None:
+    """Regression: ChatGPT can keep executing after Oracle sees this error text."""
+    runner = load_runner()
+    result = execute_run(
+        runner,
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(4, None, {}, []),
+    )
+    run_dir = Path(result["run_dir"])
+
+    def timed_out_recovery(command, **kwargs):
+        candidate = Path(command[command.index("--write-output") + 1])
+        candidate.write_text("Message delivery timed out. Please try again.", encoding="utf-8")
+        kwargs["stdout"].write(
+            b"State: running\n"
+            b"State: completed\n"
+            b"Message delivery timed out. Please try again.\n"
+        )
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    recovered = recover_run(
+        runner,
+        run_dir,
+        action="live",
+        popen_factory=timed_out_recovery,
+    )
+    state = runner.STATE.load_state(run_dir / "state.json")
+
+    assert recovered["ok"] is False
+    assert recovered["status"] == "provider_delivery_timeout"
+    assert state["status"] == "running"
+    assert state["session_authority"] == "live"
+    assert state["terminal_harvested"] is False
+    assert state["transport_status"] == "post_submit_provider_delivery_timeout"
+    assert state["task_outcome"] == "pending"
+    assert not Path(state["artifacts"]["output"]).exists()
+    assert not (run_dir / "recovery-live-candidate.md").exists()
+
+
+def provider_delivery_timeout_settlement_fixture(tmp_path: Path):
+    runner = load_runner()
+    initial = execute_run(
+        runner,
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(4, None, {}, []),
+    )
+    run_dir = Path(initial["run_dir"])
+    state_path = run_dir / "state.json"
+    state = runner.STATE.load_state(state_path)
+    output = Path(state["artifacts"]["output"])
+    output.write_text("Message delivery timed out. Please try again.", encoding="utf-8")
+    (run_dir / "recovery-live-stdout.log").write_text(
+        "State: running\nState: completed\nMessage delivery timed out. Please try again.\n",
+        encoding="utf-8",
+    )
+    state.update({
+        "status": "running",
+        "session_authority": "live",
+        "terminal_harvested": False,
+        "transport_status": "post_submit_provider_delivery_timeout",
+        "task_outcome": "pending",
+    })
+    state["oracle"]["conversation_url"] = "https://chatgpt.com/c/exact-timeout-settlement"
+    runner.STATE.write_json_atomic(state_path, state)
+    evidence = tmp_path / "execution-proof.json"
+    evidence.write_text('{"executed":true}', encoding="utf-8")
+    return runner, run_dir, output, evidence
+
+
+def test_user_confirmed_delivery_timeout_execution_settlement_releases_exact_run(tmp_path: Path) -> None:
+    runner, run_dir, output, evidence = provider_delivery_timeout_settlement_fixture(tmp_path)
+
+    settled = runner.settle_user_confirmed_delivery_timeout_execution(
+        run_dir,
+        expected_output_sha256=runner.STATE.sha256_file(output),
+        confirmation=runner.STATE.USER_CONFIRMED_EXECUTION_ENDED,
+        reason="user confirmed the exact ChatGPT task ended after its BB-local artifacts were written",
+        execution_evidence=[(evidence, runner.STATE.sha256_file(evidence))],
+        process_alive=lambda _: False,
+    )
+
+    state = runner.STATE.load_state(run_dir / "state.json")
+    assert settled["ok"] is True
+    assert settled["safe_for_fresh_run"] is True
+    assert state["session_authority"] == "settled_executed"
+    assert state["terminal_harvested"] is False
+    assert state["transport_status"] == "post_submit_provider_delivery_timeout_settled"
+    assert state["task_outcome"] == "executed"
+    assert state["oracle"]["conversation_url"]
+    assert runner.STATE.proven_user_confirmed_execution_ended(run_dir / "state.json") is not None
+    assert runner.STATE.unresolved_project_sessions(run_dir.parent, tmp_path) == []
+
+
+def test_delivery_timeout_execution_settlement_reconstructs_stale_incomplete_terminal_ledger(tmp_path: Path) -> None:
+    runner, run_dir, output, evidence = provider_delivery_timeout_settlement_fixture(tmp_path)
+    # Timeline: an initial false terminal was repaired to the timeout state, then
+    # a later harvest replaced the top-level ledger and rotated its stream logs.
+    state = runner.STATE.load_state(run_dir / "state.json")
+    state.update({"status": "attention_required", "session_authority": "terminal", "transport_status": "incomplete"})
+    runner.STATE.write_json_atomic(run_dir / "state.json", state)
+    state.update({"status": "running", "session_authority": "live", "transport_status": "post_submit_provider_delivery_timeout"})
+    runner.STATE.write_json_atomic(run_dir / "state.json", state)
+    (run_dir / "transcript.md").write_text(
+        "State: running\nState: completed\nMessage delivery timed out. Please try again.\n",
+        encoding="utf-8",
+    )
+    for name in ("recovery-live-stdout.log", "recovery-harvest-stdout.log"):
+        (run_dir / name).write_text("No live ChatGPT tab matched session\n", encoding="utf-8")
+    state = runner.STATE.load_state(run_dir / "state.json")
+    state.update({
+        "status": "attention_required",
+        "session_authority": "terminal",
+        "terminal_harvested": False,
+        "transport_status": "incomplete",
+        "task_outcome": "pending",
+    })
+    runner.STATE.write_json_atomic(run_dir / "state.json", state)
+
+    settled = runner.settle_user_confirmed_delivery_timeout_execution(
+        run_dir,
+        expected_output_sha256=runner.STATE.sha256_file(output),
+        confirmation=runner.STATE.USER_CONFIRMED_EXECUTION_ENDED,
+        reason="user confirmed the exact task ended after its execution evidence was produced",
+        execution_evidence=[(evidence, runner.STATE.sha256_file(evidence))],
+        process_alive=lambda _: False,
+    )
+
+    assert settled["ok"] is True
+    assert settled["result"]["session_authority"] == "settled_executed"
+
+
+def test_delivery_timeout_execution_settlement_rejects_active_owned_process(tmp_path: Path) -> None:
+    runner, run_dir, output, evidence = provider_delivery_timeout_settlement_fixture(tmp_path)
+    state = runner.STATE.load_state(run_dir / "state.json")
+    state["host_watchdog"] = {"oracle_process_pid": 4242}
+    runner.STATE.write_json_atomic(run_dir / "state.json", state)
+
+    with pytest.raises(runner.OracleRunError) as exc:
+        runner.settle_user_confirmed_delivery_timeout_execution(
+            run_dir,
+            expected_output_sha256=runner.STATE.sha256_file(output),
+            confirmation=runner.STATE.USER_CONFIRMED_EXECUTION_ENDED,
+            reason="user confirmed completion",
+            execution_evidence=[(evidence, runner.STATE.sha256_file(evidence))],
+            process_alive=lambda pid: pid == 4242,
+        )
+    assert exc.value.code == "EXECUTION_ENDED_PROCESS_ACTIVE"
+
+
+def test_delivery_timeout_execution_settlement_rejects_wrong_hash_or_missing_confirmation(tmp_path: Path) -> None:
+    runner, run_dir, output, evidence = provider_delivery_timeout_settlement_fixture(tmp_path)
+    with pytest.raises(runner.OracleRunError) as wrong_hash:
+        runner.settle_user_confirmed_delivery_timeout_execution(
+            run_dir,
+            expected_output_sha256="0" * 64,
+            confirmation=runner.STATE.USER_CONFIRMED_EXECUTION_ENDED,
+            reason="user confirmed completion",
+            execution_evidence=[(evidence, runner.STATE.sha256_file(evidence))],
+            process_alive=lambda _: False,
+        )
+    assert wrong_hash.value.code == "EXECUTION_ENDED_OUTPUT_HASH_MISMATCH"
+    with pytest.raises(runner.OracleRunError) as missing_confirmation:
+        runner.settle_user_confirmed_delivery_timeout_execution(
+            run_dir,
+            expected_output_sha256=runner.STATE.sha256_file(output),
+            confirmation="",
+            reason="user confirmed completion",
+            execution_evidence=[(evidence, runner.STATE.sha256_file(evidence))],
+            process_alive=lambda _: False,
+        )
+    assert missing_confirmation.value.code == "EXECUTION_ENDED_CONFIRMATION_REQUIRED"
+
+
+def test_delivery_timeout_execution_settlement_rejects_absent_evidence_and_active_pending_run(tmp_path: Path) -> None:
+    runner, run_dir, output, evidence = provider_delivery_timeout_settlement_fixture(tmp_path)
+    with pytest.raises(runner.OracleRunError) as absent_evidence:
+        runner.settle_user_confirmed_delivery_timeout_execution(
+            run_dir,
+            expected_output_sha256=runner.STATE.sha256_file(output),
+            confirmation=runner.STATE.USER_CONFIRMED_EXECUTION_ENDED,
+            reason="user confirmed completion",
+            execution_evidence=[],
+            process_alive=lambda _: False,
+        )
+    assert absent_evidence.value.code == "EXECUTION_ENDED_EVIDENCE_REQUIRED"
+    state = runner.STATE.load_state(run_dir / "state.json")
+    state["transport_status"] = "incomplete"
+    runner.STATE.write_json_atomic(run_dir / "state.json", state)
+    with pytest.raises(runner.OracleRunError) as active_pending:
+        runner.settle_user_confirmed_delivery_timeout_execution(
+            run_dir,
+            expected_output_sha256=runner.STATE.sha256_file(output),
+            confirmation=runner.STATE.USER_CONFIRMED_EXECUTION_ENDED,
+            reason="user confirmed completion",
+            execution_evidence=[(evidence, runner.STATE.sha256_file(evidence))],
+            process_alive=lambda _: False,
+        )
+    assert active_pending.value.code == "EXECUTION_ENDED_TIMEOUT_STATE_REQUIRED"
+
+
+def test_later_exact_live_observation_restores_provisional_terminal_authority(tmp_path: Path) -> None:
     runner = load_runner()
     result = execute_run(
         runner,
@@ -1805,8 +2292,8 @@ def test_terminal_observation_cannot_regress_to_live_and_later_harvest_settles(t
         action="live",
         popen_factory=observation("completed"),
     )
-    # Reproduce state already regressed by the previously installed runner;
-    # the durable exact live-observer log must restore terminal authority.
+    # A later exact live observer is stronger than the provisional terminal
+    # observation because there is still no durable terminal artifact.
     regressed = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
     regressed["status"] = "running"
     regressed["session_authority"] = "live"
@@ -1836,9 +2323,9 @@ def test_terminal_observation_cannot_regress_to_live_and_later_harvest_settles(t
 
     assert terminal["status"] == "terminal_observed"
     assert terminal["result"]["session_authority"] == "terminal_observed"
-    assert disagreement["status"] == "terminal_settle_disagreement"
-    assert disagreement["result"]["status"] == "attention_required"
-    assert disagreement["result"]["session_authority"] == "terminal_observed"
+    assert disagreement["status"] == "session_live"
+    assert disagreement["result"]["status"] == "running"
+    assert disagreement["result"]["session_authority"] == "live"
     assert disagreement["result"]["terminal_harvested"] is False
     assert output_absent_during_disagreement
     assert blocked_duplicate["ok"] is False
@@ -1852,7 +2339,132 @@ def test_terminal_observation_cannot_regress_to_live_and_later_harvest_settles(t
     assert Path(settled["output_path"]).read_text(encoding="utf-8") == "durable answer"
 
 
-def test_live_recovery_settles_stalled_inside_one_exact_slug_process(
+def test_pro_structured_mission_rejects_short_terminal_preamble(tmp_path: Path) -> None:
+    runner = load_runner()
+    mission_text = (
+        "# Mission\n\n## Required answer schema\n\n"
+        "1. `DIRECTION_VERDICT`: decision.\n"
+        "2. `NEXT_ACTION`: action.\n"
+    )
+    manifest_path = pro_manifest(tmp_path, prompt_text=mission_text)
+    initial = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=popen_for(7, None, {}, []),
+    )
+    run_dir = Path(initial["run_dir"])
+
+    def completed_preamble(command, **kwargs):
+        candidate = Path(command[command.index("--write-output") + 1])
+        candidate.write_text("I'll cross-check the evidence, then deliver the decision.", encoding="utf-8")
+        kwargs["stdout"].write(b"State: completed\n")
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    rejected = recover_run(
+        runner,
+        run_dir,
+        action="harvest",
+        popen_factory=completed_preamble,
+    )
+    state = runner.STATE.load_state(run_dir / "state.json")
+
+    assert rejected["ok"] is False
+    assert rejected["status"] == "pro_output_incomplete"
+    assert state["session_authority"] == "terminal_observed"
+    assert state["terminal_harvested"] is False
+    assert not Path(state["artifacts"]["output"]).exists()
+
+    def running_observer(command, **kwargs):
+        kwargs["stdout"].write(b"State: running\n")
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    restored = recover_run(
+        runner,
+        run_dir,
+        action="live",
+        popen_factory=running_observer,
+    )
+    assert restored["status"] == "session_live"
+    assert restored["result"]["session_authority"] == "live"
+
+
+def test_pro_terminal_candidate_with_all_ticked_sections_promotes_without_browser(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+    mission_text = (
+        "# Mission\n\n## Required answer schema\n\n"
+        "1. `DIRECTION_VERDICT`: decision.\n"
+        "2. `WEB_MULTI_NEEDED: YES|NO`: reason.\n"
+        "3. `WHY`: evidence.\n"
+        "4. `SELECTED_ROUTE_ID`: route.\n"
+        "5. `SEED_AUTHORITY`: authority.\n"
+        "6. `MANAGER_AUTHORITY`: authority.\n"
+        "7. `DATA_AND_WINDOW`: data.\n"
+        "8. `COST_AND_FUNDING`: costs.\n"
+        "9. `PRE_PNL_GATES`: gates.\n"
+        "10. `CONTROLS`: controls.\n"
+        "11. `RISK_AND_LEVERAGE`: risk.\n"
+        "12. `RESOURCE_CONTRACT`: resources.\n"
+        "13. `NO_RETUNE_BOUNDARY`: boundary.\n"
+        "14. `EXACT_TERMINAL_VERDICTS`: verdicts.\n"
+        "15. `REGULAR_WEB_IMPLEMENTATION_MISSION`: mission.\n"
+        "16. `NEXT_ACTION`: action.\n"
+    )
+    manifest_path = pro_manifest(tmp_path, prompt_text=mission_text)
+    initial = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=popen_for(7, None, {}, []),
+    )
+    run_dir = Path(initial["run_dir"])
+    labels = (
+        "DIRECTION_VERDICT", "WEB_MULTI_NEEDED: NO", "WHY", "SELECTED_ROUTE_ID",
+        "SEED_AUTHORITY", "MANAGER_AUTHORITY", "DATA_AND_WINDOW", "COST_AND_FUNDING",
+        "PRE_PNL_GATES", "CONTROLS", "RISK_AND_LEVERAGE", "RESOURCE_CONTRACT",
+        "NO_RETUNE_BOUNDARY", "EXACT_TERMINAL_VERDICTS",
+        "REGULAR_WEB_IMPLEMENTATION_MISSION", "NEXT_ACTION",
+    )
+    answer = "\n\n".join(
+        f"## {index}. `{label}`\n\ncontent {index}"
+        for index, label in enumerate(labels, start=1)
+    )
+
+    candidate = run_dir / "recovery-harvest-candidate.md"
+    candidate.write_text(answer, encoding="utf-8")
+    runner.STATE.update_state(
+        run_dir / "state.json",
+        status="attention_required",
+        session_authority="terminal_observed",
+        terminal_harvested=False,
+    )
+    state = runner.STATE.load_state(run_dir / "state.json")
+    expected_sha256 = runner.STATE.sha256_file(candidate)
+
+    assert state["session_authority"] == "terminal_observed"
+    assert runner.pro_output_satisfies_required_schema(state, candidate) is True
+
+    promoted = runner.promote_terminal_harvest_candidate(
+        run_dir,
+        candidate_path=candidate,
+        expected_candidate_sha256=expected_sha256,
+    )
+    completed = runner.STATE.load_state(run_dir / "state.json")
+
+    assert promoted["ok"] is True
+    assert promoted["artifact_sha256"] == expected_sha256
+    assert candidate.is_file()
+    assert Path(promoted["output_path"]).read_text(encoding="utf-8") == answer
+    assert completed["status"] == "complete"
+    assert completed["session_authority"] == "terminal"
+    assert completed["terminal_harvested"] is True
+
+
+def test_live_recovery_holds_one_exact_slug_connection_until_terminal(
     tmp_path: Path,
 ) -> None:
     runner = load_runner()
@@ -1870,25 +2482,19 @@ def test_live_recovery_settles_stalled_inside_one_exact_slug_process(
         session_authority="submitted_unknown",
     )
     calls: list[str] = []
-    authority_during_wait: list[tuple[str, str]] = []
+    live_timeout_ms: list[str] = []
 
     def recovery(command, **kwargs):
-        action = "harvest" if "--harvest" in command else "live"
-        calls.append(action)
-        if calls == ["live"]:
-            kwargs["stdout"].write(b"State: stalled\n")
-        elif action == "live":
-            kwargs["stdout"].write(b"State: completed\n")
-        else:
-            candidate = Path(command[command.index("--write-output") + 1])
-            candidate.write_text("durable exact answer", encoding="utf-8")
-            kwargs["stdout"].write(b"State: completed\n")
+        assert "--live" in command
+        calls.append("live")
+        live_timeout_ms.append(kwargs["env"]["ORACLE_LIVE_TERMINAL_TIMEOUT_MS"])
+        candidate = Path(command[command.index("--write-output") + 1])
+        candidate.write_text("durable exact answer", encoding="utf-8")
+        # The compatibility-patched live tail keeps one recovered browser and
+        # observes both states before it returns a terminal harvest.
+        kwargs["stdout"].write(b"State: running\nState: completed\n")
         kwargs["stdout"].flush()
         return Process(0, [])
-
-    def no_sleep(_seconds: float) -> None:
-        state = runner.STATE.load_state(run_dir / "state.json")
-        authority_during_wait.append((state["status"], state["session_authority"]))
 
     settled = recover_run(
         runner,
@@ -1896,17 +2502,100 @@ def test_live_recovery_settles_stalled_inside_one_exact_slug_process(
         action="live",
         popen_factory=recovery,
         settle_timeout_seconds=5,
-        settle_interval_seconds=0,
-        sleep=no_sleep,
     )
 
-    assert calls == ["live", "live", "harvest"]
-    assert authority_during_wait == [("running", "live")]
+    assert calls == ["live"]
+    assert live_timeout_ms == ["5000"]
     assert settled["ok"] is True
     assert settled["status"] == "complete"
     assert settled["result"]["session_authority"] == "terminal"
     assert settled["result"]["terminal_harvested"] is True
     assert Path(settled["output_path"]).read_text(encoding="utf-8") == "durable exact answer"
+
+
+def test_live_recovery_slow_working_page_keeps_one_recovered_tab_until_terminal(
+    tmp_path: Path,
+) -> None:
+    """E2E-like recovery fixture: a recovered Pro page works before it is ready."""
+    runner = load_runner()
+    initial = execute_run(
+        runner,
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(7, None, {}, []),
+    )
+    run_dir = Path(initial["run_dir"])
+    runner.STATE.update_state(
+        run_dir / "state.json",
+        status="running",
+        exit_code=7,
+        session_authority="live",
+    )
+    calls: list[list[str]] = []
+    live_timeout_ms: list[str] = []
+
+    def slow_working_recovery(command, **kwargs):
+        calls.append(list(command))
+        live_timeout_ms.append(kwargs["env"]["ORACLE_LIVE_TERMINAL_TIMEOUT_MS"])
+        candidate = Path(command[command.index("--write-output") + 1])
+        candidate.write_text("durable exact answer after slow readiness", encoding="utf-8")
+        kwargs["stdout"].write(
+            b"[browser] Recovery: Chrome listening on 127.0.0.1:53582; tab loaded.\n"
+            b"[2026-08-04T12:55:00.000Z] state=working stop=yes send=no model=Pro snippet=\n"
+            b"State: running\n"
+            b"State: completed\n"
+        )
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    settled = recover_run(
+        runner,
+        run_dir,
+        action="live",
+        popen_factory=slow_working_recovery,
+        settle_timeout_seconds=3600,
+    )
+
+    assert len(calls) == 1
+    assert "--live" in calls[0]
+    assert live_timeout_ms == ["3600000"]
+    assert settled["ok"] is True
+    assert settled["status"] == "complete"
+    assert settled["result"]["session_authority"] == "terminal"
+
+
+def test_stalled_exact_observation_retains_live_authority_and_project_lock(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+    initial = execute_run(
+        runner,
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(7, None, {}, []),
+    )
+    run_dir = Path(initial["run_dir"])
+
+    def stalled_observer(command, **kwargs):
+        kwargs["stdout"].write(b"State: stalled\n")
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    recovered = recover_run(
+        runner,
+        run_dir,
+        action="live",
+        popen_factory=stalled_observer,
+        settle_timeout_seconds=0,
+    )
+
+    state = runner.STATE.load_state(run_dir / "state.json")
+    assert recovered["ok"] is False
+    assert recovered["status"] == "session_live"
+    assert recovered["exact_session_state"] == "stalled"
+    assert state["status"] == "running"
+    assert state["session_authority"] == "live"
+    assert state["terminal_harvested"] is False
 
 
 def test_live_recovery_cli_defaults_to_one_ninety_minute_settle_process() -> None:

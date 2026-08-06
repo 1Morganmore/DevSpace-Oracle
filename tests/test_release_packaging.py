@@ -105,6 +105,8 @@ def test_compatibility_patch_assets_are_packaged() -> None:
         'assistantResponse.patch',
         'browserConfig.patch',
         'browserIndex.patch',
+        'browserTabs.patch',
+        'browserTabs.pre-readiness.patch',
         'chromeLifecycle.patch',
         'modelSelection.patch',
         'profileCopy.patch',
