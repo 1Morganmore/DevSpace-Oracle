@@ -40,7 +40,7 @@ def load_pro_context_builder():
     return module
 
 
-def manifest(tmp_path: Path, **extra) -> Path:
+def manifest(tmp_path: Path, *, test_profile: bool = True, **extra) -> Path:
     mission = tmp_path / "mission.md"
     mission.write_text("finish", encoding="utf-8")
     path = tmp_path / "job.json"
@@ -57,6 +57,10 @@ def manifest(tmp_path: Path, **extra) -> Path:
             "@steipete/oracle@0.17.0",
         ],
     }
+    if test_profile and "copy_profile" not in extra:
+        profile = tmp_path.parent / f"{tmp_path.name}-oracle-profile"
+        profile.mkdir(exist_ok=True)
+        payload["copy_profile"] = str(profile.resolve())
     payload.update(extra)
     payload["mission_sha256"] = hashlib.sha256(
         Path(payload["mission_path"]).read_bytes()
@@ -170,7 +174,7 @@ def test_preflight_reports_missing_profile_and_devspace_without_browser(
 ) -> None:
     runner = load_runner()
     monkeypatch.setenv("ORACLE_BROWSER_PROFILE_DIR", str(tmp_path / "missing-profile"))
-    job = manifest(tmp_path)
+    job = manifest(tmp_path, test_profile=False)
 
     result = runner.preflight_run(
         job,
@@ -195,7 +199,7 @@ def test_windows_live_submission_requires_profile_seed_before_run_layout(
 ) -> None:
     runner = load_runner()
     monkeypatch.setenv("ORACLE_BROWSER_PROFILE_DIR", str(tmp_path / "missing-profile"))
-    job = manifest(tmp_path)
+    job = manifest(tmp_path, test_profile=False)
     run_root = runner.STATE.load_manifest(job, platform_name="nt").run_root
 
     with pytest.raises(runner.OracleRunError) as error:
@@ -527,7 +531,7 @@ def test_default_signed_in_profile_is_copied_per_run_and_window_is_hidden(
         lambda name: "/usr/bin/rsync" if name == runner.STATE.PROFILE_COPY_DEPENDENCY else None,
     )
 
-    result = execute_run(runner, manifest(tmp_path), dry_run=True)
+    result = execute_run(runner, manifest(tmp_path, test_profile=False), dry_run=True)
 
     assert result["argv"][result["argv"].index("--copy-profile") + 1] == str(profile.resolve())
     assert result["argv"].count("--browser-hide-window") == 1
@@ -543,7 +547,7 @@ def test_missing_posix_copy_dependency_still_launches_without_profile_copy(
     monkeypatch.setattr(runner.STATE.shutil, "which", lambda name: None)
 
     result = execute_run(
-        runner, manifest(tmp_path), dry_run=True, platform_name="posix"
+        runner, manifest(tmp_path, test_profile=False), dry_run=True, platform_name="posix"
     )
 
     assert "--copy-profile" not in result["argv"]
@@ -564,7 +568,9 @@ def test_windows_lanes_keep_profile_isolation_without_rsync(
     monkeypatch.setenv("ORACLE_BROWSER_PROFILE_DIR", str(profile.resolve()))
     monkeypatch.setattr(runner.STATE.shutil, "which", lambda name: None)
 
-    result = execute_run(runner, manifest(tmp_path), dry_run=True, platform_name="nt")
+    result = execute_run(
+        runner, manifest(tmp_path, test_profile=False), dry_run=True, platform_name="nt"
+    )
 
     assert result["argv"][result["argv"].index("--copy-profile") + 1] == str(
         profile.resolve()
