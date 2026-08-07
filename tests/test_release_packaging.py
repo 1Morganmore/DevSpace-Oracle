@@ -70,7 +70,6 @@ def test_all_hash_gated_compatibility_patch_assets_are_installed() -> None:
     }
     assert required <= include
     assert not [path for path in required if not (ROOT / path).is_file()]
-    assert "thinkingTime.patch" not in {contract["patch"] for contract in oracle["VERSION_PATCHES"]["0.17.1"].values()}
 
 
 def test_package_metadata_is_publishable_and_lockfile_matches() -> None:

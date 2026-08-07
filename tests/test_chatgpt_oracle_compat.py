@@ -809,14 +809,13 @@ def test_exact_app_suggestion_with_wrong_semantic_decorator_fails_before_send(
     assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
 
 
-def test_oracle_0171_has_the_exact_seven_hash_gated_compatibility_patches() -> None:
+def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> None:
     compat = load_compat()
     contracts = compat.VERSION_PATCHES["0.17.1"]
 
     assert compat.SUPPORTED_VERSION == "0.17.1"
     assert compat.RECOVERABLE_VERSIONS == ("0.16.1", "0.17.0", "0.17.1")
     assert "dist/src/browser/actions/modelSelection.js" not in contracts
-    assert "dist/src/browser/actions/thinkingTime.js" not in contracts
     assert {
         path: (contract["pristine"], contract["patched"])
         for path, contract in contracts.items()
@@ -828,6 +827,7 @@ def test_oracle_0171_has_the_exact_seven_hash_gated_compatibility_patches() -> N
         "dist/src/browser/index.js": ("335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11", "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895"),
         "dist/src/browser/actions/assistantResponse.js": ("0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d", "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4"),
         "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f"),
+        "dist/src/browser/actions/thinkingTime.js": ("508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca", "21027b691a86a3278e6c0b6e69c8b6ce0325b984cda7e4fca3ca284422958b16"),
     }
 
     patches = {
@@ -837,6 +837,8 @@ def test_oracle_0171_has_the_exact_seven_hash_gated_compatibility_patches() -> N
     assert 'process.platform === "win32"' in patches["dist/src/browser/profileCopy.js"]
     assert "options.browserManualLogin = false" in patches["dist/src/cli/browserConfig.js"]
     assert "config = { ...config, manualLogin: false" in patches["dist/src/browser/index.js"]
+    assert 'strictRegularExtraHigh = targetModelKind !== "pro" && level === "extra-high"' in patches["dist/src/browser/actions/thinkingTime.js"]
+    assert "refusing to submit without confirmed ${requiredEffortLabel}" in patches["dist/src/browser/actions/thinkingTime.js"]
 
 
 def test_copy_profile_recovery_patch_reuses_only_the_persisted_profile_seed() -> None:

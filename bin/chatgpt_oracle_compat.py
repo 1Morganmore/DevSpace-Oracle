@@ -161,6 +161,11 @@ PATCHES_0171 = {
         "pristine": "db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000",
         "patched": "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f",
     },
+    "dist/src/browser/actions/thinkingTime.js": {
+        "patch": "thinkingTime.patch",
+        "pristine": "508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca",
+        "patched": "21027b691a86a3278e6c0b6e69c8b6ce0325b984cda7e4fca3ca284422958b16",
+    },
 }
 
 VERSION_PATCHES = {"0.16.1": PATCHES_0161, "0.17.0": PATCHES_0170, "0.17.1": PATCHES_0171}
