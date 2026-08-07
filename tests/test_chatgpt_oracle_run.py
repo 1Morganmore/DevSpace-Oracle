@@ -2004,6 +2004,56 @@ def test_user_confirmation_cannot_replace_missing_recovery_evidence(tmp_path: Pa
     assert exc.value.code == "NO_SUBMISSION_EVIDENCE_INCOMPLETE"
 
 
+def test_direct_app_route_unconfirmed_can_be_user_settled_without_recovery(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+    manifest_path = manifest(tmp_path)
+
+    def app_route_unconfirmed(command, **kwargs):
+        slug = command[command.index("--slug") + 1]
+        kwargs["stdout"].write(
+            (
+                f"Session: {slug}\n"
+                "ERROR: APP_MENTION_ROUTE_UNCONFIRMED\n"
+                "User error (browser-automation): APP_MENTION_ROUTE_UNCONFIRMED\n"
+            ).encode()
+        )
+        kwargs["stdout"].flush()
+        return Process(1, [])
+
+    failed = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=app_route_unconfirmed,
+    )
+    run_dir = Path(failed["run_dir"])
+    settled = runner.settle_user_confirmed_no_submission(
+        run_dir,
+        confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION,
+        reason="user confirmed the exact direct run was not submitted",
+    )
+    proof = runner.STATE.proven_user_confirmed_no_submission(run_dir / "state.json")
+
+    assert settled["ok"] is True
+    assert settled["safe_for_fresh_run"] is True
+    assert settled["result"]["session_authority"] == "pre_submit"
+    assert settled["result"]["task_outcome_reason"] == (
+        "user-confirmed-no-submission-after-app-route-unconfirmed"
+    )
+    assert proof is not None
+    assert proof["settlement_eligibility"] == "oracle-direct-app-route-unconfirmed/v1"
+    assert proof["manifest_sha256"] == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    assert proof["source_mission_sha256"] == proof["transport_mission_sha256"]
+    assert proof["recovery_evidence"] == []
+    manifest_bytes = manifest_path.read_bytes()
+    manifest_path.write_bytes(manifest_bytes + b"\n")
+    assert runner.STATE.proven_user_confirmed_no_submission(run_dir / "state.json") is None
+    manifest_path.write_bytes(manifest_bytes)
+    assert runner.STATE.proven_user_confirmed_no_submission(run_dir / "state.json") is not None
+
+
 def test_direct_web_multi_child_no_submission_settlement_is_hash_bound(tmp_path: Path) -> None:
     runner = load_runner()
     parent_id = "d" * 64

@@ -1390,8 +1390,119 @@ def _settlement_logs_have_conversation_url(state_path: Path) -> bool:
     return False
 
 
+def _direct_app_route_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
+    """Bind an exact direct pre-send app-route rejection to user adjudication."""
+    state = load_state(state_path)
+    if (
+        str(state.get("session_authority") or "") not in {"submitted_unknown", "pre_submit"}
+        or state.get("parallel_parent_id") not in {None, ""}
+        or state.get("terminal_harvested") is True
+        or _state_has_conversation_url(state)
+        or str(state.get("mode") or "").casefold() != "browser"
+        or str(state.get("transport") or "").casefold() != "devspace"
+        or str(state.get("app_name") or "").casefold() != "devspace"
+    ):
+        return None
+    run_dir = state_path.parent
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    output = Path(str(artifacts.get("output") or ""))
+    if output.resolve() != (run_dir / "output.md").resolve() or output.is_symlink() or output_is_nonempty(output):
+        return None
+    records = {name: _artifact_bytes(state, name) for name in ("stdout", "stderr", "transcript")}
+    if any(record is None for record in records.values()):
+        return None
+    stdout_path, stdout_bytes = records["stdout"]  # type: ignore[misc]
+    stderr_path, stderr_bytes = records["stderr"]  # type: ignore[misc]
+    transcript_path, transcript_bytes = records["transcript"]  # type: ignore[misc]
+    if (
+        stdout_path.resolve() != (run_dir / "stdout.log").resolve()
+        or stderr_path.resolve() != (run_dir / "stderr.log").resolve()
+        or transcript_path.resolve() != (run_dir / "transcript.md").resolve()
+        or any(path.is_symlink() for path in (stdout_path, stderr_path, transcript_path))
+    ):
+        return None
+    try:
+        stdout_text = stdout_bytes.decode("utf-8", errors="strict")
+        stderr_text = stderr_bytes.decode("utf-8", errors="strict")
+        transcript_text = transcript_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    if any(CHATGPT_CONVERSATION_URL_RE.search(text) for text in (stdout_text, stderr_text, transcript_text)):
+        return None
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
+    stdout_lines = {line.strip() for line in stdout_text.splitlines()}
+    if (
+        normalize_oracle_version(oracle.get("resolved_version")) != ORACLE_ACTIVE_VERSION
+        or not locator
+        or f"Session: {locator}" not in stdout_text
+        or {
+            f"ERROR: {ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER}",
+            f"User error (browser-automation): {ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER}",
+        }.issubset(stdout_lines) is False
+    ):
+        return None
+    mission = state.get("mission") if isinstance(state.get("mission"), dict) else {}
+    manifest = state.get("manifest") if isinstance(state.get("manifest"), dict) else {}
+    try:
+        project_root = Path(str(state.get("project_root") or "")).resolve(strict=True)
+        source_path = Path(str(mission.get("path") or ""))
+        transport_path = Path(str(mission.get("transport_path") or ""))
+        manifest_path = Path(str(manifest.get("path") or ""))
+        if (
+            not project_root.is_dir()
+            or not all(path.is_absolute() for path in (source_path, transport_path, manifest_path))
+            or any(path.is_symlink() for path in (source_path, transport_path, manifest_path))
+        ):
+            return None
+        source_path = source_path.resolve(strict=True)
+        transport_path = transport_path.resolve(strict=True)
+        manifest_path = manifest_path.resolve(strict=True)
+        if (
+            transport_path != (run_dir / "mission.md").resolve()
+            or not is_within(project_root, source_path)
+            or not is_within(project_root, manifest_path)
+        ):
+            return None
+        source_bytes = source_path.read_bytes()
+        transport_bytes = transport_path.read_bytes()
+        manifest_bytes = manifest_path.read_bytes()
+    except OSError:
+        return None
+    mission_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    expected_manifest_sha256 = str(manifest.get("expected_sha256") or "")
+    if (
+        source_bytes != transport_bytes
+        or mission_sha256 != str(mission.get("sha256") or "")
+        or manifest_sha256 != str(manifest.get("actual_sha256") or "")
+        or (expected_manifest_sha256 and expected_manifest_sha256 != manifest_sha256)
+    ):
+        return None
+    return {
+        "settlement_eligibility": "oracle-direct-app-route-unconfirmed/v1",
+        "project_root": str(project_root),
+        "run_id": str(state.get("run_id") or ""),
+        "source_mission_path": str(source_path),
+        "source_mission_sha256": mission_sha256,
+        "transport_mission_path": str(transport_path),
+        "transport_mission_sha256": hashlib.sha256(transport_bytes).hexdigest(),
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": manifest_sha256,
+        "mission_sha256": mission_sha256,
+        "oracle_locator": locator,
+        "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+        "transcript_sha256": hashlib.sha256(transcript_bytes).hexdigest(),
+        "recovery_evidence": [],
+        "output_absent": True,
+        "conversation_url_absent": True,
+        "_task_outcome_reason": "user-confirmed-no-submission-after-app-route-unconfirmed",
+    }
+
+
 def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
-    """Return exact evidence for a comprehensive stage or direct Web Multi child."""
+    """Return exact evidence for an eligible user-adjudicated run."""
     if _settlement_logs_have_conversation_url(state_path):
         return None
     comprehensive = _comprehensive_no_submission_evidence(state_path)
@@ -1404,6 +1515,9 @@ def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any]
     # A partial or malformed comprehensive contract must never fall through.
     if "[HOST_STAGE_CONTRACT]" in mission_text or "[DEVSPACE_WORKSPACE_ENTRY_CONTRACT]" in mission_text:
         return None
+    direct = _direct_app_route_no_submission_evidence(state_path)
+    if direct is not None:
+        return direct
     return _web_multi_child_no_submission_evidence(state_path)
 
 
@@ -1450,7 +1564,13 @@ def proven_user_confirmed_no_submission(state_path: Path) -> dict[str, Any] | No
     ):
         if recorded.get(key) != current.get(key):
             return None
-    if current.get("settlement_eligibility") == "oracle-web-multi-child/v1":
+    if current.get("settlement_eligibility") == "oracle-direct-app-route-unconfirmed/v1":
+        required = (
+            "settlement_eligibility", "source_mission_path", "source_mission_sha256",
+            "transport_mission_path", "transport_mission_sha256", "manifest_path",
+            "manifest_sha256", "transcript_sha256",
+        )
+    elif current.get("settlement_eligibility") == "oracle-web-multi-child/v1":
         required = (
             "settlement_eligibility", "parallel_parent_id", "source_mission_path",
             "source_mission_sha256", "transport_mission_path", "transport_mission_sha256",
@@ -1500,7 +1620,7 @@ def settle_user_confirmed_no_submission(
     if evidence is None:
         raise OracleStateError(
             "NO_SUBMISSION_EVIDENCE_INCOMPLETE",
-            "run lacks the exact prompt-timeout and recovery-binding evidence required for user adjudication",
+            "run lacks exact eligible composer-failure and binding evidence for user adjudication",
         )
     recorded = {
         "schema": "codex.chatgpt.oracle-user-confirmed-no-submission/v1",
