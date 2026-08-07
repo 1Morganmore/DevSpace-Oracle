@@ -14,6 +14,11 @@ from typing import Any, Sequence
 SUPPORTED_VERSION = "1.0.5"
 CREATE_NO_WINDOW = 0x08000000
 PATCHES = {
+    "dist/server.js": {
+        "patch": "server.patch",
+        "pristine": "cdb68230d3a190b213678c39eda0ec7ba021ed2e7e141738a13b92eb3c155966",
+        "patched": "0c3e3f71654cd2dd3a52a19d4fec1f2942f5ead0e8a638ab90a33af918629a7e",
+    },
     "dist/workspaces.js": {
         "patch": "workspaces.patch",
         "pristine": "1c0556b8acc77d5811488212eaf3029eb2f622833dc69c18cf9db9eb6bafc761",
@@ -475,7 +480,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Apply the exact DevSpace 1.0.5 bounded workspace discovery patch."
+        description="Apply the exact DevSpace 1.0.5 ChatGPT compatibility patches."
     )
     parser.add_argument("--package-root", type=Path)
     parser.add_argument("--confirm-service-restarted", action="store_true")

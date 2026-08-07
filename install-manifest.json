@@ -12,6 +12,7 @@
     "bin/chatgpt_oracle_run.py",
     "bin/chatgpt_devspace_compat.py",
     "bin/devspace-compat/1.0.4/workspaces.patch",
+    "bin/devspace-compat/1.0.5/server.patch",
     "bin/devspace-compat/1.0.5/workspaces.patch",
     "bin/chatgpt_oracle_compat.py",
     "bin/oracle-compat/0.16.1/assistantResponse.patch",

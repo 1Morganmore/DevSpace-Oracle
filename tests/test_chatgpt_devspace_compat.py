@@ -276,3 +276,30 @@ def test_bounded_workspace_patch_skips_transient_trees_and_batches_discovery() -
     assert '".venv"' in patch
     assert "const batchSize = 24" in patch
     assert "await Promise.all(batch.map" in patch
+
+
+def test_oauth_discovery_patch_exposes_chatgpt_path_specific_metadata() -> None:
+    compat = load_compat()
+    patch_path = (
+        MODULE_PATH.parent
+        / "devspace-compat"
+        / compat.SUPPORTED_VERSION
+        / "server.patch"
+    )
+    patch = patch_path.read_text(encoding="utf-8")
+    parsed = subprocess.run(
+        ["git", "apply", "--numstat", "--", str(patch_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert parsed.returncode == 0, parsed.stderr
+    assert compat.PATCHES["dist/server.js"]["pristine"] == (
+        "cdb68230d3a190b213678c39eda0ec7ba021ed2e7e141738a13b92eb3c155966"
+    )
+    assert compat.PATCHES["dist/server.js"]["patched"] == (
+        "0c3e3f71654cd2dd3a52a19d4fec1f2942f5ead0e8a638ab90a33af918629a7e"
+    )
+    assert 'req.path === "/.well-known/oauth-authorization-server/mcp"' in patch
+    assert 'req.url = "/.well-known/oauth-authorization-server"' in patch
