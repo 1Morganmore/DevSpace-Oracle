@@ -524,6 +524,52 @@ def test_all_matching_npx_cache_roots_are_patched_and_legacy_is_migrated(
     assert len(result["changed"]) == 2
 
 
+def test_known_legacy_patch_can_upgrade_directly_and_preserve_exact_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    compat = load_compat()
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "package.json").write_text('{"version":"0.17.1"}', encoding="utf-8")
+    target = package / "sample.txt"
+    target.write_bytes(b"legacy\r\n")
+    patches = tmp_path / "patches"
+    patches.mkdir()
+    (patches / "upgrade.patch").write_text(
+        "diff --git a/sample.txt b/sample.txt\n"
+        "--- a/sample.txt\n"
+        "+++ b/sample.txt\n"
+        "@@ -1 +1 @@\n"
+        "-legacy\n"
+        "+current\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(compat, "VERSION_PATCHES", {"0.17.1": {
+        "sample.txt": {
+            "patch": "unused.patch",
+            "pristine": digest(b"pristine\r\n"),
+            "patched": digest(b"current\r\n"),
+            "legacy_patched": [digest(b"legacy\r\n")],
+            "legacy_upgrade_patch": "upgrade.patch",
+        }
+    }})
+    monkeypatch.setattr(compat, "patch_root", lambda version: patches)
+    backup = tmp_path / "backup"
+
+    first = compat.ensure_oracle_compatibility(
+        "oracle 0.17.1", package_root=package, backup_root=backup
+    )
+    second = compat.ensure_oracle_compatibility(
+        "oracle 0.17.1", package_root=package, backup_root=backup
+    )
+    legacy_backup = backup / "legacy-patched" / digest(b"legacy\r\n") / "sample.txt"
+
+    assert first["changed"] == ["sample.txt"]
+    assert second["already_patched"] == ["sample.txt"]
+    assert target.read_bytes() == b"current\r\n"
+    assert legacy_backup.read_bytes() == b"legacy\r\n"
+
+
 def test_prompt_composer_patch_applies_to_pristine_0170_and_is_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -827,7 +873,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "dist/src/browser/index.js": ("335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11", "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895"),
         "dist/src/browser/actions/assistantResponse.js": ("0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d", "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4"),
         "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f"),
-        "dist/src/browser/actions/thinkingTime.js": ("508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca", "21027b691a86a3278e6c0b6e69c8b6ce0325b984cda7e4fca3ca284422958b16"),
+        "dist/src/browser/actions/thinkingTime.js": ("508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca", "300e910c1f592ccdda933d865525f303a6d255b43c71c6bcaff33d8186dccd0d"),
     }
 
     patches = {
@@ -838,7 +884,12 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
     assert "options.browserManualLogin = false" in patches["dist/src/cli/browserConfig.js"]
     assert "config = { ...config, manualLogin: false" in patches["dist/src/browser/index.js"]
     assert 'strictRegularExtraHigh = targetModelKind !== "pro" && level === "extra-high"' in patches["dist/src/browser/actions/thinkingTime.js"]
+    assert '(level === "heavy" || level === "extended")' in patches["dist/src/browser/actions/thinkingTime.js"]
+    assert 'level === "heavy" ? "Pro Heavy" : "Pro Extended"' in patches["dist/src/browser/actions/thinkingTime.js"]
     assert "refusing to submit without confirmed ${requiredEffortLabel}" in patches["dist/src/browser/actions/thinkingTime.js"]
+    thinking = contracts["dist/src/browser/actions/thinkingTime.js"]
+    assert thinking["legacy_patched"] == ["21027b691a86a3278e6c0b6e69c8b6ce0325b984cda7e4fca3ca284422958b16"]
+    assert thinking["legacy_upgrade_patch"] == "thinkingTime.pro-heavy-upgrade.patch"
 
 
 def test_copy_profile_recovery_patch_reuses_only_the_persisted_profile_seed() -> None:

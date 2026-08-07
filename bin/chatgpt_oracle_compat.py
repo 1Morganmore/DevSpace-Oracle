@@ -164,7 +164,9 @@ PATCHES_0171 = {
     "dist/src/browser/actions/thinkingTime.js": {
         "patch": "thinkingTime.patch",
         "pristine": "508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca",
-        "patched": "21027b691a86a3278e6c0b6e69c8b6ce0325b984cda7e4fca3ca284422958b16",
+        "patched": "300e910c1f592ccdda933d865525f303a6d255b43c71c6bcaff33d8186dccd0d",
+        "legacy_patched": ["21027b691a86a3278e6c0b6e69c8b6ce0325b984cda7e4fca3ca284422958b16"],
+        "legacy_upgrade_patch": "thinkingTime.pro-heavy-upgrade.patch",
     },
 }
 
@@ -383,6 +385,33 @@ def ensure_oracle_compatibility(
                 continue
             backup_path = backup / Path(relative)
             if current in contract.get("legacy_patched", []):
+                legacy_upgrade_patch = contract.get("legacy_upgrade_patch")
+                if isinstance(legacy_upgrade_patch, str) and legacy_upgrade_patch:
+                    with tempfile.TemporaryDirectory(prefix="oracle-compat-upgrade-") as temporary:
+                        staged_root = Path(temporary)
+                        staged_target = staged_root / Path(relative)
+                        staged_target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(target, staged_target)
+                        legacy_uses_crlf = b"\r\n" in staged_target.read_bytes()
+                        _apply_patch(staged_root, patches / legacy_upgrade_patch)
+                        if legacy_uses_crlf:
+                            staged_bytes = staged_target.read_bytes()
+                            staged_target.write_bytes(
+                                staged_bytes.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+                            )
+                        if sha256_file(staged_target) != contract["patched"]:
+                            raise OracleCompatError(
+                                "ORACLE_LEGACY_PATCH_UPGRADE_INVALID",
+                                "Known legacy Oracle patch did not produce the expected patched bytes",
+                                {"path": str(target), "patch": str(patches / legacy_upgrade_patch)},
+                            )
+                        legacy_backup = backup / "legacy-patched" / current / Path(relative)
+                        legacy_backup.parent.mkdir(parents=True, exist_ok=True)
+                        if not legacy_backup.exists():
+                            shutil.copy2(target, legacy_backup)
+                        shutil.copy2(staged_target, target)
+                    changed.append(item)
+                    continue
                 if not backup_path.exists() or sha256_file(backup_path) != contract["pristine"]:
                     legacy_patch = contract.get("legacy_patch")
                     if not isinstance(legacy_patch, str) or not legacy_patch:

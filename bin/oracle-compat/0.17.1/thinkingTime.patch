@@ -4,9 +4,10 @@ diff --git a/dist/src/browser/actions/thinkingTime.js b/dist/src/browser/actions
 @@ -32,6 +32,8 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
      const targetModelKind = inferThinkingTargetModelKind(desiredModel);
      const observedModelKind = result && "modelKind" in result ? result.modelKind : null;
-     const strictProEffort = (targetModelKind === "pro" || observedModelKind === "pro") && level === "extended";
+-    const strictProEffort = (targetModelKind === "pro" || observedModelKind === "pro") && level === "extended";
++    const strictProEffort = (targetModelKind === "pro" || observedModelKind === "pro") && (level === "heavy" || level === "extended");
 +    const strictRegularExtraHigh = targetModelKind !== "pro" && level === "extra-high";
-+    const requiredEffortLabel = strictProEffort ? "Pro Extended" : strictRegularExtraHigh ? "Extra High" : null;
++    const requiredEffortLabel = strictProEffort ? (level === "heavy" ? "Pro Heavy" : "Pro Extended") : strictRegularExtraHigh ? "Extra High" : null;
      switch (result?.status) {
          case "already-selected":
              logger(formatBrowserThinkingLog(`${result.label ?? capitalizedLevel} (already selected)`));

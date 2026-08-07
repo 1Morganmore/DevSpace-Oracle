@@ -1584,6 +1584,49 @@ def test_unconfirmed_extra_high_is_proven_pre_submit_and_releases_project(
     ) == []
 
 
+def test_unconfirmed_pro_heavy_is_proven_pre_submit_and_releases_project(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+
+    def pro_heavy_unconfirmed(command, **kwargs):
+        slug = command[command.index("--slug") + 1]
+        marker = (
+            "Thinking time: option not found for pro (requested Heavy); "
+            "refusing to submit without confirmed Pro Heavy."
+        )
+        kwargs["stdout"].write(
+            (
+                f"Session: {slug}\n"
+                f"ERROR: {marker}\n"
+                f"User error (browser-automation): {marker}\n"
+            ).encode()
+        )
+        kwargs["stdout"].flush()
+        return Process(1, [])
+
+    result = execute_run(
+        runner,
+        pro_manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=pro_heavy_unconfirmed,
+    )
+    run_dir = Path(result["run_dir"])
+    state = runner.STATE.load_state(run_dir / "state.json")
+
+    assert result["status"] == "pre_submit_failed"
+    assert result["safe_for_fresh_run"] is True
+    assert state["session_authority"] == "pre_submit"
+    assert state["task_outcome"] == "not_executed"
+    assert state["pre_submit_failure"]["code"] == (
+        "ORACLE_PRO_HEAVY_UNCONFIRMED_PRE_SUBMIT"
+    )
+    assert runner.STATE.unresolved_project_sessions(
+        runner.STATE.load_manifest(pro_manifest(tmp_path)).run_root,
+        tmp_path,
+    ) == []
+
+
 def test_profile_copy_ebusy_is_proven_pre_submit_and_releases_project(tmp_path: Path) -> None:
     runner = load_runner()
     seed = tmp_path.parent / f"{tmp_path.name}-profile"

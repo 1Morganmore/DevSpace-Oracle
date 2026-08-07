@@ -32,6 +32,7 @@
     "bin/oracle-compat/0.17.1/profileCopy.patch",
     "bin/oracle-compat/0.17.1/promptComposer.patch",
     "bin/oracle-compat/0.17.1/recoverConversation.patch",
+    "bin/oracle-compat/0.17.1/thinkingTime.pro-heavy-upgrade.patch",
     "bin/oracle-compat/0.17.1/thinkingTime.patch",
     "bin/chatgpt_oracle_state.py",
     "bin/chatgpt_oracle_profiles.py",

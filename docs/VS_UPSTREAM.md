@@ -41,9 +41,9 @@ The exact 0.17.1 npm dist uses these hash-gated patches:
 | `dist/src/browser/index.js` | `335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11` | `9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895` |
 | `dist/src/browser/actions/assistantResponse.js` | `0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d` | `18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4` |
 | `dist/src/browser/actions/promptComposer.js` | `db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000` | `a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f` |
-| `dist/src/browser/actions/thinkingTime.js` | `508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca` | `21027b691a86a3278e6c0b6e69c8b6ce0325b984cda7e4fca3ca284422958b16` |
+| `dist/src/browser/actions/thinkingTime.js` | `508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca` | `300e910c1f592ccdda933d865525f303a6d255b43c71c6bcaff33d8186dccd0d` |
 
-Oracle 0.17.1 avoids selecting the Pro model row for GPT-5.6, but an approval-gated live run exposed an `extra-high` option miss while the UI displayed Effort `Pro`. The local thinking-time patch therefore fails closed instead of treating `Pro` as an `Extra High` alias or continuing with an unverified effort. Pro remains attachment-only `gpt-5.5-pro` with `heavy` pending a successful live proof.
+Oracle 0.17.1 avoids selecting the Pro model row for GPT-5.6, but approval-gated live runs exposed two option misses: regular `extra-high` and Pro `heavy`, both while the UI remained on `GPT-5.6 Sol` with Effort `Pro`. The local thinking-time patch therefore fails closed for both contracts instead of treating the visible `Pro` effort as an `Extra High` alias or silently submitting the wrong Pro model/effort. Pro remains attachment-only `gpt-5.5-pro` with `heavy` pending a successful live proof.
 
 For a new Oracle release, query registry metadata, download the exact npm tarball, verify integrity, calculate every pristine hash, dry-apply each patch, review changed upstream sources, calculate patched hashes, and only then update the version table and manifest. Source tags never substitute for npm dist bytes.
 

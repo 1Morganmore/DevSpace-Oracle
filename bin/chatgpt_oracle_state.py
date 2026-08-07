@@ -97,6 +97,11 @@ ORACLE_THINKING_TIME_UNCONFIRMED_MARKER = (
     "Thinking time: option not found (requested Extra-high); "
     "refusing to submit without confirmed Extra High."
 )
+ORACLE_PRO_HEAVY_UNCONFIRMED_RE = re.compile(
+    r"Thinking time: (?:(?:chip not found|menu not found|option not found|"
+    r"selection unverified|model kind not found) for pro \(requested Heavy\)|"
+    r"unknown outcome selecting Heavy); refusing to submit without confirmed Pro Heavy\."
+)
 ORACLE_NO_LIVE_TAB_MARKER = "No live ChatGPT tab matched session"
 ORACLE_NO_RECOVERABLE_URL_MARKER = (
     "session metadata has no recoverable ChatGPT conversation URL"
@@ -1681,19 +1686,28 @@ def proven_pre_submit_rejection(state_path: Path) -> dict[str, Any] | None:
 
 
 def proven_pre_submit_ui_failure(state_path: Path) -> dict[str, Any] | None:
-    """Prove Oracle refused an unconfirmed Extra High choice before send."""
+    """Prove Oracle refused an unconfirmed regular or Pro effort before send."""
     state = load_state(state_path)
     oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
     profile = state.get("profile") if isinstance(state.get("profile"), dict) else {}
+    regular_contract = (
+        str(state.get("transport") or "").casefold() == "devspace"
+        and str(state.get("app_name") or "").casefold() == "devspace"
+        and str(profile.get("model") or "").casefold() == "gpt-5.6"
+        and str(profile.get("thinking_time") or "").casefold() == "extra-high"
+    )
+    pro_contract = (
+        str(state.get("transport") or "").casefold() == "pro-attachment-only"
+        and state.get("app_name") is None
+        and str(profile.get("model") or "").casefold() == "gpt-5.5-pro"
+        and str(profile.get("thinking_time") or "").casefold() == "heavy"
+    )
     if (
         str(state.get("session_authority") or "") not in {"pre_submit", "submitted_unknown"}
         or state.get("terminal_harvested") is True
         or _state_has_conversation_url(state)
         or str(state.get("mode") or "").casefold() != "browser"
-        or str(state.get("transport") or "").casefold() != "devspace"
-        or str(state.get("app_name") or "").casefold() != "devspace"
-        or str(profile.get("model") or "").casefold() != "gpt-5.6"
-        or str(profile.get("thinking_time") or "").casefold() != "extra-high"
+        or not (regular_contract or pro_contract)
         or normalize_oracle_version(oracle.get("resolved_version")) != ORACLE_ACTIVE_VERSION
         or _settlement_logs_have_conversation_url(state_path)
     ):
@@ -1731,25 +1745,51 @@ def proven_pre_submit_ui_failure(state_path: Path) -> dict[str, Any] | None:
         return None
     locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
     lines = {line.strip() for line in stdout_text.splitlines()}
+    if regular_contract:
+        marker = ORACLE_THINKING_TIME_UNCONFIRMED_MARKER
+        code = "ORACLE_THINKING_TIME_UNCONFIRMED_PRE_SUBMIT"
+        failure_reason = "extra-high-ui-option-unconfirmed"
+    else:
+        error_messages = {
+            line.removeprefix("ERROR: ")
+            for line in lines
+            if line.startswith("ERROR: ")
+        }
+        user_prefix = "User error (browser-automation): "
+        user_messages = {
+            line.removeprefix(user_prefix)
+            for line in lines
+            if line.startswith(user_prefix)
+        }
+        matches = [
+            message
+            for message in error_messages & user_messages
+            if ORACLE_PRO_HEAVY_UNCONFIRMED_RE.fullmatch(message)
+        ]
+        if len(matches) != 1:
+            return None
+        marker = matches[0]
+        code = "ORACLE_PRO_HEAVY_UNCONFIRMED_PRE_SUBMIT"
+        failure_reason = "pro-heavy-ui-option-unconfirmed"
     if (
         not locator
         or f"Session: {locator}" not in stdout_text
         or {
-            f"ERROR: {ORACLE_THINKING_TIME_UNCONFIRMED_MARKER}",
-            f"User error (browser-automation): {ORACLE_THINKING_TIME_UNCONFIRMED_MARKER}",
+            f"ERROR: {marker}",
+            f"User error (browser-automation): {marker}",
         }.issubset(lines) is False
     ):
         return None
     return {
         "schema": "codex.chatgpt.oracle-pre-submit-ui-failure/v1",
-        "code": "ORACLE_THINKING_TIME_UNCONFIRMED_PRE_SUBMIT",
+        "code": code,
         "oracle_locator": locator,
         "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
         "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
         "transcript_sha256": hashlib.sha256(transcript_bytes).hexdigest(),
         "output_absent": True,
         "conversation_url_absent": True,
-        "failure_reason": "extra-high-ui-option-unconfirmed",
+        "failure_reason": failure_reason,
     }
 
 
@@ -1963,12 +2003,15 @@ def settle_proven_pre_submit_failure(state_path: Path) -> dict[str, Any] | None:
         "task_outcome": "not_executed" if evidence["code"] in {
             "ORACLE_PROFILE_COPY_EBUSY_PRELAUNCH_FAILED",
             "ORACLE_THINKING_TIME_UNCONFIRMED_PRE_SUBMIT",
+            "ORACLE_PRO_HEAVY_UNCONFIRMED_PRE_SUBMIT",
         } else "pending",
         "task_outcome_reason": (
             "oracle-profile-copy-ebusy-pre-submit"
             if evidence["code"] == "ORACLE_PROFILE_COPY_EBUSY_PRELAUNCH_FAILED"
             else "extra-high-ui-option-unconfirmed-pre-submit"
             if evidence["code"] == "ORACLE_THINKING_TIME_UNCONFIRMED_PRE_SUBMIT"
+            else "pro-heavy-ui-option-unconfirmed-pre-submit"
+            if evidence["code"] == "ORACLE_PRO_HEAVY_UNCONFIRMED_PRE_SUBMIT"
             else "prelaunch-host-failure"
         ),
         "pre_submit_failure": evidence,

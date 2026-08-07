@@ -1,0 +1,14 @@
+diff --git a/dist/src/browser/actions/thinkingTime.js b/dist/src/browser/actions/thinkingTime.js
+--- a/dist/src/browser/actions/thinkingTime.js
++++ b/dist/src/browser/actions/thinkingTime.js
+@@ -31,8 +31,8 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
+     const capitalizedLevel = level.charAt(0).toUpperCase() + level.slice(1);
+     const targetModelKind = inferThinkingTargetModelKind(desiredModel);
+     const observedModelKind = result && "modelKind" in result ? result.modelKind : null;
+-    const strictProEffort = (targetModelKind === "pro" || observedModelKind === "pro") && level === "extended";
++    const strictProEffort = (targetModelKind === "pro" || observedModelKind === "pro") && (level === "heavy" || level === "extended");
+     const strictRegularExtraHigh = targetModelKind !== "pro" && level === "extra-high";
+-    const requiredEffortLabel = strictProEffort ? "Pro Extended" : strictRegularExtraHigh ? "Extra High" : null;
++    const requiredEffortLabel = strictProEffort ? (level === "heavy" ? "Pro Heavy" : "Pro Extended") : strictRegularExtraHigh ? "Extra High" : null;
+     switch (result?.status) {
+         case "already-selected":
