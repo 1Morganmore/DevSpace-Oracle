@@ -23,6 +23,8 @@ from typing import Any, Callable, Sequence
 
 DEFAULT_PORT = 7676
 APP_NAME = "DevSpace"
+AUTOSTART_NAME = "DevSpace MCP Server"
+AUTOSTART_REG_KEY = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
 DEVSPACE_PACKAGE = "@waishnav/devspace@1.0.5"
 SECRET_PATTERN = re.compile(r"(?i)(password|token|secret|authorization)\s*([:=])\s*[^\s,;]+")
 HOSTNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.-]*\.ts\.net$", re.IGNORECASE)
@@ -154,6 +156,7 @@ def setup_plan(config: SetupConfig) -> dict[str, Any]:
             f"--https={config.public_port}",
             f"http://127.0.0.1:{config.local_port}",
         ],
+        "login_autostart": autostart_argv(),
         "public_origin_for_devspace_init": config.public_origin,
         "recommended_app_name": APP_NAME,
         "registration_url": config.registration_url,
@@ -180,6 +183,31 @@ def launch_hidden(argv: Sequence[str], *, popen_factory: Callable[..., Any] = su
         stderr=subprocess.DEVNULL,
         shell=False,
         **windows_subprocess_kwargs(),
+    )
+
+
+def autostart_argv() -> list[str]:
+    pythonw = str(Path(sys.executable).with_name("pythonw.exe"))
+    command = subprocess.list2cmdline([pythonw, str(Path(__file__).resolve()), "serve"])
+    return [
+        "reg.exe",
+        "add",
+        AUTOSTART_REG_KEY,
+        "/v",
+        AUTOSTART_NAME,
+        "/t",
+        "REG_SZ",
+        "/d",
+        command,
+        "/f",
+    ]
+
+
+def serve_foreground(*, runner: Callable[..., Any] = subprocess.run) -> None:
+    run_checked(devspace_compat_argv(), runner=runner)
+    run_checked(
+        bash_argv(["npx", "--yes", DEVSPACE_PACKAGE, "serve"]),
+        runner=runner,
     )
 
 
@@ -216,6 +244,7 @@ def apply_setup(
         ["tailscale", "funnel", "--bg", f"--https={config.public_port}", f"http://127.0.0.1:{config.local_port}"],
         runner=runner,
     )
+    run_checked(autostart_argv(), runner=runner)
 
 
 def http_probe(url: str, *, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
@@ -336,6 +365,7 @@ def doctor(config: SetupConfig, *, opener: Callable[..., Any] = urllib.request.u
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(description=__doc__)
     sub = value.add_subparsers(dest="command", required=True)
+    sub.add_parser("serve")
     for name in ("setup", "doctor"):
         command = sub.add_parser(name)
         command.add_argument("--root", action="append", default=[], help="Narrow allowed DevSpace root; repeat as needed")
@@ -352,6 +382,9 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "serve":
+            serve_foreground()
+            return 0
         config = validate_config(args.root, args.hostname, args.local_port, args.public_port)
         if args.command == "setup":
             if args.dry_run == args.apply:

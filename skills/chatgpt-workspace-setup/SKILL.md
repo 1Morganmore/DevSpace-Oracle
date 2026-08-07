@@ -23,7 +23,7 @@ Only after the user approves the interactive DevSpace initialization and public 
 python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py setup --root C:\projects\example --hostname your-device.your-tailnet.ts.net --apply
 ```
 
-`--apply` runs DevSpace through Git Bash without a visible Windows console, starts `devspace serve`, and creates an HTTPS Funnel to `127.0.0.1:7676`. During `devspace init`, enter only the listed roots and the public origin `https://<hostname>` (without `/mcp`).
+`--apply` runs DevSpace through Git Bash without a visible Windows console, starts `devspace serve`, registers the per-user `DevSpace MCP Server` Windows login entry, and creates an HTTPS Funnel to `127.0.0.1:7676`. During `devspace init`, enter only the listed roots and the public origin `https://<hostname>` (without `/mcp`).
 
 Before starting or restarting DevSpace 1.0.5, run the installed
 `bin/chatgpt_devspace_compat.py`. It hash-validates the exact upstream

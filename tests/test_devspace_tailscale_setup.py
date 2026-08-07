@@ -237,3 +237,42 @@ def test_setup_applies_hash_validated_devspace_compat_before_service_start(
         "-lc",
         "exec npx --yes @waishnav/devspace@1.0.5 serve",
     ]
+
+
+def test_setup_registers_login_autostart_and_serve_reapplies_compat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, current = config(tmp_path)
+    bash = tmp_path / "bash.exe"
+    bash.write_text("", encoding="utf-8")
+    monkeypatch.setenv("DEVSPACE_GIT_BASH", str(bash))
+    calls: list[list[str]] = []
+
+    def runner(argv, **kwargs):
+        calls.append(list(argv))
+        if argv == ["tailscale", "funnel", "status", "--json"]:
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"Web": {}}), stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    module.apply_setup(current, runner=runner, popen_factory=lambda *args, **kwargs: None)
+
+    task = calls[-1]
+    assert task[:3] == [
+        "reg.exe",
+        "add",
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+    ]
+    assert task[3:5] == ["/v", "DevSpace MCP Server"]
+    assert task[5:8] == ["/t", "REG_SZ", "/d"]
+    assert "pythonw.exe" in task[8]
+    assert "devspace_tailscale_setup.py" in task[8]
+    assert task[8].endswith(" serve")
+    assert task[9] == "/f"
+
+    calls.clear()
+    module.serve_foreground(runner=runner)
+    assert calls == [
+        module.devspace_compat_argv(),
+        module.bash_argv(["npx", "--yes", module.DEVSPACE_PACKAGE, "serve"]),
+    ]
