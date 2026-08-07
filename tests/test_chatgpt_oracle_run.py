@@ -1541,6 +1541,49 @@ def test_oracle_global_prompt_duplicate_is_proven_pre_submit_and_releases_projec
     assert launches
 
 
+def test_unconfirmed_extra_high_is_proven_pre_submit_and_releases_project(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+
+    def extra_high_unconfirmed(command, **kwargs):
+        slug = command[command.index("--slug") + 1]
+        marker = (
+            "Thinking time: option not found (requested Extra-high); "
+            "refusing to submit without confirmed Extra High."
+        )
+        kwargs["stdout"].write(
+            (
+                f"Session: {slug}\n"
+                f"ERROR: {marker}\n"
+                f"User error (browser-automation): {marker}\n"
+            ).encode()
+        )
+        kwargs["stdout"].flush()
+        return Process(1, [])
+
+    result = execute_run(
+        runner,
+        manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=extra_high_unconfirmed,
+    )
+    run_dir = Path(result["run_dir"])
+    state = runner.STATE.load_state(run_dir / "state.json")
+
+    assert result["status"] == "pre_submit_failed"
+    assert result["safe_for_fresh_run"] is True
+    assert state["session_authority"] == "pre_submit"
+    assert state["task_outcome"] == "not_executed"
+    assert state["pre_submit_failure"]["code"] == (
+        "ORACLE_THINKING_TIME_UNCONFIRMED_PRE_SUBMIT"
+    )
+    assert runner.STATE.unresolved_project_sessions(
+        runner.STATE.load_manifest(manifest(tmp_path)).run_root,
+        tmp_path,
+    ) == []
+
+
 def test_profile_copy_ebusy_is_proven_pre_submit_and_releases_project(tmp_path: Path) -> None:
     runner = load_runner()
     seed = tmp_path.parent / f"{tmp_path.name}-profile"

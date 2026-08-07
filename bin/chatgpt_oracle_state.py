@@ -93,6 +93,10 @@ ORACLE_PROMPT_NOT_OBSERVED_MARKER = (
     "Prompt did not appear in conversation before timeout (send may have failed)"
 )
 ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER = "APP_MENTION_ROUTE_UNCONFIRMED"
+ORACLE_THINKING_TIME_UNCONFIRMED_MARKER = (
+    "Thinking time: option not found (requested Extra-high); "
+    "refusing to submit without confirmed Extra High."
+)
 ORACLE_NO_LIVE_TAB_MARKER = "No live ChatGPT tab matched session"
 ORACLE_NO_RECOVERABLE_URL_MARKER = (
     "session metadata has no recoverable ChatGPT conversation URL"
@@ -1676,6 +1680,79 @@ def proven_pre_submit_rejection(state_path: Path) -> dict[str, Any] | None:
     }
 
 
+def proven_pre_submit_ui_failure(state_path: Path) -> dict[str, Any] | None:
+    """Prove Oracle refused an unconfirmed Extra High choice before send."""
+    state = load_state(state_path)
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    profile = state.get("profile") if isinstance(state.get("profile"), dict) else {}
+    if (
+        str(state.get("session_authority") or "") not in {"pre_submit", "submitted_unknown"}
+        or state.get("terminal_harvested") is True
+        or _state_has_conversation_url(state)
+        or str(state.get("mode") or "").casefold() != "browser"
+        or str(state.get("transport") or "").casefold() != "devspace"
+        or str(state.get("app_name") or "").casefold() != "devspace"
+        or str(profile.get("model") or "").casefold() != "gpt-5.6"
+        or str(profile.get("thinking_time") or "").casefold() != "extra-high"
+        or normalize_oracle_version(oracle.get("resolved_version")) != ORACLE_ACTIVE_VERSION
+        or _settlement_logs_have_conversation_url(state_path)
+    ):
+        return None
+    run_dir = state_path.parent
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    output = Path(str(artifacts.get("output") or ""))
+    stdout_record = _artifact_bytes(state, "stdout")
+    stderr_record = _artifact_bytes(state, "stderr")
+    transcript_record = _artifact_bytes(state, "transcript")
+    if (
+        output.resolve() != (run_dir / "output.md").resolve()
+        or output.is_symlink()
+        or output_is_nonempty(output)
+        or stdout_record is None
+        or stderr_record is None
+        or transcript_record is None
+    ):
+        return None
+    stdout_path, stdout_bytes = stdout_record
+    stderr_path, stderr_bytes = stderr_record
+    transcript_path, transcript_bytes = transcript_record
+    if (
+        stdout_path.resolve() != (run_dir / "stdout.log").resolve()
+        or stderr_path.resolve() != (run_dir / "stderr.log").resolve()
+        or transcript_path.resolve() != (run_dir / "transcript.md").resolve()
+        or any(path.is_symlink() for path in (stdout_path, stderr_path, transcript_path))
+    ):
+        return None
+    try:
+        stdout_text = stdout_bytes.decode("utf-8", errors="strict")
+        stderr_bytes.decode("utf-8", errors="strict")
+        transcript_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
+    lines = {line.strip() for line in stdout_text.splitlines()}
+    if (
+        not locator
+        or f"Session: {locator}" not in stdout_text
+        or {
+            f"ERROR: {ORACLE_THINKING_TIME_UNCONFIRMED_MARKER}",
+            f"User error (browser-automation): {ORACLE_THINKING_TIME_UNCONFIRMED_MARKER}",
+        }.issubset(lines) is False
+    ):
+        return None
+    return {
+        "schema": "codex.chatgpt.oracle-pre-submit-ui-failure/v1",
+        "code": "ORACLE_THINKING_TIME_UNCONFIRMED_PRE_SUBMIT",
+        "oracle_locator": locator,
+        "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+        "transcript_sha256": hashlib.sha256(transcript_bytes).hexdigest(),
+        "output_absent": True,
+        "conversation_url_absent": True,
+        "failure_reason": "extra-high-ui-option-unconfirmed",
+    }
+
+
 def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
     """Prove a structured readiness or host failure happened before Oracle launch.
 
@@ -1832,6 +1909,7 @@ def proven_pre_submit_profile_copy_ebusy(state_path: Path) -> dict[str, Any] | N
 def proven_pre_submit_failure(state_path: Path) -> dict[str, Any] | None:
     return (
         proven_pre_submit_rejection(state_path)
+        or proven_pre_submit_ui_failure(state_path)
         or proven_pre_submit_profile_copy_ebusy(state_path)
         or proven_pre_submit_host_failure(state_path)
         or proven_user_confirmed_no_submission(state_path)
@@ -1871,6 +1949,8 @@ def settle_proven_pre_submit_failure(state_path: Path) -> dict[str, Any] | None:
     if evidence is None:
         evidence = proven_pre_submit_profile_copy_ebusy(state_path)
     if evidence is None:
+        evidence = proven_pre_submit_ui_failure(state_path)
+    if evidence is None:
         return None
     payload = load_state(state_path)
     payload.update({
@@ -1880,10 +1960,15 @@ def settle_proven_pre_submit_failure(state_path: Path) -> dict[str, Any] | None:
         "terminal_harvested": False,
         "artifact_sha256": None,
         "transport_status": "failed_pre_submit",
-        "task_outcome": "not_executed" if evidence["code"] == "ORACLE_PROFILE_COPY_EBUSY_PRELAUNCH_FAILED" else "pending",
+        "task_outcome": "not_executed" if evidence["code"] in {
+            "ORACLE_PROFILE_COPY_EBUSY_PRELAUNCH_FAILED",
+            "ORACLE_THINKING_TIME_UNCONFIRMED_PRE_SUBMIT",
+        } else "pending",
         "task_outcome_reason": (
             "oracle-profile-copy-ebusy-pre-submit"
             if evidence["code"] == "ORACLE_PROFILE_COPY_EBUSY_PRELAUNCH_FAILED"
+            else "extra-high-ui-option-unconfirmed-pre-submit"
+            if evidence["code"] == "ORACLE_THINKING_TIME_UNCONFIRMED_PRE_SUBMIT"
             else "prelaunch-host-failure"
         ),
         "pre_submit_failure": evidence,
