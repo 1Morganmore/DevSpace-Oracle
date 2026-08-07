@@ -209,6 +209,12 @@ seed, 프로젝트 소유권, 실행 중인 DevSpace 프로세스, Tailscale Fun
 ChatGPT 로그인·앱 UI 검사는 하지 않습니다. Tailscale 자체 호스트명은 자동 감지하며
 필요할 때만 `--devspace-hostname`으로 지정합니다.
 
+Preflight 출력은 현재 상태에 대한 읽기 전용 참고 증거이며 제출 권한을 저장하지
+않습니다. 실제 DevSpace `run`은 기존 프로젝트 submit mutex 안에서 Tailscale
+호스트명, Funnel 매핑, 로컬·공개 `/healthz` identity를 다시 확인합니다. 실패하면
+Oracle 브라우저를 시작하지 않고 구조화된 `SUBMISSION_NOT_READY` 증거를 exact run
+state에 남긴 뒤 안전한 pre-submit 실패로 종료합니다.
+
 저장된 정확한 실행을 변경 없이 분류하거나 감시하려면:
 
 ```powershell

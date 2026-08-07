@@ -141,6 +141,10 @@ def classify_run(
         code = str(host_failure.get("code") or "")
         if code == "ORACLE_ATTACHMENT_SIZE_PRELAUNCH_FAILED":
             return {"bucket": PRE_SUBMIT_HOST, "signature": "oracle-attachment-size-prelaunch-limit"}
+        if code == "SUBMISSION_NOT_READY" and host_failure.get("failed_checks"):
+            return {"bucket": PRE_SUBMIT_HOST, "signature": "submission-readiness-not-ready"}
+        if code == "DEVSPACE_SERVICE_RESTART_REQUIRED":
+            return {"bucket": PRE_SUBMIT_HOST, "signature": "devspace-service-restart-required"}
         if code != "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED":
             return {"bucket": UNCLASSIFIED, "signature": "unrecognized-pre-submit-host-failure"}
         return {

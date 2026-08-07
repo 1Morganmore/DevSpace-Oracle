@@ -236,6 +236,25 @@ def test_pro_preflight_skips_devspace_and_rejects_endpoint_options(tmp_path: Pat
     assert error.value.code == "PRO_DEVSPACE_PREFLIGHT_FORBIDDEN"
 
 
+def test_pro_live_submission_never_calls_devspace_readiness_adapters(tmp_path: Path) -> None:
+    runner = load_runner()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Pro attachment-only must not call DevSpace readiness")
+
+    result = runner.execute_run(
+        pro_manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(0, b"pro answer", {}, []),
+        compat_factory=lambda version: {"ok": True, "version": version},
+        runtime_command_factory=lambda compatibility, version: ("node", "validated-oracle-cli.js"),
+        devspace_compat_factory=forbidden,
+        devspace_doctor=forbidden,
+    )
+
+    assert result["ok"] is True
+
+
 def test_version_resolution_allows_a_bounded_slow_valid_oracle_0170() -> None:
     runner = load_runner()
     captured = {}
@@ -374,6 +393,8 @@ def execute_run(runner, *args, **kwargs):
         "devspace_compat_factory",
         lambda: {"ok": True, "changed": [], "service_restart_required": False},
     )
+    kwargs.setdefault("devspace_hostname", "device.tailnet.ts.net")
+    kwargs.setdefault("devspace_doctor", lambda config: {"next_action": "READY"})
     return runner.execute_run(*args, **kwargs)
 
 
@@ -846,10 +867,54 @@ def test_devspace_patch_change_blocks_before_submission_until_restart(
     )
 
     assert result["ok"] is False
-    assert result["result"]["status"] == "failed"
+    assert result["status"] == "pre_submit_failed"
+    assert result["safe_for_fresh_run"] is True
+    assert result["result"]["session_authority"] == "pre_submit"
+    assert result["result"]["pre_submit_failure"]["code"] == "DEVSPACE_SERVICE_RESTART_REQUIRED"
     assert launched == []
     stderr = Path(result["result"]["artifacts"]["stderr"]).read_text(encoding="utf-8")
     assert "DEVSPACE_SERVICE_RESTART_REQUIRED" in stderr
+
+
+def test_preflight_and_live_run_share_endpoint_failure_without_oracle_launch(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+    job = manifest(tmp_path)
+    expected = hashlib.sha256(job.read_bytes()).hexdigest()
+    endpoint_failure = {
+        "local": {"ok": False, "error": "ConnectionRefusedError"},
+        "next_action": "CHECK_DEVSPACE_LOCAL_SERVICE",
+    }
+
+    preflight = runner.preflight_run(
+        job,
+        expected_manifest_sha256=expected,
+        devspace_hostname="device.tailnet.ts.net",
+        run_factory=version_runner,
+        oracle_inspector=lambda version: {"ok": True, "ready": True},
+        devspace_inspector=lambda **kwargs: {"ok": True, "ready": True},
+        devspace_doctor=lambda config: endpoint_failure,
+    )
+    launched = []
+    live = runner.execute_run(
+        job,
+        expected_manifest_sha256=expected,
+        run_factory=version_runner,
+        popen_factory=lambda *args, **kwargs: launched.append(True),
+        compat_factory=lambda version: {"ok": True, "version": version},
+        runtime_command_factory=lambda compatibility, version: ("node", "validated-oracle-cli.js"),
+        devspace_compat_factory=lambda: {"ok": True, "ready": True},
+        devspace_hostname="device.tailnet.ts.net",
+        devspace_doctor=lambda config: endpoint_failure,
+    )
+
+    assert preflight["failed_checks"] == ["devspace_endpoint"]
+    assert live["status"] == "pre_submit_failed"
+    assert live["safe_for_fresh_run"] is True
+    assert live["result"]["session_authority"] == "pre_submit"
+    assert live["result"]["pre_submit_failure"]["failed_checks"] == ["devspace_endpoint"]
+    assert launched == []
 
 
 def test_exact_output_hash_adjudication_marks_legacy_task_not_executed(
@@ -1073,6 +1138,9 @@ def test_pro_recovery_uses_exact_slug_without_attachments_or_resubmit(tmp_path: 
         popen_factory=popen_for(4, None, {}, []),
     )
     state = runner.STATE.load_state(Path(result["run_dir"]) / "state.json")
+    runner.assess_submission_readiness = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("recovery must not call new-submission readiness")
+    )
     recovery = recover_run(
         runner,
         Path(result["run_dir"]),
@@ -1302,12 +1370,16 @@ def test_windows_launch_uses_no_window_and_waits(tmp_path: Path) -> None:
         def __exit__(self, *args):
             events.append("exit")
     runner.STATE.project_submit_mutex = lambda *args, **kwargs: Mutex()
+    runner.STATE.unresolved_project_sessions = (
+        lambda *args, **kwargs: events.append("owner") or []
+    )
     result = execute_run(
         runner,
         manifest(tmp_path),
         run_factory=version_runner,
         popen_factory=popen_for(0, b"answer", captured, events),
         platform_name="nt",
+        devspace_doctor=lambda config: events.append("endpoint") or {"next_action": "READY"},
     )
     assert result["ok"] is True
     assert captured["command"].count("--wait") == 1
@@ -1315,7 +1387,7 @@ def test_windows_launch_uses_no_window_and_waits(tmp_path: Path) -> None:
     assert Path(captured["kwargs"]["env"]["TEMP"]).name == "browser-temp"
     assert captured["kwargs"]["env"]["TMP"] == captured["kwargs"]["env"]["TEMP"]
     assert not Path(captured["kwargs"]["env"]["TEMP"]).exists()
-    assert events == ["enter", "popen", "wait", "exit"]
+    assert events == ["enter", "owner", "endpoint", "popen", "wait", "exit"]
 
 
 def test_transport_mission_change_blocks_before_oracle_launch(tmp_path: Path) -> None:

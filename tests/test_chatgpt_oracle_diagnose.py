@@ -481,6 +481,37 @@ def test_triage_never_allows_fresh_run_while_another_exact_owner_exists(tmp_path
     assert record["next_action"]["argv"][-1] == str(owner.resolve())
 
 
+def test_triage_consumes_structured_submission_readiness_failure(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    project = tmp_path / "project"
+    project.mkdir()
+    run_dir = write_run(
+        state_root,
+        "notready",
+        status="attention_required",
+        session_authority="pre_submit",
+        project_root=project,
+    )
+    state_path = run_dir / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["pre_submit_failure"] = {
+        "schema": "codex.chatgpt.oracle-pre-submit-readiness-failure/v1",
+        "code": "SUBMISSION_NOT_READY",
+        "failed_checks": ["devspace_endpoint"],
+        "output_absent": True,
+        "conversation_url_absent": True,
+    }
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    record = module.triage(state_root=state_root, run_dir=run_dir)["runs"][0]
+
+    assert record["bucket"] == "pre-submit-host-environment"
+    assert record["signature"] == "submission-readiness-not-ready"
+    assert record["next_action"]["kind"] == "fix_then_fresh_run"
+    assert record["next_action"]["safe_for_fresh_run"] is True
+
+
 def test_triage_maps_provider_incomplete_to_exact_live_recovery(tmp_path: Path) -> None:
     module = load()
     state_root = tmp_path / "oracle-state"

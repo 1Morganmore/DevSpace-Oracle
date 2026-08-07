@@ -890,6 +890,7 @@ def update_state(
     task_outcome: str | None = None,
     task_outcome_reason: str | None = None,
     host_watchdog: dict[str, Any] | None = None,
+    submission_readiness: dict[str, Any] | None = None,
     conversation_url: str | None = None,
     conversation_url_conflict: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -929,6 +930,8 @@ def update_state(
         payload["task_outcome_reason"] = task_outcome_reason
     if host_watchdog is not None:
         payload["host_watchdog"] = host_watchdog
+    if submission_readiness is not None:
+        payload["submission_readiness"] = submission_readiness
     if conversation_url is not None:
         oracle = payload.get("oracle") if isinstance(payload.get("oracle"), dict) else {}
         existing_url = str(oracle.get("conversation_url") or "").strip()
@@ -1553,7 +1556,7 @@ def proven_pre_submit_rejection(state_path: Path) -> dict[str, Any] | None:
 
 
 def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
-    """Prove a host failure happened before Oracle/browser launch.
+    """Prove a structured readiness or host failure happened before Oracle launch.
 
     `execute_run` emits the version-resolution prefix itself before the Oracle
     process is created.  The additional immutable-state checks keep this from
@@ -1576,6 +1579,32 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
         return None
     _, stdout_bytes = stdout_record
     _, stderr_bytes = stderr_record
+    readiness = state.get("submission_readiness")
+    if (
+        authority == "pre_submit"
+        and isinstance(readiness, dict)
+        and readiness.get("schema") == "codex.chatgpt.oracle-submission-readiness/v1"
+        and readiness.get("ready") is False
+        and isinstance(readiness.get("checks"), list)
+        and isinstance(readiness.get("failed_checks"), list)
+        and readiness["failed_checks"]
+        and isinstance(readiness.get("error"), dict)
+        and readiness["error"].get("code") in {
+            "SUBMISSION_NOT_READY",
+            "DEVSPACE_SERVICE_RESTART_REQUIRED",
+        }
+        and not stdout_bytes
+    ):
+        return {
+            "schema": "codex.chatgpt.oracle-pre-submit-readiness-failure/v1",
+            "code": str(readiness["error"]["code"]),
+            "failed_checks": list(readiness["failed_checks"]),
+            "readiness": readiness,
+            "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
+            "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+            "output_absent": True,
+            "conversation_url_absent": True,
+        }
     # Oracle prints this version banner before validating local attachments;
     # it is not browser/session evidence.  Any other stdout remains fail-closed.
     stdout_text = stdout_bytes.decode("utf-8", errors="replace").strip()

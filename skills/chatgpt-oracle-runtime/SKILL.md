@@ -90,6 +90,12 @@ requires the signed-in profile seed, checks unresolved project ownership, and fo
 DevSpace validates the exact listener plus local/public `/healthz` identity and
 Tailscale Funnel mapping. It does not patch packages, create run state, inspect
 ChatGPT UI, or submit. A failed check is `not_ready`; fix it and rerun preflight.
+Preflight is advisory evidence, not a reusable authorization. A DevSpace `run`
+repeats the volatile hostname, Funnel, and strict local/public `/healthz` checks
+inside the existing project submit mutex immediately before Oracle launch. A
+failure persists structured readiness evidence and settles as a proven
+pre-submit failure without opening a browser or conversation. Pro and exact-run
+recovery do not use this DevSpace readiness path.
 
 Use `chatgpt_oracle_diagnose.py triage --run-dir <exact-run>` for a bounded next
 action and `watch --run-dir <exact-run>` for read-only NDJSON lifecycle changes.

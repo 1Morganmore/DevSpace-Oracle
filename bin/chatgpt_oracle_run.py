@@ -119,6 +119,12 @@ class OracleRunError(RuntimeError):
 
 ORACLE_PRO_ATTACHMENT_MAX_BYTES = 1024 * 1024
 PREFLIGHT_SCHEMA = "codex.chatgpt.oracle-preflight/v1"
+SUBMISSION_READINESS_SCHEMA = "codex.chatgpt.oracle-submission-readiness/v1"
+DEVSPACE_READINESS_CHECKS = (
+    "tailscale_hostname",
+    "devspace_compatibility",
+    "devspace_endpoint",
+)
 
 
 def detect_tailscale_hostname(
@@ -170,6 +176,96 @@ def _preflight_check(name: str, operation: Callable[[], dict[str, Any]]) -> dict
         }
 
 
+def assess_submission_readiness(
+    config,
+    *,
+    mode: str,
+    checks: Sequence[str] | None = None,
+    devspace_hostname: str | None = None,
+    devspace_local_port: int = 7676,
+    devspace_public_port: int = 443,
+    run_factory: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    platform_name: str | None = None,
+    devspace_inspector: Callable[..., dict[str, Any]] = DEVSPACE_COMPAT.inspect_devspace_compatibility,
+    devspace_compat_factory: Callable[[], dict[str, Any]] = DEVSPACE_COMPAT.ensure_devspace_compatibility,
+    devspace_doctor: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Assess the ordered DevSpace checks without creating run state or submitting."""
+    if mode not in {"inspect", "prepare"}:
+        raise ValueError(f"unsupported readiness mode: {mode}")
+    requested = set(checks or DEVSPACE_READINESS_CHECKS)
+    unknown = requested.difference(DEVSPACE_READINESS_CHECKS)
+    if unknown:
+        raise ValueError(f"unknown readiness checks: {sorted(unknown)}")
+    if "devspace_endpoint" in requested:
+        requested.add("tailscale_hostname")
+
+    results: dict[str, dict[str, Any]] = {}
+    hostname_check: dict[str, Any] | None = None
+    if "tailscale_hostname" in requested:
+        hostname_check = _preflight_check(
+            "tailscale_hostname",
+            lambda: {
+                "ok": True,
+                "hostname": devspace_hostname
+                or detect_tailscale_hostname(run_factory=run_factory, platform_name=platform_name),
+            },
+        )
+        results["tailscale_hostname"] = hostname_check
+
+    if "devspace_compatibility" in requested:
+        def compatibility_check() -> dict[str, Any]:
+            result = dict(
+                devspace_inspector(local_port=devspace_local_port)
+                if mode == "inspect"
+                else devspace_compat_factory()
+            )
+            if mode == "prepare" and result.get("service_restart_required"):
+                result.update({"ok": False, "ready": False})
+            return result
+
+        results["devspace_compatibility"] = _preflight_check(
+            "devspace_compatibility",
+            compatibility_check,
+        )
+
+    if "devspace_endpoint" in requested:
+        if hostname_check is not None and hostname_check["ready"]:
+            def endpoint_check() -> dict[str, Any]:
+                setup_config = DEVSPACE_SETUP.validate_config(
+                    [str(config.project_root)],
+                    str(hostname_check["result"]["hostname"]),
+                    devspace_local_port,
+                    devspace_public_port,
+                )
+                doctor = devspace_doctor or (
+                    lambda value: DEVSPACE_SETUP.doctor(value, runner=run_factory)
+                )
+                result = doctor(setup_config)
+                return {**result, "ok": result.get("next_action") == "READY"}
+
+            results["devspace_endpoint"] = _preflight_check(
+                "devspace_endpoint",
+                endpoint_check,
+            )
+        else:
+            results["devspace_endpoint"] = {
+                "name": "devspace_endpoint",
+                "ready": False,
+                "skipped": "Tailscale hostname was not resolved",
+            }
+
+    ordered = [results[name] for name in DEVSPACE_READINESS_CHECKS if name in results]
+    failed = [check["name"] for check in ordered if not check["ready"]]
+    return {
+        "schema": SUBMISSION_READINESS_SCHEMA,
+        "mode": mode,
+        "ready": not failed,
+        "checks": ordered,
+        "failed_checks": failed,
+    }
+
+
 def preflight_run(
     manifest_path: Path,
     *,
@@ -181,7 +277,7 @@ def preflight_run(
     platform_name: str | None = None,
     oracle_inspector: Callable[..., dict[str, Any]] = COMPAT.inspect_oracle_compatibility,
     devspace_inspector: Callable[..., dict[str, Any]] = DEVSPACE_COMPAT.inspect_devspace_compatibility,
-    devspace_doctor: Callable[..., dict[str, Any]] = DEVSPACE_SETUP.doctor,
+    devspace_doctor: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run exact local/runtime checks without creating a run or opening ChatGPT."""
     config = STATE.load_manifest(
@@ -241,41 +337,18 @@ def preflight_run(
             "skipped": "oracle version was not validated",
         })
     if config.transport == "devspace":
-        hostname_check = _preflight_check(
-            "tailscale_hostname",
-            lambda: {
-                "ok": True,
-                "hostname": devspace_hostname
-                or detect_tailscale_hostname(run_factory=run_factory, platform_name=platform_name),
-            },
+        readiness = assess_submission_readiness(
+            config,
+            mode="inspect",
+            devspace_hostname=devspace_hostname,
+            devspace_local_port=devspace_local_port,
+            devspace_public_port=devspace_public_port,
+            run_factory=run_factory,
+            platform_name=platform_name,
+            devspace_inspector=devspace_inspector,
+            devspace_doctor=devspace_doctor,
         )
-        checks.append(hostname_check)
-        checks.append(_preflight_check(
-            "devspace_compatibility",
-            lambda: devspace_inspector(local_port=devspace_local_port),
-        ))
-        if hostname_check["ready"]:
-            hostname = str(hostname_check["result"]["hostname"])
-            setup_config = DEVSPACE_SETUP.validate_config(
-                [str(config.project_root)],
-                hostname,
-                devspace_local_port,
-                devspace_public_port,
-            )
-            def endpoint_check() -> dict[str, Any]:
-                result = devspace_doctor(setup_config)
-                return {**result, "ok": result.get("next_action") == "READY"}
-
-            checks.append(_preflight_check(
-                "devspace_endpoint",
-                endpoint_check,
-            ))
-        else:
-            checks.append({
-                "name": "devspace_endpoint",
-                "ready": False,
-                "skipped": "Tailscale hostname was not resolved",
-            })
+        checks.extend(readiness["checks"])
     else:
         checks.append({"name": "devspace", "ready": True, "not_applicable": True})
     ready = all(check["ready"] for check in checks)
@@ -910,6 +983,10 @@ def execute_run(
     devspace_compat_factory: Callable[[], dict[str, Any]] = (
         DEVSPACE_COMPAT.ensure_devspace_compatibility
     ),
+    devspace_hostname: str | None = None,
+    devspace_local_port: int = 7676,
+    devspace_public_port: int = 443,
+    devspace_doctor: Callable[..., dict[str, Any]] | None = None,
     runtime_command_factory: Callable[[dict[str, Any], str], Sequence[str]] = validated_oracle_runtime_command,
 ) -> dict[str, Any]:
     config = STATE.load_manifest(
@@ -981,12 +1058,37 @@ def execute_run(
         )
         watchdog_timeout_seconds = host_watchdog_timeout_seconds(config, argv)
         if config.transport == "devspace":
-            devspace_compat = devspace_compat_factory()
-            if devspace_compat.get("service_restart_required"):
+            readiness = assess_submission_readiness(
+                config,
+                mode="prepare",
+                checks=("devspace_compatibility",),
+                devspace_local_port=devspace_local_port,
+                devspace_compat_factory=devspace_compat_factory,
+            )
+            if not readiness["ready"]:
+                compatibility_check = readiness["checks"][0]
+                restart_required = bool(
+                    compatibility_check.get("result", {}).get("service_restart_required")
+                )
+                error_code = (
+                    "DEVSPACE_SERVICE_RESTART_REQUIRED"
+                    if restart_required
+                    else "SUBMISSION_NOT_READY"
+                )
+                readiness["error"] = {"code": error_code}
+                STATE.update_state(
+                    layout.state_path,
+                    status="prepared",
+                    submission_readiness=readiness,
+                )
                 raise OracleRunError(
-                    "DEVSPACE_SERVICE_RESTART_REQUIRED",
-                    "DevSpace was safely patched before submission and must be restarted once",
-                    {"package_roots": devspace_compat.get("package_roots", [])},
+                    error_code,
+                    (
+                        "DevSpace was safely patched before submission and must be restarted once"
+                        if restart_required
+                        else "DevSpace compatibility is not ready for submission"
+                    ),
+                    {"failed_checks": readiness["failed_checks"], "readiness": readiness},
                 )
         STATE.update_state(layout.state_path, status="prepared", resolved_version=version)
     except Exception as exc:
@@ -1060,6 +1162,31 @@ def execute_run(
                     except STATE.OracleStateError as exc:
                         raise OracleRunError(exc.code, str(exc), exc.evidence) from exc
                 validate_pro_context_preflight(config)
+                if config.transport == "devspace":
+                    readiness = assess_submission_readiness(
+                        config,
+                        mode="inspect",
+                        checks=("tailscale_hostname", "devspace_endpoint"),
+                        devspace_hostname=devspace_hostname,
+                        devspace_local_port=devspace_local_port,
+                        devspace_public_port=devspace_public_port,
+                        run_factory=run_factory,
+                        platform_name=platform_name,
+                        devspace_doctor=devspace_doctor,
+                    )
+                    if not readiness["ready"]:
+                        readiness["error"] = {"code": "SUBMISSION_NOT_READY"}
+                    STATE.update_state(
+                        layout.state_path,
+                        status="prepared",
+                        submission_readiness=readiness,
+                    )
+                    if not readiness["ready"]:
+                        raise OracleRunError(
+                            "SUBMISSION_NOT_READY",
+                            "DevSpace live readiness failed before Oracle submission",
+                            {"failed_checks": readiness["failed_checks"], "readiness": readiness},
+                        )
                 process = popen_factory(
                     argv,
                     cwd=str(config.project_root),
@@ -1103,7 +1230,18 @@ def execute_run(
         latest = STATE.load_state(layout.state_path)
         if latest.get("session_authority") == "pre_submit":
             STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
-        return {"ok": False, "run_dir": str(layout.run_dir), "result": STATE.update_state(layout.state_path, status="failed")}
+        failed = STATE.update_state(layout.state_path, status="failed")
+        settled = STATE.settle_proven_pre_submit_failure(layout.state_path)
+        if settled is not None:
+            STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
+            return {
+                "ok": False,
+                "status": "pre_submit_failed",
+                "safe_for_fresh_run": True,
+                "run_dir": str(layout.run_dir),
+                "result": settled,
+            }
+        return {"ok": False, "run_dir": str(layout.run_dir), "result": failed}
     STATE.write_transcript(layout)
     if watchdog_expired:
         state = STATE.update_state(

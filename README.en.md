@@ -217,6 +217,12 @@ browser, submits a prompt, applies compatibility patches, or validates ChatGPT
 login/app UI. The Tailscale self hostname is detected automatically; use
 `--devspace-hostname` only when an explicit override is required.
 
+Preflight output is read-only advisory evidence; it does not persist submission
+authority. A real DevSpace `run` rechecks the Tailscale hostname, Funnel mapping,
+and exact local/public `/healthz` identity inside the existing project submit
+mutex. Failure leaves structured `SUBMISSION_NOT_READY` evidence in the exact run
+state and settles safely before starting the Oracle browser.
+
 Classify or watch one exact persisted run without mutation:
 
 ```powershell
