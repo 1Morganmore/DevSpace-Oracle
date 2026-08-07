@@ -1,6 +1,6 @@
 ---
 name: chatgpt-deep-research-browser
-description: Run new ChatGPT Deep Research through Oracle browser research deep plus the manually registered DevSpace app; legacy agbrowse is recovery-only.
+description: Run ChatGPT Deep Research through Oracle browser research deep plus the manually registered DevSpace app.
 ---
 
 # Deep Research through Oracle
@@ -17,7 +17,5 @@ attachment and performs no app picker or settings action. Remove `--dry-run`
 only for an explicitly authorized live run and replace it with
 `--expected-manifest-sha256 <oracle_manifest_sha256>` from that exact preview.
 
-Do not silently replace Deep Research with ordinary search or Pro. Existing
-agbrowse Deep Research records may be recovered only by their exact old run
-directory; never create a new agbrowse research run. CodexPro is frozen and is
-not a fallback.
+Do not silently replace Deep Research with ordinary search or Pro. No alternate
+browser backend or app is a fallback.

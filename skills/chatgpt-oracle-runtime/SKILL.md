@@ -5,10 +5,9 @@ description: "Current Oracle runtime path for new ChatGPT work: regular modes us
 
 # ChatGPT Oracle Runtime
 
-This is the only active browser path for all new GPT work. CodexPro and
-agbrowse are frozen for exact legacy recovery only. Regular modes use DevSpace;
+This is the only active browser path for all GPT work. Regular modes use DevSpace;
 Pro uses Oracle attachment transport without any app. New runs pin Oracle
-`0.17.0`; Oracle `0.16.1` is accepted only when recovering an exact run already
+`0.17.1`; Oracle `0.16.1` and `0.17.0` are accepted only when recovering an exact run already
 persisted with that version.
 
 `chatgpt_oracle_dispatch.py` supports exactly `direct`, `plan`, `review`, `edit`,
@@ -126,7 +125,7 @@ replace or resubmit it.
 Oracle's `Prompt did not appear in conversation before timeout (send may have
 failed)` message is likewise submission-uncertain. No-live-tab plus missing
 saved-URL recovery evidence does not mechanically prove non-submission. A
-validated Oracle 0.17.0 `APP_MENTION_ROUTE_UNCONFIRMED` rejection is also
+validated Oracle 0.17.1 `APP_MENTION_ROUTE_UNCONFIRMED` rejection is also
 eligible because the compatibility contract clears the composer and throws
 before either send path. A maintenance owner may release either exact run only
 after explicit user confirmation through `chatgpt_oracle_run.py

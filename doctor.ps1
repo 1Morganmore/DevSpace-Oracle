@@ -49,13 +49,17 @@ if (!$Receipt) {
   try {
     $Value = Get-Content -LiteralPath $Receipt.FullName -Raw | ConvertFrom-Json
     $InstallReceiptValue = $Value
-    if (@('codexpro.install-receipt/v2','codexpro.install-receipt/v3') -notcontains [string]$Value.schema) {
+    if (@('codexpro.install-receipt/v2','codexpro.install-receipt/v3','codexpro.install-receipt/v4') -notcontains [string]$Value.schema) {
       throw 'unsupported install receipt schema'
     }
     foreach ($Record in $Value.files) {
       $Relative = ([string]$Record.path).Replace('\','/')
       $ReceiptFiles[$Relative] = $true
       $Path = Get-SafeChild $CodexRoot $Relative
+      if ($Record.action -eq 'removed') {
+        if (Test-Path -LiteralPath $Path) { $Issues += @{code='REMOVED_FILE_PRESENT'; path=$Record.path} }
+        continue
+      }
       if (!(Test-Path -LiteralPath $Path)) {
         $Issues += @{code='FILE_MISSING'; path=$Record.path}
         continue
@@ -68,12 +72,6 @@ if (!$Receipt) {
   } catch {
     $Issues += @{code='RECEIPT_INVALID'; detail=$_.Exception.Message}
   }
-}
-
-$Agbrowse = Get-Command agbrowse.cmd,agbrowse -ErrorAction SilentlyContinue | Select-Object -First 1
-if (!$Agbrowse) {
-  $Warnings += @{code='LEGACY_AGBROWSE_MISSING'; detail='Only legacy run recovery is unavailable'}
-  $Commands += 'powershell -ExecutionPolicy Bypass -File .\update.ps1 -AgbrowseVersion 0.1.18'
 }
 
 $Node = Get-Command node.exe,node -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -95,7 +93,7 @@ if (!$Node -or !$Npx) {
 if (!$GitBash) {
   $Issues += @{code='DEVSPACE_GIT_BASH_MISSING'; detail='Windows DevSpace requires Git Bash'}
 }
-$Commands += 'npx -y @steipete/oracle@0.17.0 --version'
+$Commands += 'npx -y @steipete/oracle@0.17.1 --version'
 $Commands += 'python .\skills\chatgpt-workspace-setup\scripts\devspace_tailscale_setup.py doctor --root C:\project --hostname your-device.your-tailnet.ts.net'
 
 $Python = Get-Command python.exe,python -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -139,64 +137,8 @@ if ($Python) {
     }
   }
 }
-$UpdateReceiptPath = Join-Path $CodexRoot 'agbrowse-update-receipt.json'
-$UpdateReceipt = $null
-$SelectedVersion = '0.1.18'
-$SelectedIntegrity = $null
-$Contract = Join-Path $CodexRoot 'contracts/agbrowse-0.1.18.json'
-$LegacyRecoveryManaged = [string]$InstallReceiptValue.dependency.mode -eq 'applied'
-if (Test-Path -LiteralPath $UpdateReceiptPath) {
-  try {
-    $UpdateReceipt = Get-Content -LiteralPath $UpdateReceiptPath -Raw | ConvertFrom-Json
-    if ($UpdateReceipt.schema -ne 'codexpro.agbrowse-update-receipt/v2') { throw 'unsupported update receipt schema' }
-    $SelectedVersion = [string]$UpdateReceipt.selected_version
-    $SelectedIntegrity = [string]$UpdateReceipt.integrity
-    $LegacyRecoveryManaged = $true
-    $Contract = [IO.Path]::GetFullPath([string]$UpdateReceipt.contract)
-    if (!(Test-IsWithinRoot (Join-Path $CodexRoot 'contracts') $Contract)) { throw 'update contract path escapes CODEX_HOME' }
-  } catch {
-    $Issues += @{code='UPDATE_RECEIPT_INVALID'; detail=$_.Exception.Message}
-    $UpdateReceipt = $null
-  }
-}
-
 if (!$Python) {
   $Issues += @{code='PYTHON_MISSING'; detail='Python is required for the installed automation'}
-} elseif (!(Test-Path -LiteralPath $Contract)) {
-  if ($LegacyRecoveryManaged) {
-    $Issues += @{code='LEGACY_CONTRACT_UNVERIFIED'; detail='Managed legacy recovery requires its validated contract manifest'}
-  } else {
-    $Warnings += @{code='LEGACY_CONTRACT_UNAVAILABLE'; detail='Legacy agbrowse recovery is unverified; current Oracle/DevSpace routes are unaffected'}
-  }
-} else {
-  if ($UpdateReceipt -and (Get-Sha256 $Contract) -ne [string]$UpdateReceipt.contract_sha256) {
-    $Issues += @{code='CONTRACT_RECEIPT_HASH_MISMATCH'; contract=$Contract}
-  } else {
-    $Arguments = @(
-      (Join-Path $CodexRoot 'bin/chatgpt_agbrowse_contract.py'),
-      'validate', '--manifest', $Contract
-    )
-    if ($SelectedIntegrity) {
-      $Arguments += @('--expected-version',$SelectedVersion,'--expected-integrity',$SelectedIntegrity)
-    }
-    & $Python.Source @Arguments
-    if ($LASTEXITCODE) { $Issues += @{code='CONTRACT_INVALID'; contract=$Contract} }
-  }
-
-  if ($Agbrowse) {
-    try {
-      $ContractValue = Get-Content -LiteralPath $Contract -Raw | ConvertFrom-Json
-      $ActualExecutableHash = Get-Sha256 $Agbrowse.Source
-      if ($ActualExecutableHash -ne $ContractValue.agbrowse.executableSha256) {
-        $Issues += @{code='AGBROWSE_EXECUTABLE_HASH_MISMATCH'; actual=$ActualExecutableHash; contract=$ContractValue.agbrowse.executableSha256}
-      }
-      if ($UpdateReceipt -and $ActualExecutableHash -ne [string]$UpdateReceipt.executable_sha256) {
-        $Issues += @{code='AGBROWSE_UPDATE_RECEIPT_EXECUTABLE_MISMATCH'; actual=$ActualExecutableHash}
-      }
-    } catch {
-      $Issues += @{code='CONTRACT_READ_FAILED'; detail=$_.Exception.Message}
-    }
-  }
 }
 
 [ordered]@{
@@ -207,13 +149,8 @@ if (!$Python) {
   issues = $Issues
   warnings = $Warnings
   commands = $Commands
-  agbrowse = @{selected_version=$SelectedVersion; contract=$Contract; update_receipt=$UpdateReceiptPath}
-  oracle = @{package='@steipete/oracle@0.17.0';tested_version='0.17.0';resolution='exact npx runtime pin'}
-  devspace = @{package='@waishnav/devspace';tested_version='1.0.5';setup='explicit setup skill only'}
-  codexpro = @{
-    installation = 'external'
-    detail = 'CodexPro is not installed by install.ps1; app bootstrap scripts acquire the latest supported external runtime.'
-  }
+  oracle = @{package='@steipete/oracle@0.17.1';tested_version='0.17.1';resolution='exact npx runtime pin'}
+  devspace = @{package='@waishnav/devspace';tested_version='1.0.6';setup='explicit setup skill only'}
   what_if = [bool]$WhatIf
 } | ConvertTo-Json -Depth 7
 if ($Issues) { exit 1 }

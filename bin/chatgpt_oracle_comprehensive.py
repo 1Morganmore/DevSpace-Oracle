@@ -620,7 +620,7 @@ def _oracle_manifest(
         "mode": "browser",
         "model": "gpt-5.5-pro" if stage == "pro" else config["model"],
         "model_strategy": "select",
-        "thinking_time": "heavy",
+        "thinking_time": "heavy" if stage == "pro" else "extra-high",
         "research": "off",
         "archive": "auto",
         "parallel_parent_id": config["_parallel_parent_id"],

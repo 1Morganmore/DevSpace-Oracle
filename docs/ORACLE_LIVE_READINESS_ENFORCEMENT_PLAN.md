@@ -74,7 +74,7 @@ Preserve these invariants:
 6. Pro attachment-only transport never depends on DevSpace, Tailscale, or an app.
 7. Recovery continues to reuse only the exact stored slug/session and must not
    route through the new-submission readiness flow.
-8. Frozen CodexPro/agbrowse code and persisted legacy recovery semantics remain
+8. Host-only retired state and persisted Oracle recovery semantics remain
    untouched.
 9. Do not add a notifier, daemon, cache, persistent readiness receipt, third-party
    dependency, or new public submission command.
@@ -243,7 +243,7 @@ Avoid changes to:
 - comprehensive workflow ownership and semantic mission generation;
 - Web Multi lane topology or capacity;
 - Oracle exact-session recovery;
-- CodexPro/agbrowse legacy code;
+- retired browser runtime code;
 - install/update/rollback logic unless release packaging proves it is required.
 
 ## Required tests

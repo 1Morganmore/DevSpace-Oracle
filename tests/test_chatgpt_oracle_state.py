@@ -30,7 +30,7 @@ def manifest(tmp_path: Path, mission_path: Path | str, **extra) -> Path:
         "mission_path": str(mission_path),
         "app_name": "DevSpace",
         "mode": "browser",
-        "oracle_command": ["npx", "-y", "@steipete/oracle@0.17.0"],
+        "oracle_command": ["npx", "-y", "@steipete/oracle@0.17.1"],
     }
     candidate_mission = Path(str(mission_path))
     if candidate_mission.is_absolute() and candidate_mission.is_file():
@@ -530,15 +530,16 @@ def test_regular_manifest_requires_exact_devspace_app(tmp_path: Path) -> None:
 def test_oracle_commands_pin_the_active_and_recoverable_versions() -> None:
     state = load_state()
 
-    assert state.ORACLE_ACTIVE_VERSION == "0.17.0"
-    assert state.ORACLE_RECOVERABLE_VERSIONS == ("0.16.1", "0.17.0")
+    assert state.ORACLE_ACTIVE_VERSION == "0.17.1"
+    assert state.ORACLE_RECOVERABLE_VERSIONS == ("0.16.1", "0.17.0", "0.17.1")
+    assert state.WAIT_CAPABLE_VERSIONS == {"0.17.0", "0.17.1"}
     assert state.default_oracle_command(platform_name="nt") == (
-        "npx.cmd", "-y", "@steipete/oracle@0.17.0",
+        "npx.cmd", "-y", "@steipete/oracle@0.17.1",
     )
     assert state.pinned_oracle_command("oracle 0.16.1", platform_name="posix") == (
         "npx", "-y", "@steipete/oracle@0.16.1",
     )
-    assert state.validate_oracle_command(["npx", "--yes", "@steipete/oracle@0.17.0"])
+    assert state.validate_oracle_command(["npx", "--yes", "@steipete/oracle@0.17.1"])
 
     for command in (
         ["oracle"],
@@ -625,7 +626,7 @@ def test_unsafe_oracle_args_are_rejected(tmp_path: Path) -> None:
         "--browser-hide-window",
     )
     assert config.model_strategy == "select"
-    assert config.thinking_time == "heavy"
+    assert config.thinking_time == "extra-high"
     with pytest.raises(state.OracleStateError) as exc:
         state.load_manifest(manifest(tmp_path, mission.resolve(), thinking_time="xhigh"))
     assert exc.value.code == "THINKING_TIME_INVALID"

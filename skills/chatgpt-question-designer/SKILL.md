@@ -65,20 +65,20 @@ Append an adversarial module only for explicit review/counterexample roles: requ
 Context selection must match the question type.
 
 - New non-Pro direct, plan, review, edit, orchestrator, Deep Research, comprehensive, and Web Multi work uses Oracle plus the manually registered `DevSpace` workspace. The composer receives only `@DevSpace` and the absolute UTF-8 mission path. The mission tells GPT which project files, logs, tests, constraints, and artifacts to inspect through DevSpace.
-- Pro uses Oracle with exact snapshot attachments only. It must not use DevSpace, CodexPro, or another app.
-- CodexPro is frozen for new work. It may appear only while recovering an already persisted legacy agbrowse run; never design a new prompt around CodexPro `tree/search/read`, app registration, app repair, or a CodexPro fallback.
+- Pro uses Oracle with exact snapshot attachments only. It must not use DevSpace or another app.
+- Never design a new prompt around an alternate workspace backend, app registration, app repair, or fallback.
 - Code/design/debug/refactor: give the regular web GPT a narrow project-contained mission and let it inspect the live workspace through DevSpace. Do not duplicate the workspace into attachments or a ZIP.
 - Planning/review: identify the live draft, research, acceptance criteria, local guidance, and known risks by project-relative paths in the mission. Use an attachment packet only for Pro or when the exact immutable snapshot is itself the requested evidence.
 - Investigation/source synthesis: identify internal findings and provenance in the DevSpace-visible mission, and use web/search separately for current public facts.
 - Idea expansion: put the seed, constraints, non-goals, audience, and known alternatives in the mission; do not preselect a conclusion.
 
-For a new non-Pro project task, a failed or unavailable DevSpace endpoint blocks submission and routes only to `chatgpt-workspace-setup` diagnosis. It never authorizes CodexPro, ZIP, agbrowse, in-app Browser, Playwright/CDP, or `@chrome` fallback. For Pro, missing exact Oracle attachments blocks submission.
+For a new non-Pro project task, a failed or unavailable DevSpace endpoint blocks submission and routes only to `chatgpt-workspace-setup` diagnosis. It never authorizes ZIP, another backend, in-app Browser, Playwright/CDP, or `@chrome` fallback. For Pro, missing exact Oracle attachments blocks submission.
 
 ## Oracle Continuity Rules
 
 This skill designs the prompt packet; it must not erase local project question templates or force every follow-up into a new ChatGPT conversation.
 
-- Every new Oracle stage is a one-shot session with its own exact slug. Do not add legacy `session_policy`, `session_affinity_key`, `inquiry_chain_id`, or `chat_url` fields to a new Oracle manifest.
+- Every Oracle stage is a one-shot session with its own exact slug. Do not add retired `session_policy`, `session_affinity_key`, `inquiry_chain_id`, or `chat_url` fields to a new Oracle manifest.
 - Preserve semantic continuity in project-contained mission and handoff files. In comprehensive mode, the completing web stage writes the next stage's exact mission and receipt; local Codex validates bytes, paths, hashes, identity, and transition without rewriting its meaning.
 - Recovery uses only the stored exact Oracle slug with `harvest` or `live`. It never restarts, resubmits, or changes the model/reasoning level.
 - Genuine Web Multi uses distinct Oracle sessions and copied profiles for independent lanes. Use it only when simultaneous independent solvers materially help; never simulate multiple roles inside one session and never replace it with local Codex exploration.

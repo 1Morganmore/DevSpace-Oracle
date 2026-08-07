@@ -19,8 +19,9 @@ from typing import Any, Sequence
 
 SCHEMA = "codex.chatgpt.oracle-run/v1"
 DEVSPACE_APP_NAME = "DevSpace"
-ORACLE_ACTIVE_VERSION = "0.17.0"
-ORACLE_RECOVERABLE_VERSIONS = ("0.16.1", ORACLE_ACTIVE_VERSION)
+ORACLE_ACTIVE_VERSION = "0.17.1"
+ORACLE_RECOVERABLE_VERSIONS = ("0.16.1", "0.17.0", ORACLE_ACTIVE_VERSION)
+WAIT_CAPABLE_VERSIONS = {"0.17.0", ORACLE_ACTIVE_VERSION}
 ORACLE_PACKAGE = "@steipete/oracle"
 STATE_SCHEMA = "codex.chatgpt.oracle-run-state/v1"
 STATUSES = {"prepared", "running", "complete", "failed", "attention_required", "abandoned"}
@@ -549,11 +550,11 @@ def load_manifest(
     model_strategy = str(payload.get("model_strategy") or "select").strip().casefold()
     if model_strategy not in {"select", "current", "ignore"}:
         raise OracleStateError("MODEL_STRATEGY_INVALID", "model_strategy must be select, current, or ignore")
-    thinking_time = str(payload.get("thinking_time") or "heavy").strip().casefold()
-    if thinking_time not in {"light", "standard", "extended", "heavy"}:
+    thinking_time = str(payload.get("thinking_time") or "extra-high").strip().casefold()
+    if thinking_time not in {"light", "standard", "extended", "heavy", "extra-high"}:
         raise OracleStateError(
             "THINKING_TIME_INVALID",
-            "thinking_time must be light, standard, extended, or heavy",
+            "thinking_time must be light, standard, extended, heavy, or extra-high",
         )
     if transport == "pro-attachment-only":
         if model.casefold() != "gpt-5.5-pro":

@@ -9,7 +9,7 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
 
 - 지원 Node.js 범위를 `>=24 <27`로 올리고 프로젝트 릴리스를 1.8.0으로
   갱신했습니다.
-- 신규 실행은 해시 검증한 Oracle `0.17.0`과 DevSpace `1.0.5`를 사용합니다.
+- 신규 실행은 해시 검증한 Oracle `0.17.1`과 DevSpace `1.0.6`을 사용합니다.
   Oracle `0.16.1`은 이미 저장된 해당 버전 실행의 정확한 복구에만 남깁니다.
 - 일반 작업은 `GPT-5.6 Sol` + 보이는 `Extra High`, Pro는 첨부 전용
   `gpt-5.5-pro`를 유지합니다. Web Multi는 명시적으로 선택한 경우에만
@@ -33,7 +33,7 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
 - 일반 GPT, 계획, 검토, 수정, 지휘, 심층 리서치, 종합모드와 Web
   Multi-GPT를 Oracle + DevSpace로 통일했습니다.
 - Pro는 Oracle 첨부 전용이며 DevSpace를 사용하지 않습니다.
-- CodexPro와 agbrowse 신규 제출 경로는 동결했습니다.
+- 신규 제출은 Oracle과 DevSpace 경로만 사용합니다.
 
 ### Windows 브라우저 실행 격리
 
@@ -72,14 +72,14 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
 ### 설치와 릴리스
 
 - 설치 전 파일을 백업하고 durable 영수증을 남깁니다.
-- 기본 설치는 동결된 agbrowse/CodexPro 의존성을 설치하거나 갱신하지 않습니다.
-- portability, fast gate, golden-path, v3/v4 계약 테스트를 CI에서 실행합니다.
+- 기본 설치는 외부 legacy browser 의존성을 설치하거나 갱신하지 않습니다.
+- portability, fast gate, golden-path, focused/full release 계약 테스트를 CI에서 실행합니다.
 
-## 레거시 기록
+## 제거 기록
 
-과거 CodexPro·agbrowse 기반 v1~v4 실행기와 goal supervisor는 새 작업을
-만들 수 없습니다. 이미 저장된 실행을 원래 신원으로 복구할 때만 사용합니다.
-자세한 목록은 [FROZEN_LEGACY.md](FROZEN_LEGACY.md)에 있습니다.
+과거 browser runtime과 goal supervisor는 현재 패키지에서 제거되었습니다.
+사용자 상태와 출력은 설치·업그레이드 과정에서 보존합니다.
+현재 upstream 차이는 [VS_UPSTREAM.md](VS_UPSTREAM.md)에 있습니다.
 
 세부 커밋 단위 변경은 Git 로그와 GitHub Releases/Actions를 권위 기록으로
 사용합니다.

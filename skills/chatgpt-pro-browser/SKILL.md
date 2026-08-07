@@ -1,6 +1,6 @@
 ---
 name: chatgpt-pro-browser
-description: Use for a one-shot ChatGPT Pro attachment-only plan, research, or review through Oracle. Return the Pro result only; never continue into comprehensive implementation. agbrowse and CodexPro are legacy recovery-only.
+description: Use for a one-shot ChatGPT Pro attachment-only plan, research, or review through Oracle. Return the Pro result only; never continue into comprehensive implementation.
 ---
 
 # ChatGPT Pro through Oracle
@@ -17,14 +17,14 @@ comprehensive runner.
 
 Oracle is the only backend for a new Pro run. It owns model selection, exact
 file attachment, submission, durable output, exact-slug recovery, and one-shot
-archive. There is no new agbrowse, CodexPro, DevSpace, in-app Browser, custom
+archive. There is no DevSpace, alternate app, in-app Browser, custom
 CDP/Playwright, or `@chrome` fallback.
 
 ## Non-negotiable Pro contract
 
 - `task_kind: pro`.
-- Select the account-visible Pro model through Oracle; never downgrade to a
-  regular GPT model.
+- Select `gpt-5.5-pro` with `heavy` through Oracle; never downgrade to a
+  regular GPT model or silently change the effort.
 - Never select, connect, inspect, register, repair, mention, or delete a
   ChatGPT app.
 - Local context is attachment-only through Oracle `--file` arguments.
@@ -186,7 +186,7 @@ Required fields:
   paths and the caller-pinned hash aligned with each path.
 - `model_strategy: select`.
 
-Any app name, DevSpace mention, CodexPro field, or implicit model downgrade is a
+Any app name, DevSpace mention, alternate-backend field, or implicit model downgrade is a
 hard error.
 
 Preview without launching a browser:
@@ -228,7 +228,3 @@ response was still pending at Oracle's deadline: retain the exact lock and
 wait passively. Do not launch repeated `live`/`harvest` recovery while the
 conversation is visibly working; use exact recovery only after the original
 observer/browser is no longer available.
-
-For an already persisted agbrowse Pro run only, the former exact
-`chatgpt_agbrowse_run.py --observe-run|--recover-run <run-dir>` commands remain
-available. They must never create a new run.

@@ -30,6 +30,5 @@ jobs:
       - run: python scripts/check_skill_metadata.py --root .
       - run: python scripts/run_fast_gate.py --enforce-budget
       - run: python scripts/run_golden_path_smoke.py
-      - run: python scripts/run_v4_contract_tests.py --focused
-      - run: python scripts/run_v3_contract_tests.py
-      - run: python scripts/run_v4_contract_tests.py --full
+      - run: python scripts/run_release_contract_tests.py --focused
+      - run: python scripts/run_release_contract_tests.py --full

@@ -1,6 +1,8 @@
 import json
+import hashlib
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 
@@ -19,47 +21,225 @@ def run_powershell(*args: str, env: dict[str, str] | None = None) -> subprocess.
         env=env,
     )
 
+
+def make_removal_upgrade_fixture(tmp_path: Path) -> tuple[Path, Path, Path, bytes]:
+    repo = tmp_path / 'repo'
+    home = tmp_path / 'home'
+    (repo / 'bin').mkdir(parents=True)
+    home.mkdir()
+    for name in ('install.ps1', 'rollback.ps1', 'uninstall.ps1'):
+        shutil.copy2(ROOT / name, repo / name)
+    (repo / 'bin' / 'active.py').write_text('active\n', encoding='utf-8')
+    (repo / 'install-manifest.json').write_text(json.dumps({
+        'schema': 'codexpro.install-manifest/v1',
+        'version': '1.9.0',
+        'include': ['bin/active.py'],
+        'external': {},
+    }), encoding='utf-8')
+    legacy = home / 'bin' / 'legacy.py'
+    legacy.parent.mkdir(parents=True)
+    legacy_bytes = b'owned-by-1.8.0\n'
+    legacy.write_bytes(legacy_bytes)
+    write_v3_receipt(home, legacy, 'previous')
+    return repo, home, legacy, legacy_bytes
+
+
+def write_v3_receipt(home: Path, installed: Path, name: str) -> Path:
+    relative = installed.relative_to(home).as_posix()
+    digest = hashlib.sha256(installed.read_bytes()).hexdigest()
+    transaction = hashlib.md5(name.encode(), usedforsecurity=False).hexdigest()
+    backup = home / 'backups' / name
+    replacement = backup / 'steps' / '0' / 'replacement.json'
+    wal = backup / 'install.wal.json'
+    receipt = home / 'receipts' / f'codexpro-automation-{name}.json'
+    replacement.parent.mkdir(parents=True)
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    replacement.write_text(json.dumps({
+        'schema': 'codexpro.install-replacement/v1', 'path': relative,
+        'action': 'created', 'installed_sha256': digest, 'backup_sha256': None,
+    }), encoding='utf-8')
+    record = {
+        'sequence_number': 0, 'path': relative, 'action': 'created',
+        'installed_sha256': digest, 'backup_sha256': None, 'phase': 'COMPLETE',
+        'transitions': ['INTENT', 'BACKUP_DURABLE', 'MUTATED', 'VERIFIED',
+                        'REPLACEMENT_RECEIPT_DURABLE', 'COMPLETE'],
+        'replacement': str(replacement),
+    }
+    wal.write_text(json.dumps({
+        'schema': 'codexpro.install-wal/v2', 'transaction_id': transaction,
+        'manifest_version': '1.8.0', 'status': 'COMPLETE', 'backup': str(backup),
+        'receipt': str(receipt), 'wal_path': str(wal), 'files': [record],
+    }), encoding='utf-8')
+    receipt.write_text(json.dumps({
+        'schema': 'codexpro.install-receipt/v3', 'transaction_id': transaction,
+        'manifest_version': '1.8.0', 'backup': str(backup), 'wal': str(wal),
+        'files': [{k: record[k] for k in ('path', 'action', 'installed_sha256', 'backup_sha256')}],
+        'dependency': {'mode': 'skipped'},
+    }), encoding='utf-8')
+    return receipt
+
+
+def run_fixture_install(repo: Path, home: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return run_powershell('-File', str(repo / 'install.ps1'), '-CodexHome', str(home), env=env)
+
+
+def test_removal_upgrade_writes_wal_v3_receipt_v4_and_rolls_back_exactly(tmp_path: Path) -> None:
+    repo, home, legacy, legacy_bytes = make_removal_upgrade_fixture(tmp_path)
+
+    installed = run_fixture_install(repo, home)
+
+    assert installed.returncode == 0, installed.stderr
+    receipt_path = next(path for path in (home / 'receipts').glob('*.json')
+                        if json.loads(path.read_text(encoding='utf-8'))['schema'] == 'codexpro.install-receipt/v4')
+    receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
+    wal = json.loads(Path(receipt['wal']).read_text(encoding='utf-8'))
+    removed = next(record for record in receipt['files'] if record['action'] == 'removed')
+    wal_removed = next(record for record in wal['files'] if record['action'] == 'removed')
+    assert receipt['schema'] == 'codexpro.install-receipt/v4'
+    assert wal['schema'] == 'codexpro.install-wal/v3'
+    assert wal_removed['transitions'] == [
+        'INTENT', 'BACKUP_DURABLE', 'MUTATED', 'VERIFIED',
+        'REPLACEMENT_RECEIPT_DURABLE', 'COMPLETE',
+    ]
+    assert removed['expected_absence'] is True
+    assert removed['transaction_id'] == receipt['transaction_id'] == removed['rollback_binding']
+    assert Path(removed['backup']).read_bytes() == legacy_bytes
+    assert not legacy.exists()
+
+    rolled_back = run_powershell('-File', str(repo / 'rollback.ps1'), '-CodexHome', str(home),
+                                 '-Receipt', str(receipt_path))
+    assert rolled_back.returncode == 0, rolled_back.stderr
+    assert legacy.read_bytes() == legacy_bytes
+    assert not (home / 'bin' / 'active.py').exists()
+
+
+@pytest.mark.parametrize('kind,expected', [
+    ('modified', 'preserved_modified_removed'),
+    ('symlink', 'preserved_symlink_removed'),
+])
+def test_removal_upgrade_preserves_changed_or_symlink_destination(
+    tmp_path: Path, kind: str, expected: str,
+) -> None:
+    repo, home, legacy, _ = make_removal_upgrade_fixture(tmp_path)
+    if kind == 'modified':
+        legacy.write_text('user-modified\n', encoding='utf-8')
+    else:
+        target = home / 'user-target.py'
+        target.write_text('user-target\n', encoding='utf-8')
+        legacy.unlink()
+        try:
+            legacy.symlink_to(target)
+        except OSError:
+            target_bin = home / 'target-bin'
+            shutil.move(str(home / 'bin'), target_bin)
+            (target_bin / 'legacy.py').write_text('user-target\n', encoding='utf-8')
+            linked = subprocess.run(
+                ['cmd', '/c', 'mklink', '/J', str(home / 'bin'), str(target_bin)],
+                text=True, capture_output=True,
+            )
+            assert linked.returncode == 0, linked.stderr
+
+    installed = run_fixture_install(repo, home)
+
+    assert installed.returncode != 0
+    assert expected in installed.stderr
+    assert legacy.exists()
+    assert not (home / 'bin' / 'active.py').exists()
+
+
+def test_removal_upgrade_refuses_ambiguous_receipts_before_mutation(tmp_path: Path) -> None:
+    repo, home, legacy, legacy_bytes = make_removal_upgrade_fixture(tmp_path)
+    write_v3_receipt(home, legacy, 'also-claims-current')
+
+    installed = run_fixture_install(repo, home)
+
+    assert installed.returncode != 0
+    assert 'INSTALL_UPGRADE_AMBIGUOUS_RECEIPT' in installed.stderr
+    assert legacy.read_bytes() == legacy_bytes
+    assert not (home / 'bin' / 'active.py').exists()
+
+
+def test_removal_upgrade_refuses_active_legacy_run_before_mutation(tmp_path: Path) -> None:
+    repo, home, legacy, legacy_bytes = make_removal_upgrade_fixture(tmp_path)
+    run = home / 'state' / 'chatgpt-agbrowse' / 'projects' / 'p' / 'runs' / 'r' / 'run.json'
+    run.parent.mkdir(parents=True)
+    run.write_text(json.dumps({'phase': 'SUBMITTED'}), encoding='utf-8')
+
+    installed = run_fixture_install(repo, home)
+
+    assert installed.returncode != 0
+    assert 'INSTALL_UPGRADE_ACTIVE_LEGACY_RUN' in installed.stderr
+    assert legacy.read_bytes() == legacy_bytes
+    assert not (home / 'bin' / 'active.py').exists()
+
+
+@pytest.mark.parametrize('crash_point', [
+    'BEFORE_REMOVAL', 'AFTER_REMOVAL_BACKUP_DURABLE', 'AFTER_REMOVAL',
+    'AFTER_REMOVAL_RECEIPT', 'AFTER_INSTALL_RECEIPT',
+])
+def test_removal_upgrade_hard_crash_recovers_before_retry(tmp_path: Path, crash_point: str) -> None:
+    repo, home, legacy, _ = make_removal_upgrade_fixture(tmp_path)
+    env = os.environ.copy()
+    env['CODEXPRO_INSTALL_HARD_CRASH_POINT'] = crash_point
+
+    crashed = run_fixture_install(repo, home, env)
+    assert crashed.returncode == 86
+
+    recovered = run_fixture_install(repo, home)
+
+    assert recovered.returncode == 0, recovered.stderr
+    old_wals = [json.loads(path.read_text(encoding='utf-8')) for path in (home / 'backups').glob('*/install.wal.json')]
+    assert any(wal['status'] == 'ROLLED_BACK_AFTER_CRASH' for wal in old_wals)
+    assert any(wal['status'] == 'COMPLETE' and wal['schema'] == 'codexpro.install-wal/v3' for wal in old_wals)
+    assert not legacy.exists()
+
+
+def test_removed_rollback_preflights_recreated_destination_before_any_inverse(tmp_path: Path) -> None:
+    repo, home, legacy, _ = make_removal_upgrade_fixture(tmp_path)
+    installed = run_fixture_install(repo, home)
+    assert installed.returncode == 0, installed.stderr
+    receipt = next(path for path in (home / 'receipts').glob('*.json')
+                   if json.loads(path.read_text(encoding='utf-8'))['schema'] == 'codexpro.install-receipt/v4')
+    legacy.write_text('user-created-after-upgrade\n', encoding='utf-8')
+    active = home / 'bin' / 'active.py'
+
+    rolled_back = run_powershell('-File', str(repo / 'rollback.ps1'), '-CodexHome', str(home),
+                                 '-Receipt', str(receipt))
+
+    assert rolled_back.returncode == 2
+    assert 'destination_recreated_removed' in rolled_back.stdout
+    assert legacy.read_text(encoding='utf-8') == 'user-created-after-upgrade\n'
+    assert active.exists(), 'preflight conflict must prevent partial rollback'
+
 def test_lifecycle_scripts_share_manifest_and_support_whatif() -> None:
-    for name in ('install.ps1', 'doctor.ps1', 'update.ps1', 'uninstall.ps1', 'rollback.ps1'):
+    for name in ('install.ps1', 'doctor.ps1', 'uninstall.ps1', 'rollback.ps1'):
         text = (ROOT / name).read_text(encoding='utf-8')
         assert 'WhatIf' in text or 'SupportsShouldProcess' in text
     assert 'install-manifest.json' in (ROOT / 'install.ps1').read_text(encoding='utf-8')
-    assert 'DEFER_ACTIVE_WORK' in (ROOT / 'update.ps1').read_text(encoding='utf-8')
     assert 'Get-ManifestFiles' in (ROOT / 'install.ps1').read_text(encoding='utf-8')
     assert 'git ' not in (ROOT / 'install.ps1').read_text(encoding='utf-8').lower()
 
 
+def test_whatif_does_not_create_codex_home_or_receipts(tmp_path: Path) -> None:
+    target = tmp_path / 'absent-home'
+
+    result = run_powershell(
+        '-File', str(ROOT / 'install.ps1'), '-CodexHome', str(target), '-WhatIf',
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert 'Would stage and install' in result.stdout
+    assert not target.exists()
+
+
 def test_public_file_hash_helpers_are_dotnet_stream_based() -> None:
-    for name in ('install.ps1', 'update.ps1', 'rollback.ps1', 'doctor.ps1'):
+    for name in ('install.ps1', 'rollback.ps1', 'doctor.ps1'):
         text = (ROOT / name).read_text(encoding='utf-8')
         assert 'Get-FileHash' not in text
         assert '[IO.File]::Open' in text
         assert '[Security.Cryptography.SHA256]::Create()' in text
         assert '.Dispose()' in text
         assert '.ToLowerInvariant()' in text
-
-def test_update_is_explicit_not_scheduled() -> None:
-    workflows = list((ROOT / '.github/workflows').glob('*'))
-    assert workflows
-    assert all('schedule' not in path.read_text(encoding='utf-8').lower() for path in workflows)
-
-def test_update_records_and_validates_an_atomic_contract() -> None:
-    text = (ROOT / 'update.ps1').read_text(encoding='utf-8')
-    for token in ('prior', 'executable_sha256', 'contract_sha256', '--expected-version', '--expected-integrity', 'DEFER_ACTIVE_WORK', 'agbrowse-update.lock'):
-        assert token in text
-    assert 'schedule' not in text.lower()
-
-
-def test_installer_freezes_legacy_dependency_unless_explicitly_requested() -> None:
-    text = (ROOT / 'install.ps1').read_text(encoding='utf-8')
-    assert '$InstallLegacyRecoveryDependency' in text
-    assert '$ManageLegacyDependency' in text
-    assert 'legacy-recovery-dependencies-frozen' in text
-    assert "Join-Path $RepoRoot 'update.ps1'" in text
-    assert 'agbrowse dependency install failed' in text
-    assert '-PreflightToken $dependencyPreflightToken' in text
-    assert '-Preflight -AgbrowseVersion' in text
-
 
 def test_installer_wal_records_actual_per_file_transition_order() -> None:
     with tempfile.TemporaryDirectory() as home:
@@ -69,7 +249,7 @@ def test_installer_wal_records_actual_per_file_transition_order() -> None:
         assert installed.returncode == 0, installed.stderr
         receipt = json.loads(next((Path(home) / 'receipts').glob('codexpro-automation-*.json')).read_text(encoding='utf-8-sig'))
         wal = json.loads(Path(receipt['wal']).read_text(encoding='utf-8'))
-        assert wal['schema'] == 'codexpro.install-wal/v2'
+        assert wal['schema'] == 'codexpro.install-wal/v3'
         assert wal['transaction_id'] == receipt['transaction_id']
         assert wal['status'] == 'COMPLETE'
         assert wal['files']
@@ -360,7 +540,7 @@ def test_wal_rollback_preflights_every_backup_before_first_mutation() -> None:
 def test_current_process_fault_rolls_back_the_active_wal_entry(fault_point: str) -> None:
     with tempfile.TemporaryDirectory() as home:
         codex_home = Path(home)
-        first = codex_home / 'bin' / 'chatgpt_agbrowse_bridge.py'
+        first = codex_home / 'bin' / 'chatgpt_oracle_run.py'
         first.parent.mkdir(parents=True)
         original = b'user-owned-before-fault\x00\n'
         first.write_bytes(original)
@@ -387,7 +567,7 @@ def test_current_process_fault_rolls_back_the_active_wal_entry(fault_point: str)
 def test_current_process_fault_removes_a_just_created_destination() -> None:
     with tempfile.TemporaryDirectory() as home:
         codex_home = Path(home)
-        created = codex_home / 'bin' / 'chatgpt_agbrowse_bridge.py'
+        created = codex_home / 'bin' / 'chatgpt_oracle_run.py'
         env = os.environ.copy()
         env['CODEXPRO_INSTALL_FAULT_POINT'] = 'AFTER_MUTATION'
 
@@ -403,7 +583,7 @@ def test_current_process_fault_removes_a_just_created_destination() -> None:
 def test_install_receipt_failure_window_rolls_back_files_and_removes_receipt() -> None:
     with tempfile.TemporaryDirectory() as home:
         codex_home = Path(home)
-        first = codex_home / 'bin' / 'chatgpt_agbrowse_bridge.py'
+        first = codex_home / 'bin' / 'chatgpt_oracle_run.py'
         first.parent.mkdir(parents=True)
         original = b'original-before-install-receipt\n'
         first.write_bytes(original)
@@ -526,10 +706,9 @@ def test_doctor_accepts_current_v3_install_receipt_schema() -> None:
         assert result.returncode == 0, result.stdout
         report = json.loads(result.stdout)
         assert report['status'] == 'PASS'
-        assert report['oracle']['package'] == '@steipete/oracle@0.17.0'
-        assert report['devspace']['tested_version'] == '1.0.5'
-        assert 'npx -y @steipete/oracle@0.17.0 --version' in report['commands']
-        assert any(item['code'] == 'LEGACY_CONTRACT_UNAVAILABLE' for item in report['warnings'])
+        assert report['oracle']['package'] == '@steipete/oracle@0.17.1'
+        assert report['devspace']['tested_version'] == '1.0.6'
+        assert 'npx -y @steipete/oracle@0.17.1 --version' in report['commands']
         assert 'RECEIPT_INVALID' not in result.stdout
         assert 'unsupported install receipt schema' not in result.stdout
 
@@ -545,7 +724,7 @@ def test_doctor_rejects_compatibility_module_with_unreceipted_patch_asset() -> N
         assert readback.returncode == 0, readback.stdout
         receipt = next((codex_home / 'receipts').glob('codexpro-automation-*.json'))
         value = json.loads(receipt.read_text(encoding='utf-8-sig'))
-        missing = 'bin/oracle-compat/0.17.0/assistantResponse.patch'
+        missing = 'bin/oracle-compat/0.17.1/assistantResponse.patch'
         value['files'] = [record for record in value['files'] if record['path'] != missing]
         (codex_home / missing).unlink()
         receipt.write_text(json.dumps(value), encoding='utf-8')
@@ -560,34 +739,11 @@ def test_doctor_rejects_compatibility_module_with_unreceipted_patch_asset() -> N
         ] == [missing]
 
 
-def test_failed_dependency_preflight_leaves_existing_managed_file_byte_identical() -> None:
-    """The read-only dependency gate must run before staging or committing manifest files."""
-    with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as mock_bin:
-        codex_home = Path(home)
-        managed = codex_home / 'bin' / 'chatgpt_agbrowse_tabs.py'
-        managed.parent.mkdir(parents=True)
-        original = b'user-owned-before-preflight\x00\n'
-        managed.write_bytes(original)
-        mock = Path(mock_bin)
-        (mock / 'npm.cmd').write_text(
-            '@echo off\nif "%~1"=="view" (echo "wrong-integrity"\nexit /b 0)\nexit /b 1\n',
-            encoding='utf-8',
-        )
-        (mock / 'python.cmd').write_text('@echo off\nexit /b 0\n', encoding='utf-8')
-        env = os.environ.copy()
-        env['PATH'] = str(mock) + os.pathsep + env['PATH']
-        result = run_powershell(
-            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home,
-            '-InstallLegacyRecoveryDependency', env=env,
-        )
-        assert result.returncode != 0
-        assert managed.read_bytes() == original
-
 def test_uninstall_and_rollback_require_receipt_ownership() -> None:
     rollback = (ROOT / 'rollback.ps1').read_text(encoding='utf-8')
     uninstall = (ROOT / 'uninstall.ps1').read_text(encoding='utf-8')
     assert 'receipt must be owned by this CODEX_HOME' in rollback
-    assert 'codexpro.install-receipt/v3' in rollback
+    assert 'codexpro.install-receipt/v4' in rollback
     assert "'rollback.ps1'" in uninstall
 
 def test_receipt_lifecycle_rejects_forged_traversal_and_preserves_modified_file() -> None:
@@ -603,7 +759,7 @@ def test_receipt_lifecycle_rejects_forged_traversal_and_preserves_modified_file(
 def test_temp_codex_home_install_and_rollback_is_exact_inverse() -> None:
     with tempfile.TemporaryDirectory() as home:
         codex_home = Path(home)
-        overwritten = codex_home / 'bin' / 'chatgpt_agbrowse_tabs.py'
+        overwritten = codex_home / 'bin' / 'chatgpt_oracle_run.py'
         overwritten.parent.mkdir(parents=True)
         original = b'user-owned-original\n'
         overwritten.write_bytes(original)
@@ -616,11 +772,11 @@ def test_temp_codex_home_install_and_rollback_is_exact_inverse() -> None:
         assert installed.returncode == 0, installed.stderr
         receipts = sorted((codex_home / 'receipts').glob('codexpro-automation-*.json'))
         assert len(receipts) == 1
-        created = codex_home / 'bin' / 'chatgpt_agbrowse_composer.py'
+        created = codex_home / 'bin' / 'chatgpt_oracle_state.py'
         installed_pro_skill = codex_home / 'skills' / 'chatgpt-pro-browser' / 'SKILL.md'
         installed_pro_metadata = codex_home / 'skills' / 'chatgpt-pro-browser' / 'agents' / 'openai.yaml'
-        installed_oracle_patch = codex_home / 'bin' / 'oracle-compat' / '0.17.0' / 'assistantResponse.patch'
-        installed_devspace_patch = codex_home / 'bin' / 'devspace-compat' / '1.0.5' / 'workspaces.patch'
+        installed_oracle_patch = codex_home / 'bin' / 'oracle-compat' / '0.17.1' / 'assistantResponse.patch'
+        installed_devspace_patch = codex_home / 'bin' / 'devspace-compat' / '1.0.6' / 'workspaces.patch'
         assert overwritten.read_bytes() != original
         assert created.is_file()
         assert installed_pro_skill.read_bytes() == (
@@ -648,106 +804,6 @@ def test_temp_codex_home_install_and_rollback_is_exact_inverse() -> None:
         assert '"status":  "COMPLETE"' in rolled_back.stdout
 
 
-def test_normal_install_dependency_receipt_rolls_back_mocked_npm_and_contract_exactly() -> None:
-    """The normal (non-skip) path must own update.ps1's exact inverse evidence."""
-    with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as mock_bin:
-        codex_home = Path(home)
-        state = Path(home) / 'mock-npm-version.txt'
-        state.write_text('1.2.3\n', encoding='utf-8')
-        contracts = codex_home / 'contracts'
-        contracts.mkdir()
-        target_contract = contracts / 'agbrowse-0.1.18.json'
-        target_contract.write_text('{"before":"target"}\n', encoding='utf-8')
-        previous_update = codex_home / 'agbrowse-update-receipt.json'
-        previous_update.write_text('{"before":"update"}\n', encoding='utf-8')
-        mock = Path(mock_bin)
-        baseline_integrity = json.loads((ROOT / 'install-manifest.json').read_text(encoding='utf-8'))['external']['agbrowse']['integrity']
-        (mock / 'npm.cmd').write_text(
-            '@echo off\nsetlocal EnableDelayedExpansion\nset state=%MOCK_NPM_STATE%\n'
-            'if "%~1"=="list" (set /p version=<"%state%"\nif "!version!"=="" (echo {"dependencies":{}}) else echo {"dependencies":{"agbrowse":{"version":"!version!"}}}\nexit /b 0)\n'
-            f'if "%~1"=="view" (if "%~2"=="agbrowse@0.1.18" (echo "{baseline_integrity}") else echo "fake-prior-integrity"\nexit /b 0)\n'
-            'if "%~1"=="install" (set package=%~3\nset version=!package:agbrowse@=!\n>"%state%" echo !version!\nexit /b 0)\n'
-            'if "%~1"=="uninstall" (>"%state%" echo.\nexit /b 0)\nexit /b 1\n', encoding='utf-8')
-        (mock / 'python.cmd').write_text(
-            '@echo off\nsetlocal EnableDelayedExpansion\n:loop\nif "%~1"=="" exit /b 0\nif "%~1"=="--output" (set output=%~2\n>"!output!" echo {"agbrowse":{"npmIntegrity":"fake-integrity"}}\nexit /b 0)\nshift\ngoto loop\n', encoding='utf-8')
-        (mock / 'agbrowse.cmd').write_text('@echo off\necho mocked\n', encoding='utf-8')
-        env = os.environ.copy()
-        env['PATH'] = str(mock) + os.pathsep + env['PATH']
-        env['MOCK_NPM_STATE'] = str(state)
-
-        installed = run_powershell(
-            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home,
-            '-InstallLegacyRecoveryDependency', env=env,
-        )
-        assert installed.returncode == 0, installed.stderr
-        receipt = next((codex_home / 'receipts').glob('codexpro-automation-*.json'))
-        value = json.loads(receipt.read_text(encoding='utf-8-sig'))
-        assert value['schema'] == 'codexpro.install-receipt/v3'
-        assert value['dependency']['mode'] == 'applied'
-        assert Path(value['dependency']['receipt']).is_file()
-        assert state.read_text(encoding='utf-8').strip() == '0.1.18'
-
-        rolled_back = run_powershell('-File', str(ROOT / 'rollback.ps1'), '-CodexHome', home, '-Receipt', str(receipt), env=env)
-        assert rolled_back.returncode == 0, rolled_back.stderr
-        assert state.read_text(encoding='utf-8').strip() == '1.2.3'
-        assert target_contract.read_text(encoding='utf-8') == '{"before":"target"}\n'
-        assert previous_update.read_text(encoding='utf-8') == '{"before":"update"}\n'
-        assert '"status":  "COMPLETE"' in rolled_back.stdout
-
-
-def test_dependency_inverse_conflict_is_non_complete_and_preserves_current_dependency() -> None:
-    # Contract checks in update.ps1 must refuse a drifted target rather than claim COMPLETE.
-    update = (ROOT / 'update.ps1').read_text(encoding='utf-8')
-    rollback = (ROOT / 'rollback.ps1').read_text(encoding='utf-8')
-    assert "status='CONFLICT'" in update
-    assert "status='PARTIAL'" in update
-    assert "status='CONFLICT'" in rollback
-    assert 'dependency_preflight_incomplete' in rollback
-    assert 'dependency_rollback_incomplete' in rollback
-
-
-def test_dependency_inverse_rejects_registry_integrity_mismatch_after_mocked_install() -> None:
-    """A successful npm exit is insufficient: the recorded prior integrity must still match."""
-    with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as mock_bin:
-        codex_home = Path(home)
-        state = codex_home / 'mock-npm-version.txt'
-        state.write_text('1.2.3\n', encoding='utf-8')
-        mock = Path(mock_bin)
-        baseline_integrity = json.loads((ROOT / 'install-manifest.json').read_text(encoding='utf-8'))['external']['agbrowse']['integrity']
-        (mock / 'npm.cmd').write_text(
-            '@echo off\nsetlocal EnableDelayedExpansion\nset state=%MOCK_NPM_STATE%\n'
-            'if "%~1"=="list" (set /p version=<"%state%"\nif "!version!"=="" (echo {"dependencies":{}}) else echo {"dependencies":{"agbrowse":{"version":"!version!"}}}\nexit /b 0)\n'
-            f'if "%~1"=="view" (if "%~2"=="agbrowse@0.1.18" (echo "{baseline_integrity}") else echo "%MOCK_PRIOR_INTEGRITY%"\nexit /b 0)\n'
-            'if "%~1"=="install" (set package=%~3\nset version=!package:agbrowse@=!\n>"%state%" echo !version!\nexit /b 0)\n'
-            'if "%~1"=="uninstall" (>"%state%" echo.\nexit /b 0)\nexit /b 1\n', encoding='utf-8')
-        (mock / 'python.cmd').write_text('@echo off\n:loop\nif "%~1"=="" exit /b 0\nif "%~1"=="--output" (>"%~2" echo {"agbrowse":{"npmIntegrity":"mock"}}\nexit /b 0)\nshift\ngoto loop\n', encoding='utf-8')
-        (mock / 'agbrowse.cmd').write_text('@echo off\necho mocked\n', encoding='utf-8')
-        env = os.environ.copy()
-        env.update({'PATH': str(mock) + os.pathsep + env['PATH'], 'MOCK_NPM_STATE': str(state), 'MOCK_PRIOR_INTEGRITY': 'recorded-prior-integrity'})
-        installed = run_powershell(
-            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home,
-            '-InstallLegacyRecoveryDependency', env=env,
-        )
-        assert installed.returncode == 0, installed.stderr
-        receipt = next((codex_home / 'receipts').glob('codexpro-automation-*.json'))
-        env['MOCK_PRIOR_INTEGRITY'] = 'drifted-prior-integrity'
-        rolled_back = run_powershell('-File', str(ROOT / 'rollback.ps1'), '-CodexHome', home, '-Receipt', str(receipt), env=env)
-        assert rolled_back.returncode == 3
-        assert 'PARTIAL' in rolled_back.stdout
-        assert state.read_text(encoding='utf-8').strip() == '1.2.3'
-
-
-def test_install_dependency_recovery_and_rollback_preflight_are_ordered() -> None:
-    install = (ROOT / 'install.ps1').read_text(encoding='utf-8')
-    rollback = (ROOT / 'rollback.ps1').read_text(encoding='utf-8')
-    update = (ROOT / 'update.ps1').read_text(encoding='utf-8')
-    assert '$dependencyApplied=$true' in install
-    assert '$dependencySourceReceipt' in install
-    assert '$isCurrentUpdateReceipt' in update
-    assert 'dependency_preflight_incomplete' in rollback
-    assert rollback.index('$dependencyPreflight=') < rollback.index('$conflicts=@();foreach($record')
-
-
 def test_uninstall_preserves_modified_created_file_and_reports_conflict() -> None:
     with tempfile.TemporaryDirectory() as home:
         codex_home = Path(home)
@@ -758,7 +814,7 @@ def test_uninstall_preserves_modified_created_file_and_reports_conflict() -> Non
         )
         assert installed.returncode == 0, installed.stderr
         receipt = next((codex_home / 'receipts').glob('codexpro-automation-*.json'))
-        modified = codex_home / 'bin' / 'chatgpt_agbrowse_tabs.py'
+        modified = codex_home / 'bin' / 'chatgpt_oracle_run.py'
         modified.write_text('user modified after install\n', encoding='utf-8')
 
         uninstalled = run_powershell(

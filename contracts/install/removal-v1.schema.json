@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codexpro.install-removal/v1",
+  "type": "object",
+  "required": ["schema", "path", "action", "expected_sha256", "backup", "backup_sha256", "expected_absence", "transaction_id", "rollback_binding"],
+  "properties": {
+    "schema": {"const": "codexpro.install-removal/v1"},
+    "path": {"type": "string", "minLength": 1},
+    "action": {"const": "removed"},
+    "expected_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "backup": {"type": "string", "minLength": 1},
+    "backup_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "expected_absence": {"const": true},
+    "transaction_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "rollback_binding": {"type": "string", "pattern": "^[a-f0-9]{32}$"}
+  }
+}

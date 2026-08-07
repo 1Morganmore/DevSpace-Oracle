@@ -119,9 +119,7 @@ def classify_process(proc: Proc) -> str:
         if name not in {"node.exe", "node", "nodejs.exe", "python.exe", "python", "python3.exe", "uv.exe", "uvx.exe"}:
             return "other"
         return "notebooklm-mcp"
-    if "codexpro" in cmd or "cloudflared" in name:
-        return "codexpro"
-    if "chatgpt_browser_runtime_worker.py" in cmd or "run_chatgpt_" in cmd:
+    if "run_chatgpt_" in cmd:
         if name not in {"python.exe", "python", "python3.exe", "py.exe"}:
             return "other"
         return "chatgpt-runner"
@@ -163,7 +161,6 @@ def summarize(processes: list[Proc], limits: dict[str, float]) -> dict[str, Any]
     gpt_helper_roles = {
         "chatgpt-runner",
         "playwright-driver",
-        "codexpro",
         "chatgpt-shared-chrome",
     }
     non_gpt_advisory_roles = {
@@ -311,7 +308,7 @@ def cleanup_candidates(
 
 
 def redact_command(command: str) -> str:
-    command = re.sub(r"(?i)(codexpro_token=)[^\s\"'&]+", r"\1REDACTED", command)
+    command = re.sub(r"(?i)\b([a-z0-9_]*token=)[^\s\"'&]+", r"\1REDACTED", command)
     command = re.sub(r"(?i)(authorization:\s*bearer\s+)[^\s\"']+", r"\1REDACTED", command)
     command = re.sub(r"(?i)(--(?:api-key|token|access-key|secret|password))(=|\s+)[^\s\"']+", r"\1\2REDACTED", command)
     command = re.sub(r"(?i)\b((?:api[_-]?key|access[_-]?key|secret|password|token)=)[^\s\"'&]+", r"\1REDACTED", command)

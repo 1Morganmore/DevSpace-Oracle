@@ -88,7 +88,7 @@ def run_smoke(*, bin_root: Path) -> dict[str, Any]:
         record("argv_never_submits_files", "--file" not in argv)
         record("argv_hides_browser_window", argv.count("--browser-hide-window") == 1)
         record("argv_selects_a_model", "--model" in argv and "--browser-model-strategy" in argv)
-        record("argv_requests_heavy_thinking", "heavy" in argv)
+        record("argv_requests_extra_high_thinking", "extra-high" in argv)
         profile_copy_supported = state.profile_copy_is_supported()
         record(
             "profile_copy_matches_host_capability",

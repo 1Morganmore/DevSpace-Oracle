@@ -47,8 +47,6 @@ SKIP_SUFFIXES = {
 ALLOWLIST = {
     Path("scripts/check_portability.py"),
     Path("install-manifest.json"),
-    Path("tests/fixtures/planner-v7-app-trace-quiescent-incident.json"),
-    Path("tests/fixtures/planner-v8-app-trace-quiescent-incident.json"),
 }
 
 

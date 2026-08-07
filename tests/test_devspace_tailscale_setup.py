@@ -50,7 +50,7 @@ def test_setup_plan_has_no_secrets_and_is_explicit_only(tmp_path: Path, monkeypa
     assert plan["recommended_app_name"] == "DevSpace"
     assert plan["devspace_init"][1:3] == [
         "-lc",
-        "exec npx --yes @waishnav/devspace@1.0.5 init",
+        "exec npx --yes @waishnav/devspace@1.0.6 init",
     ]
 
 
@@ -102,7 +102,6 @@ def test_doctor_returns_local_failure_before_funnel_or_public(tmp_path: Path) ->
 def test_module_has_no_chatgpt_ui_or_browser_automation() -> None:
     source = MODULE_PATH.read_text(encoding="utf-8").lower()
     for forbidden in (
-        "agbrowse",
         "selenium",
         "playwright",
         "tab-switch",
@@ -226,7 +225,7 @@ def test_setup_applies_hash_validated_devspace_compat_before_service_start(
 
     assert calls[1][1:3] == [
         "-lc",
-        "exec npx --yes @waishnav/devspace@1.0.5 init",
+        "exec npx --yes @waishnav/devspace@1.0.6 init",
     ]
     assert "creationflags" not in call_kwargs[1]
     assert call_kwargs[2]["creationflags"] == 123
@@ -235,7 +234,7 @@ def test_setup_applies_hash_validated_devspace_compat_before_service_start(
     assert calls[4] == module.devspace_compat_argv(confirm_restarted=True)
     assert launched and launched[0][1:3] == [
         "-lc",
-        "exec npx --yes @waishnav/devspace@1.0.5 serve",
+        "exec npx --yes @waishnav/devspace@1.0.6 serve",
     ]
 
 

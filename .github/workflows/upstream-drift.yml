@@ -1,0 +1,26 @@
+name: upstream-drift
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  advisory:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - name: Read-only upstream comparison
+        run: python scripts/check_upstream.py --format json | tee upstream-drift.json
+      - name: Summary
+        if: always()
+        run: cat upstream-drift.json >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upstream-drift
+          path: upstream-drift.json

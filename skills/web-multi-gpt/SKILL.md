@@ -1,6 +1,6 @@
 ---
 name: web-multi-gpt
-description: Run genuine parallel regular ChatGPT sessions through Oracle, with stable solver lanes, waves of at most five, file handoffs, and one merger. No single-GPT role simulation and no new agbrowse runs.
+description: Run genuine parallel regular ChatGPT sessions through Oracle, with stable solver lanes, waves of at most five, file handoffs, and one merger. No single-GPT role simulation or alternate backend.
 ---
 
 # Oracle Web Multi-GPT
@@ -43,6 +43,5 @@ throwaway copy of the signed-in Oracle profile, preventing one solver from
 closing or taking over another solver's Chrome session.
 
 No attachments, app/settings automation, broad tab cleanup, `--force`,
-restart, or silent resubmission. Oracle owns one-shot tab archival. Existing
-agbrowse Multi state is recovery-only. CodexPro is frozen and is never a solver
-or merger transport.
+restart, silent resubmission, or alternate solver/merger transport. Oracle owns
+one-shot tab archival.

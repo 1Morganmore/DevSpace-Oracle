@@ -482,12 +482,12 @@ def build_oracle_argv(
     lifecycle_args = [] if "--browser-hide-window" in config.oracle_args else ["--browser-hide-window"]
     wait_args = ["--wait"] if STATE.normalize_oracle_version(
         resolved_version or STATE.ORACLE_ACTIVE_VERSION
-    ) == "0.17.0" else []
+    ) in STATE.WAIT_CAPABLE_VERSIONS else []
     # Upstream waits `--browser-timeout` for the answer and then gives its
     # recovery pass the same budget, so the effective ceiling is twice this
     # value.  Oracle's upstream default can cut a submitted Pro response while
     # ChatGPT is still visibly working, so every new Oracle lane gets the same
-    # explicit, bounded original-session budget.  The 0.17.0 compatibility
+    # explicit, bounded original-session budget.  The 0.17.x compatibility
     # patch makes `--browser-timeout` one overall answer budget, including
     # recovery.  The old 20m upstream default was too short for heavy Extra
     # High DevSpace lanes.  Pro keeps upstream timing.
@@ -1966,7 +1966,7 @@ def recover_run(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run additive Oracle browser missions without modifying agbrowse routing.")
+    parser = argparse.ArgumentParser(description="Run Oracle browser missions through the validated package root.")
     commands = parser.add_subparsers(dest="command", required=True)
     run_parser = commands.add_parser("run")
     run_parser.add_argument("--manifest", type=Path, required=True)

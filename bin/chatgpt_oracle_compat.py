@@ -9,8 +9,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Sequence
 
-SUPPORTED_VERSION = "0.17.0"
-RECOVERABLE_VERSIONS = ("0.16.1", SUPPORTED_VERSION)
+SUPPORTED_VERSION = "0.17.1"
+RECOVERABLE_VERSIONS = ("0.16.1", "0.17.0", SUPPORTED_VERSION)
 CREATE_NO_WINDOW = 0x08000000
 PATCHES_0161 = {
     "dist/src/cli/browserTabs.js": {
@@ -125,7 +125,45 @@ PATCHES_0170 = {
     },
 }
 
-VERSION_PATCHES = {"0.16.1": PATCHES_0161, "0.17.0": PATCHES_0170}
+PATCHES_0171 = {
+    "dist/src/browser/chromeLifecycle.js": {
+        "patch": "chromeLifecycle.patch",
+        "pristine": "312b45c44d4cd69a3a057e7bd1584b58182b4b37bc88f6ce6c7d11e216267c81",
+        "patched": "61440e467d51031efb7bfc319aef05de7c9061585e5eec148d0e353938eb2093",
+    },
+    "dist/src/browser/recoverConversation.js": {
+        "patch": "recoverConversation.patch",
+        "pristine": "d7e39d21acf07e6d227e761944519e11cd8d93930629cc87555d7de75a42d1ca",
+        "patched": "cc2a036f6e2409ae7edceee1f381a5062cd6cc5cd1618af465a1b384081ed69e",
+    },
+    "dist/src/browser/profileCopy.js": {
+        "patch": "profileCopy.patch",
+        "pristine": "06c692861f8a4c1a8769f957b9c582426a13bf4972262c47c1f24a87b239064f",
+        "patched": "71459a25b7c46f57bae6f23a5498301f6f6a1d39addf0c1cd4eee1d99b03372c",
+    },
+    "dist/src/cli/browserConfig.js": {
+        "patch": "browserConfig.patch",
+        "pristine": "989f14399c8aa51913752306135e11d97e4f1c55b2baf984907f1b54959cc340",
+        "patched": "bd18d11e4770fa5335c889b7856622f2da4199351ec65bc17a5ec1f472e2506f",
+    },
+    "dist/src/browser/index.js": {
+        "patch": "browserIndex.patch",
+        "pristine": "335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11",
+        "patched": "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895",
+    },
+    "dist/src/browser/actions/assistantResponse.js": {
+        "patch": "assistantResponse.patch",
+        "pristine": "0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d",
+        "patched": "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4",
+    },
+    "dist/src/browser/actions/promptComposer.js": {
+        "patch": "promptComposer.patch",
+        "pristine": "db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000",
+        "patched": "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f",
+    },
+}
+
+VERSION_PATCHES = {"0.16.1": PATCHES_0161, "0.17.0": PATCHES_0170, "0.17.1": PATCHES_0171}
 # Active-version alias retained for existing callers and tests.
 PATCHES = VERSION_PATCHES[SUPPORTED_VERSION]
 

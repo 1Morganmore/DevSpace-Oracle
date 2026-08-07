@@ -85,7 +85,7 @@ def test_multi_uses_unique_child_manifests_waves_and_merger(tmp_path: Path) -> N
     assert all(item["app_name"] == "DevSpace" for item in calls)
     assert all(item["model"] == "gpt-5.6" for item in calls)
     assert all(item["model_strategy"] == "select" for item in calls)
-    assert all(item["thinking_time"] == "heavy" for item in calls)
+    assert all(item["thinking_time"] == "extra-high" for item in calls)
     assert all(item["copy_profile"] for item in calls)
     assert all(len(item["mission_sha256"]) == 64 for item in calls)
     merger_text = Path(calls[-1]["mission_path"]).read_text(encoding="utf-8")

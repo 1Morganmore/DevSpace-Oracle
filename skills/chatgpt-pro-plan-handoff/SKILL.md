@@ -1,164 +1,56 @@
 ---
 name: chatgpt-pro-plan-handoff
-description: Run staged work with unchanged attachment-only Pro and Oracle-based regular comprehensive stages; optional Web Multi uses independent Oracle sessions.
+description: Run staged comprehensive GPT work through Oracle, with optional attachment-only Pro and independent Oracle Web Multi advisory stages, then one deterministic local gate.
 ---
 
-# Pro and comprehensive handoff
+# Oracle comprehensive workflow
 
-Pro is attachment-only through `chatgpt-pro-browser` and Oracle. It never uses
-DevSpace or CodexPro. CodexPro and all agbrowse creation are frozen; legacy
-files remain only for exact persisted-run recovery.
+Use `codex.chatgpt.oracle-comprehensive/v1` for new comprehensive work. The
+active entry point is `%USERPROFILE%\.codex\bin\chatgpt_oracle_comprehensive.py`.
+Every regular web stage uses Oracle plus the manually registered DevSpace app;
+an optional Pro stage is Oracle attachment-only and selects no app.
+The stage order is plan -> optional Pro or Oracle Web Multi -> review ->
+implementation -> final web gate -> one deterministic local gate.
 
-New GPT comprehensive work uses
-`bin/chatgpt_oracle_comprehensive.py` with schema
-`codex.chatgpt.oracle-comprehensive/v1`:
+## Ownership
 
-```text
-plan -> optional Pro or Oracle Web Multi -> review
-     -> implementation -> final web gate -> one local deterministic gate
-```
+- The completing web stage authors the next semantic mission.
+- Local Codex validates UTF-8, hashes, immutable workflow/stage bindings,
+  transport, recovery, and the final deterministic gate. It never rewrites a
+  web-authored next mission.
+- Review repairs every locally resolvable plan defect inline, writes the final
+  plan and implementation mission, then returns `PASS` or `PASS_WITH_NOTES`.
+- A selected Web Multi advisory uses distinct Oracle sessions in waves of at
+  most five and never starts automatically or as a fallback.
+- Pro returns one identity-bound JSON envelope. The host materializes its output
+  and next-mission strings byte-for-byte.
 
-Comprehensive mode is a staged workflow, not a prompt variant. Its
-implementation stage carries the same orchestrator ownership contract used by
-the single-submission `orchestrator` mode in `chatgpt-thinking-browser`, so
-comprehensive mode contains that mode as one stage. The difference is
-structural: comprehensive mode makes several separate web submissions, each
-authoring the next mission and a hash-bound receipt, and it can only complete
-through a final web PASS plus a zero-exit local gate.
+## Preview
 
-Use single-submission `orchestrator` when the goal and approach are settled and
-one authorized pass should finish the work at the lowest cost. Use
-comprehensive mode when the plan needs an independent review stage, when Pro or
-Web Multi must participate, or when completion must be proven deterministically.
-Do not emulate comprehensive staging by chaining `orchestrator` submissions by
-hand; same-project web submissions stay serialized and the workflow engine owns
-stage identity and recovery.
-
-The manifest supplies absolute `project_root`, `workflow_dir`,
-`initial_mission_path`, its caller-pinned exact lowercase
-`initial_mission_sha256`, stable `workflow_id`, and a nonempty
-`local_gate_command`. Every regular web stage writes its own next mission and a
-bound `codex.chatgpt.oracle-stage-result/v1` receipt. The host validates
-workflow/stage/attempt/input hashes, UTF-8 paths, output hashes, PASS status,
-and the transition; it never rewrites the semantic prompt.
-
-An optional Pro stage runs through Oracle attachment-only. Because Pro has no
-DevSpace access, it returns one strict identity-bound JSON envelope containing
-its output and next-mission text. The host mechanically preserves those strings
-as UTF-8 files and computes the standard receipt; it does not summarize or
-rewrite them.
-
-When a plan routes to Pro and Pro needs an evidence packet, the plan-authored
-next mission declares it in exactly one closed `[PRO_ATTACHMENT_CONTRACT]`
-block. The JSON body uses schema `codex.chatgpt.oracle-pro-attachments/v1` and
-an `attachments` array of absolute project-root-contained regular non-symlink
-paths with optional SHA-256 values. The host attaches only the mission and these
-declared files; it never discovers ZIPs from prose. A legacy Pro mission without
-the block remains mission-only. Regular DevSpace stages reject this block and
-never receive packet attachments.
-
-Plan receipts should use `PLAN_READY`. For compatibility, `completed` is
-accepted only when the plan receipt is otherwise a fully ready, blocker-free,
-hash-valid transition to `review`, `web-multi`, or `pro`; ambiguous or incomplete
-receipts remain fail-closed and are never rewritten on disk.
-
-Pro must JSON-escape every quote and backslash inside `output_text` and
-`next_mission_text`. The host always parses strict JSON first. If strict parsing
-fails, it may make one narrow recovery attempt only for the canonical ordered
-envelope whose text fields contain unescaped quotes. Recovery still requires the
-exact workflow, stage, attempt, and input-mission identities plus a complete
-unambiguous tail. Invalid escapes, truncation, duplicate/ambiguous boundaries,
-or identity drift remain fail-closed. A recovered receipt records the immutable
-source output SHA-256, recovery method, and strict parser error position.
+Create an absolute UTF-8 initial mission inside the exact project root, then
+compile without submitting:
 
 ```powershell
-python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_comprehensive.py" --manifest C:\project\workflow.json --dry-run
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_comprehensive.py" start --project-root C:\project --mission-path C:\project\mission.md --dry-run
 ```
 
-The preview exposes the top-level `manifest_sha256`. For an explicitly
-authorized live workflow, use the same manifest and pass that exact value:
+Bind every regular stage to that exact root and mission path. DevSpace may retry
+the same registered root once after listing workspaces; it must not substitute a
+parent, child, similar name, active workspace, or shell workaround.
 
-```powershell
-python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_comprehensive.py" --manifest C:\project\workflow.json --expected-manifest-sha256 <manifest_sha256>
-```
+## Execution and recovery
 
-An immutable pre-hash v1 manifest that already owns exact stage-zero host state
-must not be edited or dry-run again. Hash its unchanged bytes with
-`(Get-FileHash -Algorithm SHA256 <manifest>).Hash.ToLowerInvariant()` and pass
-that value through `--expected-manifest-sha256`. The runner may recover the
-missing `initial_mission_sha256` only when the stored manifest/workflow identity
-and both stored initial-source path/hash bindings match; otherwise it fails
-closed. This compatibility path cannot create a new unbound workflow.
+Execute only after the user authorizes a live submission and supplies the exact
+preview hash required by the runner. Transport recovery retains the same
+workflow and stage identity; it never creates a replacement workflow or resets
+the semantic revision budget.
 
-The review GPT owns plan repair and finalization. It does not merely list
-findings: it directly repairs every defect resolvable from the mission,
-DevSpace workspace, project rules, or available evidence, writes the corrected
-final plan, and authors the complete implementation mission. `PASS` and
-`PASS_WITH_NOTES` proceed directly to implementation; notes are carried inside
-that mission. New work must not emit `REVISE`. A legacy `REVISE` receipt is
-accepted only for compatibility and ends in attention-required without creating
-another plan. `FAIL` is reserved for a concrete unavailable external input or
-authority, unresolved safety boundary, or genuine execution impossibility.
+A nonzero Oracle exit after submission is `attention_required`, not terminal
+failure. Recover only the stored exact slug. Exact session authority is
+monotonic: `terminal_observed` cannot regress to `live`; observer disagreement
+retains the project lock until a later exact terminal harvest produces fresh,
+nonempty durable output.
 
-Every regular stage binds an exact project root and exact input mission path.
-DevSpace may reuse or open only that normalized root, with at most one retry of
-the same root after inspecting registered workspaces. Parent, child, similarly
-named, active-workspace, and shell-boundary fallbacks are forbidden. The stage
-reads its mission and applicable `AGENTS.md` chain completely before project
-exploration or edits.
-
-Transport or runner recovery keeps the same workflow and stage identity. It
-must never create a `workflow-retryN` replacement. The revision budget and
-remaining critical finding set are persisted in the workflow state for
-operator visibility. Only final web PASS plus a zero-exit local gate can
-complete. A Pro selection launches an explicit Oracle attachment-only stage
-and waits for a bound receipt; it is never downgraded. Missing receipt/output,
-crash, or ambiguity returns attention-required without a replacement submit.
-Regular-stage `--browser-timeout` is an overall answer deadline, not a fresh
-budget for each reload/fallback. If Oracle fails to exit within that deadline
-plus the host grace, comprehensive mode persists the same attempt as
-`post_submit_watchdog_timeout` and returns attention-required. It does not kill,
-replace, restart, or resubmit the exact session; later continuation may only
-observe or recover that stored slug.
-
-`Prompt did not appear in conversation before timeout (send may have failed)`
-remains submission-uncertain by default. Exact recovery reporting no live tab
-and no saved conversation URL is still not enough to release ownership. Only
-after the user explicitly confirms that the exact attempt was not submitted may
-the maintenance owner run:
-
-```powershell
-python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_run.py" settle-no-submission --run-dir <exact-run-dir> --confirmation user-confirmed-no-submission --reason <concise-user-confirmation>
-```
-
-The command never launches Oracle. It requires hash-valid prompt-timeout or
-pre-send app-route-rejection evidence plus exact recovery evidence, writes a
-workflow/stage/attempt/input-bound settlement, and lets comprehensive mode
-consume at most one replacement for that immutable
-binding. Missing or changed evidence restores fail-closed project ownership;
-a replacement failure never authorizes a second submission.
-
-To retire an abandoned stage-zero Comprehensive workflow, first settle every
-exact Oracle attempt as above, then use the unchanged old manifest and its exact
-SHA-256. The workflow-bound confirmation token and a nonempty operator reason
-are mandatory:
-
-```powershell
-$manifest = 'C:\project\workflow.json'
-$sha = (Get-FileHash -Algorithm SHA256 $manifest).Hash.ToLowerInvariant()
-python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_comprehensive.py" `
-  --manifest $manifest --expected-manifest-sha256 $sha --retire-workflow `
-  --retirement-confirmation 'retire-comprehensive-workflow:<workflow_id>' `
-  --retirement-reason 'user authorized an exact replacement workflow'
-```
-
-Retirement is maintenance, not scientific completion. It succeeds only for the
-exact attention-required stage-zero authority when every workflow-bound run is
-ledgered and still proves user-confirmed pre-submit non-submission. It writes an
-immutable retirement receipt, releases the scope for a different workflow ID,
-and permanently prevents the retired ID from reclaiming that scope. Any extra,
-submitted, live, terminal, changed, or unledgered run remains fail-closed.
-
-Existing v1-v4 agbrowse comprehensive state and v3 parallel implementation are
-legacy recovery-only. Their files remain installed for exact recovery but are
-not the new-work route.
+Completion requires the final web verdict, exact durable outputs and receipts,
+and one zero-exit deterministic local gate. No dry-run, fixture, or lower-level
+API substitutes for an approved representative live flow.

@@ -1,7 +1,0 @@
-{
-  "schema": "codexpro.web-multi.app-trace-incident/v1",
-  "planner_version": "v8",
-  "state": "quiescent",
-  "incident": "an installed-only recovery trace reports no active utility command; it cannot authorize a new planner, child, or provider send.",
-  "expected_recovery": "resume only the exact persisted parent/child/session/target/canonical URL tuple or fail closed."
-}

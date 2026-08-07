@@ -25,7 +25,7 @@ DEFAULT_PORT = 7676
 APP_NAME = "DevSpace"
 AUTOSTART_NAME = "DevSpace MCP Server"
 AUTOSTART_REG_KEY = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
-DEVSPACE_PACKAGE = "@waishnav/devspace@1.0.5"
+DEVSPACE_PACKAGE = "@waishnav/devspace@1.0.6"
 SECRET_PATTERN = re.compile(r"(?i)(password|token|secret|authorization)\s*([:=])\s*[^\s,;]+")
 HOSTNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.-]*\.ts\.net$", re.IGNORECASE)
 

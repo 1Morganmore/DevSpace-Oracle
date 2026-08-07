@@ -222,7 +222,7 @@ def _child_manifest(config: dict[str, Any], lane: dict[str, Any], parent_id: str
             "mode": "browser",
             "model": config["model"],
             "model_strategy": "select",
-            "thinking_time": "heavy",
+            "thinking_time": "extra-high",
             "copy_profile": str(config["copy_profile"]),
             "research": "off",
             "archive": "auto",

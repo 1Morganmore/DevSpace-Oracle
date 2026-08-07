@@ -1,7 +1,0 @@
-{
-  "schema": "codexpro.web-multi.app-trace-incident/v1",
-  "planner_version": "v7",
-  "state": "quiescent",
-  "incident": "app utility target was quiescent after a failed inspection; it is not a recovered planner answer or send authority.",
-  "expected_recovery": "preserve the parent lock, retain immutable evidence, and use only the recorded child identity."
-}

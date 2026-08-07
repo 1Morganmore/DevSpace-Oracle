@@ -199,7 +199,10 @@ def test_allowed_roots_reject_home_ancestors_and_sensitive_roots(project_tmp_pat
     assert home_ancestor['ok'] is False
     assert home_ancestor['error'] == 'configured allowed root is too broad or sensitive'
     assert sensitive_root['ok'] is False
-    assert sensitive_root['error'] == 'configured allowed root is too broad or sensitive'
+    assert sensitive_root['error'] in {
+        'configured allowed root is too broad or sensitive',
+        'configured allowed root is not a directory',  # linked worktree .git file
+    }
 
 
 def test_allowed_roots_reject_nested_sensitive_custom_state_and_programdata(project_tmp_path: Path) -> None:

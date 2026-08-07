@@ -35,7 +35,7 @@ def test_regular_and_deep_research_compile_to_oracle_without_attachments(tmp_pat
         assert value["task_outcome_contract"] == "v1"
         assert value["model"] == "gpt-5.6"
         assert value["model_strategy"] == "select"
-        assert value["thinking_time"] == "heavy"
+        assert value["thinking_time"] == "extra-high"
         assert value["research"] == research
         assert value["mission_sha256"] == module.RUNNER.STATE.sha256_file(mission)
         assert "project_context_manifest_path" not in value
@@ -62,6 +62,7 @@ def test_pro_compiles_attachment_only_oracle_and_manual_never_launches(tmp_path:
     assert pro["contract"]["route"] == "oracle-pro-attachment-only"
     assert value["transport"] == "pro-attachment-only"
     assert value["model"] == "gpt-5.5-pro"
+    assert value["thinking_time"] == "heavy"
     assert value["mission_sha256"] == module.RUNNER.STATE.sha256_file(prompt)
     assert value["attachments"] == [str(prompt.resolve()), str(packet.resolve())]
     assert value["attachment_sha256s"] == [

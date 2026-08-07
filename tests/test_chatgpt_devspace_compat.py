@@ -33,7 +33,7 @@ def test_exact_devspace_patch_is_hash_gated_idempotent_and_backed_up(
     compat = load_compat()
     package = tmp_path / "package"
     package.mkdir()
-    (package / "package.json").write_text(json.dumps({"version": "1.0.5"}), encoding="utf-8")
+    (package / "package.json").write_text(json.dumps({"version": "1.0.6"}), encoding="utf-8")
     target = package / "sample.txt"
     target.write_bytes(b"before\n")
     patches = tmp_path / "patches"
@@ -89,7 +89,7 @@ def test_compatibility_inspection_requires_patched_exact_listener_without_writin
     compat = load_compat()
     package = tmp_path / "package"
     package.mkdir()
-    (package / "package.json").write_text(json.dumps({"version": "1.0.5"}), encoding="utf-8")
+    (package / "package.json").write_text(json.dumps({"version": "1.0.6"}), encoding="utf-8")
     target = package / "sample.txt"
     target.write_bytes(b"after\n")
     compat.PATCHES = {
@@ -140,7 +140,7 @@ def test_restart_confirmation_rejects_old_or_foreign_listener(
     compat = load_compat()
     package = tmp_path / "package"
     package.mkdir()
-    (package / "package.json").write_text(json.dumps({"version": "1.0.5"}), encoding="utf-8")
+    (package / "package.json").write_text(json.dumps({"version": "1.0.6"}), encoding="utf-8")
     (package / "sample.txt").write_bytes(b"after\n")
     compat.PATCHES = {
         "sample.txt": {
@@ -233,7 +233,7 @@ def test_unknown_devspace_version_or_file_hash_fails_closed(tmp_path: Path) -> N
         compat.ensure_devspace_compatibility(package_root=package)
     assert version.value.code == "DEVSPACE_VERSION_UNVALIDATED"
 
-    (package / "package.json").write_text(json.dumps({"version": "1.0.5"}), encoding="utf-8")
+    (package / "package.json").write_text(json.dumps({"version": "1.0.6"}), encoding="utf-8")
     (package / "sample.txt").write_bytes(b"unknown\n")
     compat.PATCHES = {
         "sample.txt": {
@@ -264,12 +264,12 @@ def test_bounded_workspace_patch_skips_transient_trees_and_batches_discovery() -
     )
 
     assert parsed.returncode == 0, parsed.stderr
-    assert compat.SUPPORTED_VERSION == "1.0.5"
+    assert compat.SUPPORTED_VERSION == "1.0.6"
     assert compat.PATCHES["dist/workspaces.js"]["pristine"] == (
-        "1c0556b8acc77d5811488212eaf3029eb2f622833dc69c18cf9db9eb6bafc761"
+        "0da528d01555ab3cda0ddc71b749ff30db74497165fffb78e36ca84c97c38d8f"
     )
     assert compat.PATCHES["dist/workspaces.js"]["patched"] == (
-        "72866ba652bb0a5846128b4f5cd5c69d9de0985eb26b88c137d8f734c2aa2fb1"
+        "6f2610f22bb678ab768dde9ab4558296f65bf8cbcc247aa9a9d03b4133fab21d"
     )
     assert 'entry.name.startsWith(".pytest-")' in patch
     assert '".tmp"' in patch
@@ -296,10 +296,10 @@ def test_oauth_discovery_patch_exposes_chatgpt_path_specific_metadata() -> None:
 
     assert parsed.returncode == 0, parsed.stderr
     assert compat.PATCHES["dist/server.js"]["pristine"] == (
-        "cdb68230d3a190b213678c39eda0ec7ba021ed2e7e141738a13b92eb3c155966"
+        "84cd96ad4a021abd29dc028c0fb74acce17ab92a4a653d033d5dd830630c2096"
     )
     assert compat.PATCHES["dist/server.js"]["patched"] == (
-        "0c3e3f71654cd2dd3a52a19d4fec1f2942f5ead0e8a638ab90a33af918629a7e"
+        "fbe241bc6ef1c91e9aa4866637d9b3890de20adef30fd4d5d0920bf5306e5f1b"
     )
     assert 'req.path === "/.well-known/oauth-authorization-server/mcp"' in patch
     assert 'req.url = "/.well-known/oauth-authorization-server"' in patch

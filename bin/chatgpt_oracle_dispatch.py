@@ -60,7 +60,7 @@ def compile_manifest(
         "transport": "pro-attachment-only" if contract["mode"] == "pro" else "devspace",
         "model": contract.get("model") or "gpt-5.6",
         "model_strategy": "select",
-        "thinking_time": "heavy",
+        "thinking_time": "heavy" if is_pro else "extra-high",
         "research": "deep" if contract["research"] else "off",
         "archive": "auto",
     }

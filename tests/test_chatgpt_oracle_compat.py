@@ -809,44 +809,34 @@ def test_exact_app_suggestion_with_wrong_semantic_decorator_fails_before_send(
     assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
 
 
-def test_oracle_0170_has_the_exact_eight_hash_gated_compatibility_patches() -> None:
+def test_oracle_0171_has_the_exact_seven_hash_gated_compatibility_patches() -> None:
     compat = load_compat()
-    contracts = compat.VERSION_PATCHES["0.17.0"]
+    contracts = compat.VERSION_PATCHES["0.17.1"]
 
-    assert compat.SUPPORTED_VERSION == "0.17.0"
-    assert compat.RECOVERABLE_VERSIONS == ("0.16.1", "0.17.0")
+    assert compat.SUPPORTED_VERSION == "0.17.1"
+    assert compat.RECOVERABLE_VERSIONS == ("0.16.1", "0.17.0", "0.17.1")
     assert "dist/src/browser/actions/modelSelection.js" not in contracts
+    assert "dist/src/browser/actions/thinkingTime.js" not in contracts
     assert {
         path: (contract["pristine"], contract["patched"])
         for path, contract in contracts.items()
     } == {
-        "dist/src/browser/chromeLifecycle.js": ("55e9858f54fb625dbe349b64837be511694ec018074db66e1cca161f5d47182d", "d2d4842f11aff03ffe6f19840443ccf4cd02167334eb0cf9f67a5f78ef4e780c"),
+        "dist/src/browser/chromeLifecycle.js": ("312b45c44d4cd69a3a057e7bd1584b58182b4b37bc88f6ce6c7d11e216267c81", "61440e467d51031efb7bfc319aef05de7c9061585e5eec148d0e353938eb2093"),
         "dist/src/browser/recoverConversation.js": ("d7e39d21acf07e6d227e761944519e11cd8d93930629cc87555d7de75a42d1ca", "cc2a036f6e2409ae7edceee1f381a5062cd6cc5cd1618af465a1b384081ed69e"),
         "dist/src/browser/profileCopy.js": ("06c692861f8a4c1a8769f957b9c582426a13bf4972262c47c1f24a87b239064f", "71459a25b7c46f57bae6f23a5498301f6f6a1d39addf0c1cd4eee1d99b03372c"),
         "dist/src/cli/browserConfig.js": ("989f14399c8aa51913752306135e11d97e4f1c55b2baf984907f1b54959cc340", "bd18d11e4770fa5335c889b7856622f2da4199351ec65bc17a5ec1f472e2506f"),
         "dist/src/browser/index.js": ("335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11", "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895"),
         "dist/src/browser/actions/assistantResponse.js": ("0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d", "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4"),
         "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f"),
-        "dist/src/browser/actions/thinkingTime.js": ("9d0c8ae34d72c6ab5ca4176ba2ac2b8431fbb93d6d4e73c0cc02f5d2eb8863b7", "7d475ed81ccee29a5b4107ed166584bcd3b0266bfd25e02ca7743bf24301e7f0"),
     }
 
     patches = {
-        path: (compat.patch_root("0.17.0") / contract["patch"]).read_text(encoding="utf-8")
+        path: (compat.patch_root("0.17.1") / contract["patch"]).read_text(encoding="utf-8")
         for path, contract in contracts.items()
     }
     assert 'process.platform === "win32"' in patches["dist/src/browser/profileCopy.js"]
     assert "options.browserManualLogin = false" in patches["dist/src/cli/browserConfig.js"]
     assert "config = { ...config, manualLogin: false" in patches["dist/src/browser/index.js"]
-    assert "+      return matchesLevel(label);" in patches["dist/src/browser/actions/thinkingTime.js"]
-    assert contracts["dist/src/browser/actions/promptComposer.js"]["legacy_patched"] == [
-        "02874d0f2fcd0f45c2c50385893a210e2be5822e1831fa81b99944728ed1cb79",
-        "99e4307ccdda8256e352d09b149f795ba0766584cd3fa838ea1adb22fd5b63ba",
-        "71769d77b50d2c66bf281a6d70a965eaa0d43bfd23aa7c0c6645d774f95604fa",
-        "7523e315eb6c6f29e5567a994084a39b73adf0adc1aecb013831885a3474e9b8",
-        "f34821a5c4ac51d55bf2da0e0b8c2a8a3b3cafd3b9b6b6010726f0b032a5ece8",
-        "8bba8fd9a663c4c404ccf479a0193672624c0e42afb3a3e04edf832a4d9820f6",
-        "4da4b078cfba5c239b4cae55a58f4c831a48edb72e66286b63f86d6c9aa86594",
-    ]
 
 
 def test_copy_profile_recovery_patch_reuses_only_the_persisted_profile_seed() -> None:

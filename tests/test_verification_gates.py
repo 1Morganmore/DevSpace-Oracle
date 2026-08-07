@@ -442,11 +442,11 @@ def test_ci_workflow_runs_the_fast_gate_and_golden_path_smoke() -> None:
     assert "scripts/run_golden_path_smoke.py" in workflow
     # The fast gate must run before the long suite so a broken launch contract
     # fails in seconds instead of minutes.
-    assert workflow.index("run_fast_gate.py") < workflow.index("run_v4_contract_tests.py --full")
+    assert workflow.index("run_fast_gate.py") < workflow.index("run_release_contract_tests.py --full")
 
 
-def test_v4_runner_uses_an_isolated_pytest_basetemp() -> None:
-    source = (SCRIPTS / "run_v4_contract_tests.py").read_text(encoding="utf-8")
+def test_release_runner_uses_an_isolated_pytest_basetemp() -> None:
+    source = (SCRIPTS / "run_release_contract_tests.py").read_text(encoding="utf-8")
 
     assert "TemporaryDirectory" in source
     assert '"--basetemp", basetemp' in source

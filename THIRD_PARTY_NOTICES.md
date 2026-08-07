@@ -1,31 +1,21 @@
 # Third-party notices
 
-This repository ships no copy of agbrowse, the Oracle package, DevSpace,
-Codex, CodexPro, browser binaries, or account data. It does ship narrow
-textual compatibility patches for the active hash-verified Oracle 0.17.0 and
-DevSpace 1.0.5 installations. Oracle 0.16.1 patch instructions remain only for
-exact recovery of already-persisted 0.16.1 runs; DevSpace 1.0.4 patch
-instructions remain historical packaging material and are not selected by the
-current setup path.
+This repository ships no copy of the Oracle package, DevSpace, Codex, browser
+binaries, or account data. It ships narrow textual compatibility patches for
+the active hash-verified Oracle 0.17.1 and DevSpace 1.0.6 npm distributions.
+Oracle 0.16.1 and 0.17.0 patch instructions remain only for exact recovery of
+runs persisted with those versions.
 
 - `hehee9/multi-gpt@4f5e130` is MIT-licensed. Its attribution and the recorded `server.mjs` hash must be preserved when its upstream-compatible integration is changed.
-- `agbrowse@0.1.18` is an external npm package retained only for recovery of
-  already-persisted legacy runs (metadata license: MIT; integrity:
-  `sha512-vO2E1XrqTAvkWeSyV1xzsONz+OBB3aDKbxIGVS7Z4pH42Hxg/mlcteIAzM+EuD4hnp6Tt5IJu/X2fjMOiftBCA==`).
-  It is not a new-submission engine. A root `LICENSE` file was missing from the
-  upstream GitHub checkout at packaging review; rely on published package
-  metadata and re-check before any redistribution. This project installs the
-  package externally and does not copy its source.
 - `@steipete/oracle` is an external MIT-licensed browser automation package.
-  The active tested version is 0.17.0. Version 0.16.1 is retained only to recover
-  an exact persisted run created with that version. Its package source is not
-  vendored. Files under `bin/oracle-compat/0.17.0` and
-  `bin/oracle-compat/0.16.1` are derivative patch instructions and retain the
+  The active tested version is 0.17.1. Versions 0.16.1 and 0.17.0 are retained
+  only to recover exact persisted runs. Its package source is not vendored.
+  Files under `bin/oracle-compat` are derivative patch instructions and retain the
   following upstream MIT notice.
 - `@waishnav/devspace` is an external MIT-licensed MCP workspace server. The
-  active tested version is 1.0.5. Setup resolves it externally; this repository
+  active tested version is 1.0.6. Setup resolves it externally; this repository
   does not vendor its source. The derivative patch instructions under
-  `bin/devspace-compat/1.0.5` and the retained historical `1.0.4` directory keep
+  `bin/devspace-compat/1.0.6` keeps
   the upstream MIT license. Only the active patch is applied, and only when
   both the package version and exact source hash match.
 

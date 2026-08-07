@@ -103,10 +103,10 @@ backpressure queue: four by default, configurable from 1 through 20 with
 - An Oracle browser profile signed in to ChatGPT
 - One manually registered DevSpace app in ChatGPT Developer Mode
 
-The validated combination is Oracle `0.17.0` and DevSpace `1.0.5`. The installer
+The validated combination is Oracle `0.17.1` and DevSpace `1.0.6`. The installer
 applies Windows compatibility patches only when exact upstream file hashes
-match. Oracle `0.16.1` is available only for exact recovery of runs already
-persisted with that version.
+match. Oracle `0.16.1` and `0.17.0` remain available only for exact recovery of
+runs already persisted with those versions.
 
 ## Install
 
@@ -243,24 +243,15 @@ state changes, and never recovers or resubmits.
 .\uninstall.ps1
 ```
 
-Use `-InstallLegacyRecoveryDependency` only on a machine that must recover an
-already persisted legacy run.
-
 ## Documentation
 
 - [Global ChatGPT routing and mode selection](docs/GLOBAL_CHATGPT_ROUTING.md)
 - [DevSpace and Tailscale setup](docs/DEVSPACE_TAILSCALE_SETUP.md)
 - [Technical changelog](docs/CHANGELOG.md)
-- [Frozen legacy recovery assets](docs/FROZEN_LEGACY.md)
+- [Differences from upstream](docs/VS_UPSTREAM.md)
 - [Release checklist](docs/RELEASE_CHECKLIST.md)
 - [Security policy](SECURITY.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
-
-## Legacy compatibility
-
-The former CodexPro and agbrowse files remain only for exact recovery of already
-persisted legacy runs. They are not a new-work route or fallback. See
-[Frozen legacy assets](docs/FROZEN_LEGACY.md) for the inventory.
 
 ## License
 

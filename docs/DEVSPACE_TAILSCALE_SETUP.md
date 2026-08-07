@@ -18,7 +18,7 @@ python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py setup 
 
 After reviewing the plan, use `--apply`. It invokes `devspace init` through Git Bash, then starts `devspace serve` and configures a Tailscale HTTPS Funnel to the local default port (7676). DevSpace asks you to select roots and enter the public origin. Enter exactly the reviewed roots and `https://your-device.your-tailnet.ts.net`, without `/mcp`.
 
-The helper pins DevSpace `1.0.5` and applies its exact hash-validated Windows
+The helper pins DevSpace `1.0.6` and applies its exact hash-validated Windows
 compatibility patch before starting the service.
 
 The helper will not overwrite an existing Funnel mapping. If port 443 is

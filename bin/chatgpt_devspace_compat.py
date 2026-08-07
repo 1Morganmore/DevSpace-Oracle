@@ -11,18 +11,18 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
-SUPPORTED_VERSION = "1.0.5"
+SUPPORTED_VERSION = "1.0.6"
 CREATE_NO_WINDOW = 0x08000000
 PATCHES = {
     "dist/server.js": {
         "patch": "server.patch",
-        "pristine": "cdb68230d3a190b213678c39eda0ec7ba021ed2e7e141738a13b92eb3c155966",
-        "patched": "0c3e3f71654cd2dd3a52a19d4fec1f2942f5ead0e8a638ab90a33af918629a7e",
+        "pristine": "84cd96ad4a021abd29dc028c0fb74acce17ab92a4a653d033d5dd830630c2096",
+        "patched": "fbe241bc6ef1c91e9aa4866637d9b3890de20adef30fd4d5d0920bf5306e5f1b",
     },
     "dist/workspaces.js": {
         "patch": "workspaces.patch",
-        "pristine": "1c0556b8acc77d5811488212eaf3029eb2f622833dc69c18cf9db9eb6bafc761",
-        "patched": "72866ba652bb0a5846128b4f5cd5c69d9de0985eb26b88c137d8f734c2aa2fb1",
+        "pristine": "0da528d01555ab3cda0ddc71b749ff30db74497165fffb78e36ca84c97c38d8f",
+        "patched": "6f2610f22bb678ab768dde9ab4558296f65bf8cbcc247aa9a9d03b4133fab21d",
     },
 }
 
@@ -480,7 +480,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Apply the exact DevSpace 1.0.5 ChatGPT compatibility patches."
+        description="Apply the exact DevSpace 1.0.6 ChatGPT compatibility patches."
     )
     parser.add_argument("--package-root", type=Path)
     parser.add_argument("--confirm-service-restarted", action="store_true")

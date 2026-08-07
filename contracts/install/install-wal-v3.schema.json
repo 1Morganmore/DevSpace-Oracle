@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codexpro.install-wal/v3",
+  "type": "object",
+  "required": ["schema", "transaction_id", "manifest_version", "status", "backup", "receipt", "wal_path", "files"],
+  "properties": {
+    "schema": {"const": "codexpro.install-wal/v3"},
+    "transaction_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "manifest_version": {"type": "string", "minLength": 1},
+    "status": {"enum": ["ACTIVE", "COMPLETE", "ROLLED_BACK_AFTER_CRASH", "ROLLED_BACK_AFTER_ERROR"]},
+    "backup": {"type": "string", "minLength": 1},
+    "receipt": {"type": "string", "minLength": 1},
+    "wal_path": {"type": "string", "minLength": 1},
+    "files": {"type": "array", "items": {"$ref": "#/$defs/file"}}
+  },
+  "$defs": {
+    "file": {
+      "type": "object",
+      "required": ["sequence_number", "path", "action", "phase", "transitions", "replacement"],
+      "properties": {
+        "sequence_number": {"type": "integer", "minimum": 0},
+        "path": {"type": "string", "minLength": 1},
+        "action": {"enum": ["created", "overwritten", "removed"]},
+        "installed_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "expected_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "backup": {"type": "string", "minLength": 1},
+        "backup_sha256": {"type": ["string", "null"]},
+        "expected_absence": {"type": "boolean"},
+        "transaction_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+        "rollback_binding": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+        "phase": {"enum": ["INTENT", "BACKUP_DURABLE", "MUTATED", "VERIFIED", "REPLACEMENT_RECEIPT_DURABLE", "COMPLETE"]},
+        "transitions": {"type": "array"},
+        "replacement": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": true
+    }
+  }
+}

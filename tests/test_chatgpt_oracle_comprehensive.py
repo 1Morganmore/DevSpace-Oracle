@@ -251,7 +251,7 @@ def test_web_authored_relay_reaches_complete_without_host_semantic_rewrite(tmp_p
         assert kwargs["expected_manifest_sha256"] == module.sha(path)
         config = json.loads(path.read_text(encoding="utf-8"))
         assert config["model_strategy"] == "select"
-        assert config["thinking_time"] == "heavy"
+        assert config["thinking_time"] == "extra-high"
         mission = Path(config["mission_path"])
         text = mission.read_text(encoding="utf-8")
         stage = next(item for item in order if f"stage={item}\n" in text)

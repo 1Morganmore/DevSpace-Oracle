@@ -22,8 +22,7 @@ preserve unrelated local customizations.
    - regular modes, Deep Research, comprehensive stages, and Web Multi use
      Oracle plus the manually registered DevSpace app;
    - Pro uses Oracle attachment-only and no app;
-   - CodexPro/agbrowse may be used only for exact recovery of an already
-     persisted legacy run and never as a fallback.
+   - no alternate browser backend is a fallback.
 4. Prefer small compatibility changes over wholesale replacement. Preserve
    local ports, names, roots, tokens, routing, and hooks unless the task
    explicitly changes them.
@@ -61,8 +60,7 @@ instead of the layer that failed.
   duplicate user-visible work.
 - Do not silently switch Oracle model, reasoning level, transport, or browser
   backend.
-- Do not create a new legacy agbrowse/CodexPro run while repairing recovery
-  code.
+- Do not create a replacement run while repairing recovery code.
 - Stop and report exact dirty files when authoritative persistence, push, or CI
   cannot be completed.
 

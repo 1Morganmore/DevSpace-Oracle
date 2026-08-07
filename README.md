@@ -99,7 +99,7 @@ SHA-256을 하위 프로세스 시작 전에 검사합니다. 작업 상태는 �
 - 브라우저에서 ChatGPT에 로그인된 Oracle 프로필
 - ChatGPT Developer Mode에 최초 한 번 수동 등록한 DevSpace 앱
 
-현재 검증된 조합은 Oracle `0.17.0`과 DevSpace `1.0.5`입니다. 설치기는
+현재 검증된 조합은 Oracle `0.17.1`과 DevSpace `1.0.6`입니다. 설치기는
 정확한 파일 해시가 일치할 때만 Windows 호환 패치를 적용합니다. Oracle
 `0.16.1`은 이미 저장된 해당 버전 실행의 정확한 복구에만 사용할 수 있습니다.
 
@@ -235,25 +235,15 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_diagnose.py" watch --run-dir 
 .\uninstall.ps1
 ```
 
-기존에 저장된 구형 실행을 복구해야 하는 컴퓨터에서만
-`-InstallLegacyRecoveryDependency`를 사용합니다.
-
 ## 문서
 
 - [전역 ChatGPT 라우팅과 모드 선택](docs/GLOBAL_CHATGPT_ROUTING.md)
 - [DevSpace + Tailscale 최초 설정](docs/DEVSPACE_TAILSCALE_SETUP.md)
 - [기술 변경 기록](docs/CHANGELOG.md)
-- [구형 실행 복구용 동결 자산](docs/FROZEN_LEGACY.md)
+- [Upstream 대비 변경점](docs/VS_UPSTREAM.md)
 - [릴리스 검증 절차](docs/RELEASE_CHECKLIST.md)
 - [보안 정책](SECURITY.md)
 - [제3자 라이선스](THIRD_PARTY_NOTICES.md)
-
-## 레거시 호환
-
-과거 CodexPro·agbrowse 기반 실행 파일은 이미 저장된 구형 작업을 원래
-실행 신원으로 정확히 복구하기 위해서만 남아 있습니다. 새 작업의 실행 경로나 fallback으로 사용하지
-않습니다. 상세 파일 목록은 [동결 자산 문서](docs/FROZEN_LEGACY.md)에
-분리했습니다.
 
 ## 라이선스
 

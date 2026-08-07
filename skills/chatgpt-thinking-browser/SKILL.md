@@ -1,6 +1,6 @@
 ---
 name: chatgpt-thinking-browser
-description: Run new regular ChatGPT direct, plan, review, edit, and orchestrator work through Oracle plus the manually registered DevSpace workspace app; use legacy agbrowse only to recover an exact persisted old run.
+description: Run regular ChatGPT direct, plan, review, edit, and orchestrator work through Oracle plus the manually registered DevSpace workspace app.
 ---
 
 # Regular ChatGPT through Oracle + DevSpace
@@ -19,9 +19,9 @@ For an explicitly authorized live web run, replace `--dry-run` with
 hash from that preview. The runtime
 sends plain `@DevSpace` plus the absolute mission path. It never attaches files,
 opens ChatGPT settings, inspects/selects/deletes an app, or falls back to
-agbrowse, Playwright, in-app Browser, or Chrome.
+another backend, Playwright, in-app Browser, or Chrome.
 
-New runs pin Oracle `0.17.0`. Oracle `0.16.1` is available only for exact
+New runs pin Oracle `0.17.1`. Oracle `0.16.1` and `0.17.0` are available only for exact
 recovery of a run already persisted with that version.
 
 `orchestrator` is a single web submission that carries the orchestrator
@@ -42,11 +42,10 @@ deterministic local gate.
 Web Multi participates only when explicitly selected. Do not transition a
 regular or failed run into Web Multi automatically.
 
-CodexPro is frozen for new work. Never mention it in a new mission, probe its
-endpoint, repair/register/delete its app, or use it as a DevSpace fallback.
+Never probe, register, repair, or select an alternate app or backend.
 
 Oracle explicitly selects `GPT-5.6 Sol` and `heavy`, verifies the visible
-`Extra High` tier, and records both in Oracle evidence. The active 0.17.0
+`Extra High` tier, and records both in Oracle evidence. The active 0.17.1
 compatibility layer is hash-gated and fails closed on an unknown version or
 third-party file. Never invent xhigh or silently downgrade.
 
@@ -71,7 +70,3 @@ conversation. Session authority is monotonic: a later `running` observation
 cannot downgrade `terminal_observed`. That disagreement remains
 attention-required with the same project lock; a later exact terminal harvest
 with fresh nonempty output settles it to COMPLETE.
-
-For an already persisted agbrowse run only, use its exact legacy
-`chatgpt_agbrowse_run.py --observe-run|--recover-run <run-dir>` command. Do not
-create a new agbrowse run.
