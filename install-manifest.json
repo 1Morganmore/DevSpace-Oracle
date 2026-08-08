@@ -31,6 +31,7 @@
     "bin/oracle-compat/0.17.1/chromeLifecycle.patch",
     "bin/oracle-compat/0.17.1/profileCopy.patch",
     "bin/oracle-compat/0.17.1/promptComposer.patch",
+    "bin/oracle-compat/0.17.1/promptComposer.pre-split-trigger.patch",
     "bin/oracle-compat/0.17.1/recoverConversation.patch",
     "bin/oracle-compat/0.17.1/thinkingTime.extra-high-fail-closed.patch",
     "bin/oracle-compat/0.17.1/thinkingTime.pro-heavy-upgrade.patch",

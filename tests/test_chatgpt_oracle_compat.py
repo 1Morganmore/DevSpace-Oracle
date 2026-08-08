@@ -48,6 +48,7 @@ def run_prompt_route_case(
     pill_editable: bool = False,
     suggestion_case: str = "option",
     diagnostic_stop_before_send: bool = False,
+    trigger_split: bool = False,
 ) -> tuple[dict[str, object], str]:
     compat = load_compat()
     relative = Path("dist/src/browser/actions/promptComposer.js")
@@ -56,7 +57,7 @@ def run_prompt_route_case(
     target = package / relative
     target.parent.mkdir(parents=True)
     shutil.copy2(pristine, target)
-    compat._apply_patch(package, compat.patch_root("0.17.0") / "promptComposer.patch")
+    compat._apply_patch(package, compat.patch_root("0.17.1") / "promptComposer.patch")
     source = target.read_text(encoding="utf-8")
     source = source[source.index("const ENTER_KEY_EVENT") :]
     if diagnostic_stop_before_send:
@@ -107,6 +108,7 @@ class BrowserAutomationError extends Error {
             "pillIconVisible": pill_icon_visible,
             "pillEditable": pill_editable,
             "suggestionCase": suggestion_case,
+            "triggerSplit": trigger_split,
         }
     )
     harness = f"""
@@ -122,6 +124,7 @@ let suggestionObserved = false;
 let initialRouteConfirmed = false;
 let finalRouteConfirmed = false;
 let routeChecks = 0;
+let atTriggered = false;
 const inserted = [];
 
 class FakeNode {{
@@ -254,7 +257,10 @@ composer.parentElement = form;
 const document = {{
   activeElement: composer,
   querySelectorAll(selector) {{
-    if (selector.includes('[role="option"]')) return suggestionSurfaces;
+    if (selector.includes('[role="option"]')) {{
+      if (scenario.triggerSplit && !atTriggered) return [];
+      return suggestionSurfaces;
+    }}
     if (selector.includes('#prompt-textarea')) return [composer];
     return [];
   }},
@@ -313,7 +319,10 @@ const runtime = {{
   }},
 }};
 const input = {{
-  async insertText({{ text }}) {{ inserted.push(text); }},
+  async insertText({{ text }}) {{
+    inserted.push(text);
+    if (scenario.triggerSplit && text === '@') atTriggered = true;
+  }},
   async dispatchKeyEvent() {{}},
 }};
 let error = null;
@@ -767,6 +776,60 @@ def test_fresh_lf_install_applies_final_strict_patch(tmp_path: Path, monkeypatch
     )["ready"] is True
 
 
+def test_old_prompt_composer_level_migrates_to_split_trigger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The previously shipped one-shot mention patch (a3882c78...) must migrate
+    # to the split `@`-trigger level via the preserved legacy patch, from both
+    # LF and CRLF deployments, while unknown bytes fail closed.
+    compat = load_compat()
+    relative = "dist/src/browser/actions/promptComposer.js"
+    patches = compat.patch_root("0.17.1")
+    contract = compat.VERSION_PATCHES["0.17.1"][relative]
+    monkeypatch.setattr(compat, "VERSION_PATCHES", {"0.17.1": {relative: contract}})
+
+    package = tmp_path / "package"
+    target = package / Path(relative)
+    target.parent.mkdir(parents=True)
+    (package / "package.json").write_text('{"version":"0.17.1"}', encoding="utf-8")
+    target.write_bytes(PRISTINE_PROMPT_COMPOSER.read_bytes())
+    compat._apply_patch(package, patches / "promptComposer.pre-split-trigger.patch")
+    era_bytes = target.read_bytes()
+    assert digest(era_bytes) == (
+        "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f"
+    )
+
+    backup = tmp_path / "backup"
+    for label, legacy_bytes in (
+        ("era-lf", era_bytes),
+        ("era-crlf", era_bytes.replace(b"\n", b"\r\n")),
+    ):
+        instance = tmp_path / f"package-{label}"
+        instance_target = instance / Path(relative)
+        instance_target.parent.mkdir(parents=True)
+        (instance / "package.json").write_text('{"version":"0.17.1"}', encoding="utf-8")
+        instance_target.write_bytes(legacy_bytes)
+        result = compat.ensure_oracle_compatibility(
+            "oracle 0.17.1", package_root=instance, backup_root=backup
+        )
+        assert result["changed"] == [relative]
+        assert compat.sha256_file(instance_target) == contract["patched"] == (
+            "bb85c6f09f23c4e0c9093bd472c83b17b1ef7325bcd89a3348429610eeefbd74"
+        )
+        assert compat.sha256_file(backup / Path(relative)) == contract["pristine"]
+
+    unknown = tmp_path / "package-unknown"
+    unknown_target = unknown / Path(relative)
+    unknown_target.parent.mkdir(parents=True)
+    (unknown / "package.json").write_text('{"version":"0.17.1"}', encoding="utf-8")
+    unknown_target.write_bytes(era_bytes + b"// drift\n")
+    with pytest.raises(compat.OracleCompatError) as mismatch:
+        compat.ensure_oracle_compatibility(
+            "oracle 0.17.1", package_root=unknown, backup_root=backup
+        )
+    assert mismatch.value.code == "ORACLE_FILE_HASH_MISMATCH"
+
+
 def test_prompt_composer_patch_applies_to_pristine_0170_and_is_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -821,7 +884,7 @@ def test_exact_semantic_devspace_token_proceeds_when_transient_ui_is_absent(
     assert result["error"] is None
     assert result["result"] == 1
     assert result["sendAttempts"] == 1
-    assert result["inserted"] == ["@DevSpace", " mission"]
+    assert result["inserted"] == ["@", "DevSpace", " mission"]
     assert "APP_MENTION_ROUTE_UNCONFIRMED" not in stderr
 
 
@@ -898,6 +961,50 @@ def test_group_suggestion_resolver_refuses_non_authoritative_candidates_before_s
 
     assert result["suggestionClicks"] == 0
     assert result["sendAttempts"] == 0
+    assert result["error"]["code"] == "APP_MENTION_ROUTE_UNCONFIRMED"
+    assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
+
+
+def test_split_mention_trigger_opens_suggestion_before_app_name(tmp_path: Path) -> None:
+    # ChatGPT is expected to open the app picker on a bare `@` trigger as its
+    # own browser input event.  The one-shot path must split the mention:
+    # insert '@', one bounded settle, then the app name, so the picker can
+    # open before app-name filtering narrows the results.
+    result, stderr = run_prompt_route_case(
+        tmp_path,
+        suggestion="DevSpace",
+        semantic_token="DevSpace",
+        semantic_identity_attr=None,
+        semantic_layout="pill",
+        suggestion_case="group",
+        trigger_split=True,
+    )
+
+    assert result["error"] is None
+    assert result["inserted"] == ["@", "DevSpace", " mission"]
+    assert result["suggestionObserved"] is True
+    assert result["suggestionClicks"] == 1
+    assert result["initialRouteConfirmed"] is True
+    assert result["finalRouteConfirmed"] is True
+    assert result["routeChecks"] == 2
+    assert result["sendAttempts"] == 1
+    assert "APP_MENTION_ROUTE_UNCONFIRMED" not in stderr
+
+
+def test_split_mention_trigger_without_surface_fails_closed(tmp_path: Path) -> None:
+    # With no suggestion surface at all (e.g. the app is not selectable in
+    # the account), the split trigger must keep the exact fail-closed path:
+    # no click, no send, APP_MENTION_ROUTE_UNCONFIRMED before submission.
+    result, stderr = run_prompt_route_case(
+        tmp_path,
+        suggestion=None,
+        semantic_token=None,
+        trigger_split=True,
+    )
+
+    assert result["suggestionClicks"] == 0
+    assert result["sendAttempts"] == 0
+    assert result["clearCount"] == 2
     assert result["error"]["code"] == "APP_MENTION_ROUTE_UNCONFIRMED"
     assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
 
@@ -1069,7 +1176,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "dist/src/cli/browserConfig.js": ("989f14399c8aa51913752306135e11d97e4f1c55b2baf984907f1b54959cc340", "bd18d11e4770fa5335c889b7856622f2da4199351ec65bc17a5ec1f472e2506f"),
         "dist/src/browser/index.js": ("335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11", "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895"),
         "dist/src/browser/actions/assistantResponse.js": ("0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d", "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4"),
-        "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f"),
+        "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "bb85c6f09f23c4e0c9093bd472c83b17b1ef7325bcd89a3348429610eeefbd74"),
         "dist/src/browser/actions/thinkingTime.js": ("508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca", "3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3"),
     }
 
@@ -1120,6 +1227,16 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "thinkingTime.strict.pre-advanced-view-sibling.patch"
     )
     assert "536571fccc3f8137bfbf0ea96dfd827f1eabdaf92f93fe7cff92af242ef01d53" not in thinking["legacy_patches"]
+    composer = contracts["dist/src/browser/actions/promptComposer.js"]
+    assert composer["legacy_patched"] == [
+        "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f",
+    ]
+    assert composer["legacy_patch"] == "promptComposer.pre-split-trigger.patch"
+    assert "await input.insertText({ text: \"@\" })" in patches["dist/src/browser/actions/promptComposer.js"]
+    assert "await delay(250)" in patches["dist/src/browser/actions/promptComposer.js"]
+    assert "await input.insertText({ text: appName })" in patches["dist/src/browser/actions/promptComposer.js"]
+    assert "mentionSurfaceDeadline" not in patches["dist/src/browser/actions/promptComposer.js"]
+    assert "atMentionSurfaceProbe" not in patches["dist/src/browser/actions/promptComposer.js"]
     for patch_name in {
         "thinkingTime.strict.patch",
         "thinkingTime.strict.pre-power.patch",
@@ -1136,6 +1253,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "thinkingTime.strict.pre-advanced-view-sibling.patch",
         "thinkingTime.extra-high-fail-closed.patch",
         "thinkingTime.pro-heavy-upgrade.patch",
+        "promptComposer.pre-split-trigger.patch",
     }:
         assert (compat.patch_root("0.17.1") / patch_name).is_file(), patch_name
 

@@ -1,8 +1,8 @@
 diff --git a/dist/src/browser/actions/promptComposer.js b/dist/src/browser/actions/promptComposer.js
-index c643386..6a3e0fc 100644
+index c643386..d059f46 100644
 --- a/dist/src/browser/actions/promptComposer.js
 +++ b/dist/src/browser/actions/promptComposer.js
-@@ -14,6 +14,10 @@
+@@ -14,6 +14,10 @@ const ENTER_KEY_TEXT = "\r";
  export async function submitPrompt(deps, prompt, logger) {
      const { runtime, input } = deps;
      await waitForDomReady(runtime, logger, deps.inputTimeoutMs ?? undefined);
@@ -13,7 +13,7 @@ index c643386..6a3e0fc 100644
      const encodedPrompt = JSON.stringify(prompt);
      const focusResult = await runtime.evaluate({
          expression: `(() => {
-@@ -67,7 +71,301 @@
+@@ -67,7 +71,292 @@ export async function submitPrompt(deps, prompt, logger) {
          await logDomFailure(runtime, logger, "focus-textarea");
          throw new Error("Failed to focus prompt textarea");
      }
@@ -59,16 +59,7 @@ index c643386..6a3e0fc 100644
 +    if (mentionMatch) {
 +        const appName = mentionMatch[1].slice(1);
 +        routedAppName = appName;
-+        await input.insertText({ text: "@" });
-+        // ChatGPT is expected to open the app picker on the bare `@` trigger
-+        // as its own browser input event; a single `@App` insert can leave
-+        // literal text with no suggestion UI (live-observed).  The split is
-+        // the smallest evidence-backed hypothesis for that failure, so give
-+        // the picker one bounded settle before typing the app name.  The
-+        // exact discovery/click and semantic-pill guards below stay the
-+        // authoritative gates and remain fail-closed.
-+        await delay(250);
-+        await input.insertText({ text: appName });
++        await input.insertText({ text: mentionMatch[1] });
 +        // Discovery and click must resolve the same unique suggestion. Current
 +        // ChatGPT app results use a role=group wrapper whose exact action is a
 +        // nested span, so never widen discovery beyond the click authority.
@@ -316,11 +307,10 @@ index c643386..6a3e0fc 100644
      // Some pages (notably ChatGPT when subscriptions/widgets load) need a brief settle
      // before the send button becomes enabled; give it a short breather to avoid races.
      await delay(500);
-@@ -166,6 +464,57 @@
-             promptLength,
+@@ -167,4 +456,55 @@ export async function submitPrompt(deps, prompt, logger) {
              observedLength,
          });
-+    }
+     }
 +    // The empty-readback fallback can replace Lexical content with literal
 +    // text. Revalidate the semantic token after every possible composer
 +    // mutation and immediately before either send-button or Enter submission.
@@ -371,6 +361,5 @@ index c643386..6a3e0fc 100644
 +                appName: routedAppName,
 +            });
 +        }
-     }
++    }
      const clicked = await attemptSendButton(runtime, input, logger, deps?.attachmentNames, deps?.attachmentTimeoutMs);
-     if (!clicked) {
