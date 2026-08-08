@@ -5,14 +5,19 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
+
+# Exact latest audited parent-project donor commit (see docs/VS_UPSTREAM.md).
+PARENT_DONOR = "9542abeef6aa544f4ee6af03bab61cef3474f9e4"
+PARENT_REPOSITORY = "ventianima-lab/codexpro-automation"
+PARENT_VENDOR_REF = "vendor/codexpro-main"
 
 
 def fetch(url: str) -> Any:
@@ -40,6 +45,76 @@ def latest_tag(repository: str) -> str:
         if not values:
             raise ValueError(f"no release or tag for {repository}")
         return str(values[0]["name"])
+
+
+def default_branch_head(repository: str) -> str:
+    value = fetch(f"https://api.github.com/repos/{repository}")
+    branch = str(value["default_branch"])
+    head = fetch(f"https://api.github.com/repos/{repository}/commits/{urllib.parse.quote(branch, safe='')}")
+    return str(head["sha"])
+
+
+def run_git(*args: str) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(ROOT), *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip()
+
+
+def check_parent() -> dict[str, Any]:
+    """Read-only advisory report against the parent project.
+
+    Never fetches or mutates the local repository: the vendored ref, merge
+    base, and ahead/behind counts are computed from the refs already present
+    locally, and the live parent HEAD comes from the GitHub API.
+    """
+    vendored = run_git("rev-parse", "--verify", PARENT_VENDOR_REF)
+    merge_base = run_git("merge-base", "HEAD", PARENT_VENDOR_REF) if vendored else None
+    counts = run_git("rev-list", "--left-right", "--count", "HEAD...%s" % PARENT_VENDOR_REF) if vendored else None
+    ahead: int | None = None
+    behind: int | None = None
+    if counts and " " in counts:
+        parts = counts.split()
+        try:
+            ahead, behind = int(parts[0]), int(parts[1])
+        except (IndexError, ValueError):
+            ahead = behind = None
+    flags: list[str] = []
+    live_head: str | None = None
+    try:
+        live_head = default_branch_head(PARENT_REPOSITORY)
+    except Exception as exc:  # advisory checker must keep the rest of the report
+        flags.append(f"PARENT_HEAD_UNREACHABLE: {type(exc).__name__}")
+    if vendored is None:
+        flags.append("PARENT_VENDOR_REF_ABSENT")
+    elif live_head and vendored != live_head:
+        flags.append("PARENT_VENDOR_REF_STALE")
+    if merge_base is None:
+        flags.append("PARENT_MERGE_BASE_UNAVAILABLE")
+    return {
+        "name": "parent",
+        "repository": PARENT_REPOSITORY,
+        "audited_donor": PARENT_DONOR,
+        "live_parent_head": live_head,
+        "vendored_parent_ref": PARENT_VENDOR_REF,
+        "vendored_parent_head": vendored,
+        "merge_base": merge_base,
+        "ahead": ahead,
+        "behind": behind,
+        "donor_audited": bool(vendored and PARENT_DONOR.startswith(vendored[:12])),
+        "status": flags[-1] if flags else "CURRENT",
+        "flags": flags or ["CURRENT"],
+        "manual_validation": ["re-audit the donor chain before adopting any new parent commit"] if flags else [],
+    }
 
 
 def normalize_tag(tag: str) -> str:
@@ -100,6 +175,10 @@ def report() -> dict[str, Any]:
             results.append(check(name, contract, targets))
         except Exception as exc:  # advisory checker must preserve independent results
             results.append({"name": name, "status": "CHECK_FAILED", "flags": ["CHECK_FAILED"], "error": f"{type(exc).__name__}: {exc}"})
+    try:
+        results.append(check_parent())
+    except Exception as exc:  # the parent check must never break the npm checks
+        results.append({"name": "parent", "status": "CHECK_FAILED", "flags": ["CHECK_FAILED"], "error": f"{type(exc).__name__}: {exc}"})
     return {"schema": "devspace-oracle.upstream-drift/v1", "results": results}
 
 
@@ -113,6 +192,12 @@ def main() -> int:
             print(f"{item['name']}: {item['status']} ({', '.join(item['flags'])})")
             if item.get("impacted_patch_targets"):
                 print("  impacted: " + ", ".join(item["impacted_patch_targets"]))
+            if item.get("name") == "parent":
+                print(
+                    "  parent HEAD: " + str(item.get("vendored_parent_head") or "absent")
+                    + " merge-base: " + str(item.get("merge_base") or "unavailable")
+                    + f" ahead/behind: {item.get('ahead')}/{item.get('behind')}"
+                )
             if item.get("error"):
                 print("  " + item["error"])
     if args.format in {"json", "both"}:

@@ -61,7 +61,7 @@ def test_pro_compiles_attachment_only_oracle_and_manual_never_launches(tmp_path:
     value = json.loads(pro_target.read_text(encoding="utf-8"))
     assert pro["contract"]["route"] == "oracle-pro-attachment-only"
     assert value["transport"] == "pro-attachment-only"
-    assert value["model"] == "gpt-5.5-pro"
+    assert value["model"] == "gpt-5.6-sol"
     assert value["thinking_time"] == "heavy"
     assert value["mission_sha256"] == module.RUNNER.STATE.sha256_file(prompt)
     assert value["attachments"] == [str(prompt.resolve()), str(packet.resolve())]

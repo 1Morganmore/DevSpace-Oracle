@@ -23,8 +23,9 @@ CDP/Playwright, or `@chrome` fallback.
 ## Non-negotiable Pro contract
 
 - `task_kind: pro`.
-- Select `gpt-5.5-pro` with `heavy` through Oracle; never downgrade to a
-  regular GPT model or silently change the effort.
+- Select `gpt-5.6-sol` with `heavy` through Oracle; never downgrade to a
+  regular GPT model or silently change the effort. Oracle must prove the
+  visible `Power 5 of 5` (`Pro`) choice before the prompt is sent.
 - Never select, connect, inspect, register, repair, mention, or delete a
   ChatGPT app.
 - Local context is attachment-only through Oracle `--file` arguments.

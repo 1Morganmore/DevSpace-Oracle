@@ -328,7 +328,7 @@ def test_pro_stage_runs_oracle_attachment_only_and_materializes_bound_receipt(mo
         stages.append(stage)
         if stage == "pro":
             assert payload["transport"] == "pro-attachment-only"
-            assert payload["model"] == "gpt-5.5-pro"
+            assert payload["model"] == "gpt-5.6-sol"
             assert_pro_context(module, payload, mission, (tmp_path / "next-plan.md",))
             assert "app_name" not in payload
             attempt = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("attempt_id="))

@@ -12,6 +12,9 @@ import pytest
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "bin" / "chatgpt_oracle_compat.py"
 PRISTINE_PROMPT_COMPOSER = Path(__file__).parent / "fixtures/oracle-0.17.0/promptComposer.js"
+PRISTINE_THINKING_TIME = (
+    Path(__file__).parent / "fixtures/oracle-0.17.1/thinkingTime.pristine.js"
+).read_bytes()
 
 
 def load_compat():
@@ -419,14 +422,13 @@ def test_compatibility_inspection_classifies_hashes_without_writing(tmp_path: Pa
         assert not (tmp_path / "backup").exists()
 
 
-def test_patch_application_tolerates_only_line_ending_drift_before_hash_validation(
-    tmp_path: Path,
+def test_canonical_hash_binds_both_lf_and_crlf_deployed_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Fresh npx installs keep LF bytes; older Windows deployments can carry
+    # CRLF bytes for the same logical file.  One canonical (LF) contract hash
+    # must recognize both flavors instead of accepting two ambiguous hashes.
     compat = load_compat()
-    package = tmp_path / "package"
-    package.mkdir()
-    (package / "package.json").write_text(json.dumps({"version": "0.16.1"}), encoding="utf-8")
-    (package / "sample.txt").write_bytes(b"before\r\n")
     patches = tmp_path / "patches"
     patches.mkdir()
     (patches / "sample.patch").write_text(
@@ -438,19 +440,25 @@ def test_patch_application_tolerates_only_line_ending_drift_before_hash_validati
         "+after\n",
         encoding="utf-8",
     )
-    compat.VERSION_PATCHES = {
-        "0.16.1": {
-            "sample.txt": {
-                "patch": "sample.patch",
-                "pristine": digest(b"before\r\n"),
-                "patched": digest(b"after\n"),
-            }
-        }
+    contract = {
+        "patch": "sample.patch",
+        "pristine": digest(b"before\n"),
+        "patched": digest(b"after\n"),
     }
-    compat.patch_root = lambda version: patches
-    result = compat.ensure_oracle_compatibility("oracle 0.16.1", package_root=package)
-    assert result["changed"] == ["sample.txt"]
-    assert (package / "sample.txt").read_bytes() == b"after\n"
+    monkeypatch.setattr(compat, "VERSION_PATCHES", {"0.17.1": {"sample.txt": contract}})
+    monkeypatch.setattr(compat, "patch_root", lambda version: patches)
+
+    for index, content in enumerate((b"before\n", b"before\r\n")):
+        package = tmp_path / f"package-{index}"
+        package.mkdir()
+        (package / "package.json").write_text('{"version":"0.17.1"}', encoding="utf-8")
+        (package / "sample.txt").write_bytes(content)
+        result = compat.ensure_oracle_compatibility("oracle 0.17.1", package_root=package)
+        assert result["changed"] == ["sample.txt"]
+        assert compat.sha256_file(package / "sample.txt") == contract["patched"]
+        assert compat.inspect_oracle_compatibility(
+            "oracle 0.17.1", package_root=package
+        )["ready"] is True
 
 
 def test_unknown_oracle_version_or_file_hash_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -524,35 +532,58 @@ def test_all_matching_npx_cache_roots_are_patched_and_legacy_is_migrated(
     assert len(result["changed"]) == 2
 
 
-def test_known_legacy_patch_can_upgrade_directly_and_preserve_exact_backup(
+def test_known_legacy_patch_chain_migrates_and_preserves_exact_backup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A former level produced by two stacked patches must restore pristine
+    # bytes by reversing the chain in reverse order, keep an exact pristine
+    # backup, and stay idempotent on the next run.
     compat = load_compat()
     package = tmp_path / "package"
     package.mkdir()
     (package / "package.json").write_text('{"version":"0.17.1"}', encoding="utf-8")
     target = package / "sample.txt"
-    target.write_bytes(b"legacy\r\n")
+    target.write_bytes(b"legacy2\r\n")
     patches = tmp_path / "patches"
     patches.mkdir()
-    (patches / "upgrade.patch").write_text(
+    (patches / "step1.patch").write_text(
         "diff --git a/sample.txt b/sample.txt\n"
         "--- a/sample.txt\n"
         "+++ b/sample.txt\n"
         "@@ -1 +1 @@\n"
-        "-legacy\n"
-        "+current\n",
+        "-pristine\n"
+        "+legacy1\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(compat, "VERSION_PATCHES", {"0.17.1": {
-        "sample.txt": {
-            "patch": "unused.patch",
-            "pristine": digest(b"pristine\r\n"),
-            "patched": digest(b"current\r\n"),
-            "legacy_patched": [digest(b"legacy\r\n")],
-            "legacy_upgrade_patch": "upgrade.patch",
-        }
-    }})
+    (patches / "step2.patch").write_text(
+        "diff --git a/sample.txt b/sample.txt\n"
+        "--- a/sample.txt\n"
+        "+++ b/sample.txt\n"
+        "@@ -1 +1 @@\n"
+        "-legacy1\n"
+        "+legacy2\n",
+        encoding="utf-8",
+    )
+    (patches / "final.patch").write_text(
+        "diff --git a/sample.txt b/sample.txt\n"
+        "--- a/sample.txt\n"
+        "+++ b/sample.txt\n"
+        "@@ -1 +1 @@\n"
+        "-pristine\n"
+        "+final\n",
+        encoding="utf-8",
+    )
+    contract = {
+        "patch": "final.patch",
+        "pristine": digest(b"pristine\n"),
+        "patched": digest(b"final\n"),
+        "legacy_patched": [digest(b"legacy1\n"), digest(b"legacy2\n")],
+        "legacy_patch": "step1.patch",
+        "legacy_patches": {
+            digest(b"legacy2\n"): ["step1.patch", "step2.patch"],
+        },
+    }
+    monkeypatch.setattr(compat, "VERSION_PATCHES", {"0.17.1": {"sample.txt": contract}})
     monkeypatch.setattr(compat, "patch_root", lambda version: patches)
     backup = tmp_path / "backup"
 
@@ -562,12 +593,178 @@ def test_known_legacy_patch_can_upgrade_directly_and_preserve_exact_backup(
     second = compat.ensure_oracle_compatibility(
         "oracle 0.17.1", package_root=package, backup_root=backup
     )
-    legacy_backup = backup / "legacy-patched" / digest(b"legacy\r\n") / "sample.txt"
 
     assert first["changed"] == ["sample.txt"]
     assert second["already_patched"] == ["sample.txt"]
-    assert target.read_bytes() == b"current\r\n"
-    assert legacy_backup.read_bytes() == b"legacy\r\n"
+    assert compat.sha256_file(target) == contract["patched"]
+    assert compat.sha256_file(backup / "sample.txt") == contract["pristine"]
+    assert (backup / "sample.txt").read_bytes() == b"pristine\n"
+
+
+def test_known_legacy_patch_chain_without_any_backup_still_restores_pristine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The legacy level is restored from the exact known patches when no
+    # pristine backup exists yet; an unknown level still fails closed.
+    compat = load_compat()
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "package.json").write_text('{"version":"0.17.1"}', encoding="utf-8")
+    target = package / "sample.txt"
+    patches = tmp_path / "patches"
+    patches.mkdir()
+    (patches / "step1.patch").write_text(
+        "diff --git a/sample.txt b/sample.txt\n"
+        "--- a/sample.txt\n"
+        "+++ b/sample.txt\n"
+        "@@ -1 +1 @@\n"
+        "-pristine\n"
+        "+legacy1\n",
+        encoding="utf-8",
+    )
+    (patches / "step2.patch").write_text(
+        "diff --git a/sample.txt b/sample.txt\n"
+        "--- a/sample.txt\n"
+        "+++ b/sample.txt\n"
+        "@@ -1 +1 @@\n"
+        "-legacy1\n"
+        "+legacy2\n",
+        encoding="utf-8",
+    )
+    (patches / "final.patch").write_text(
+        "diff --git a/sample.txt b/sample.txt\n"
+        "--- a/sample.txt\n"
+        "+++ b/sample.txt\n"
+        "@@ -1 +1 @@\n"
+        "-pristine\n"
+        "+final\n",
+        encoding="utf-8",
+    )
+    contract = {
+        "patch": "final.patch",
+        "pristine": digest(b"pristine\n"),
+        "patched": digest(b"final\n"),
+        "legacy_patched": [digest(b"legacy1\n"), digest(b"legacy2\n")],
+        "legacy_patch": "step1.patch",
+        "legacy_patches": {
+            digest(b"legacy2\n"): ["step1.patch", "step2.patch"],
+        },
+    }
+    monkeypatch.setattr(compat, "VERSION_PATCHES", {"0.17.1": {"sample.txt": contract}})
+    monkeypatch.setattr(compat, "patch_root", lambda version: patches)
+    backup = tmp_path / "backup"
+
+    target.write_bytes(b"legacy1\n")
+    result = compat.ensure_oracle_compatibility(
+        "oracle 0.17.1", package_root=package, backup_root=backup
+    )
+    assert result["changed"] == ["sample.txt"]
+    assert compat.sha256_file(backup / "sample.txt") == contract["pristine"]
+
+    target.write_bytes(b"legacy2\r\n")
+    result = compat.ensure_oracle_compatibility(
+        "oracle 0.17.1", package_root=package, backup_root=backup
+    )
+    assert result["changed"] == ["sample.txt"]
+    assert compat.sha256_file(target) == contract["patched"]
+
+    target.write_bytes(b"unknown\r\n")
+    with pytest.raises(compat.OracleCompatError) as mismatch:
+        compat.ensure_oracle_compatibility(
+            "oracle 0.17.1", package_root=package, backup_root=backup
+        )
+    assert mismatch.value.code == "ORACLE_FILE_HASH_MISMATCH"
+
+
+def test_fork_legacy_thinking_time_levels_migrate_to_final_strict_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The two shipped fork levels (raw deployed CRLF hashes 21027b691a... and
+    # 300e910c1f...) must migrate to the final upstream strict result under
+    # canonical hashing, from both LF and CRLF deployments, while unknown
+    # bytes fail closed.
+    compat = load_compat()
+    relative = "dist/src/browser/actions/thinkingTime.js"
+    pristine = PRISTINE_THINKING_TIME
+    patches = compat.patch_root("0.17.1")
+    contract = compat.VERSION_PATCHES["0.17.1"][relative]
+    monkeypatch.setattr(compat, "VERSION_PATCHES", {"0.17.1": {relative: contract}})
+
+    era_level = pristine.replace(b"\r\n", b"\n")
+    upgraded = era_level
+    for patch_name in ("thinkingTime.extra-high-fail-closed.patch", "thinkingTime.pro-heavy-upgrade.patch"):
+        work = tmp_path / f"stage-{patch_name}"
+        target = work / Path(relative)
+        target.parent.mkdir(parents=True)
+        (work / "package.json").write_text('{"version":"0.17.1"}', encoding="utf-8")
+        target.write_bytes(upgraded)
+        compat._apply_patch(work, patches / patch_name)
+        upgraded = target.read_bytes()
+    assert digest(upgraded) == "1464b79c1d0bb8913963ab12c55fbc843fe760f367be2b68b1c36d62e43ff5e4"
+    assert digest(upgraded.replace(b"\r\n", b"\n")) == "1464b79c1d0bb8913963ab12c55fbc843fe760f367be2b68b1c36d62e43ff5e4"
+
+    era_work = tmp_path / "stage-era"
+    era_target = era_work / Path(relative)
+    era_target.parent.mkdir(parents=True)
+    (era_work / "package.json").write_text('{"version":"0.17.1"}', encoding="utf-8")
+    era_target.write_bytes(pristine.replace(b"\r\n", b"\n"))
+    compat._apply_patch(era_work, patches / "thinkingTime.extra-high-fail-closed.patch")
+    era_bytes = era_target.read_bytes()
+    assert digest(era_bytes) == "4106ed89a032d06fadcf1c1600e238e26243c02d1c3ef4261ea70169396d464e"
+
+    backup = tmp_path / "backup"
+    for label, legacy_bytes in (
+        ("era-lf", era_bytes),
+        ("era-crlf", era_bytes.replace(b"\n", b"\r\n")),
+        ("upgraded-lf", upgraded),
+        ("upgraded-crlf", upgraded.replace(b"\n", b"\r\n")),
+    ):
+        package = tmp_path / f"package-{label}"
+        target = package / Path(relative)
+        target.parent.mkdir(parents=True)
+        (package / "package.json").write_text('{"version":"0.17.1"}', encoding="utf-8")
+        target.write_bytes(legacy_bytes)
+        result = compat.ensure_oracle_compatibility(
+            "oracle 0.17.1", package_root=package, backup_root=backup
+        )
+        assert result["changed"] == [relative]
+        assert compat.sha256_file(target) == contract["patched"] == (
+            "3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3"
+        )
+        assert compat.sha256_file(backup / Path(relative)) == contract["pristine"]
+
+    package = tmp_path / "package-unknown"
+    target = package / Path(relative)
+    target.parent.mkdir(parents=True)
+    (package / "package.json").write_text('{"version":"0.17.1"}', encoding="utf-8")
+    target.write_bytes(upgraded + b"// drift\n")
+    with pytest.raises(compat.OracleCompatError) as mismatch:
+        compat.ensure_oracle_compatibility(
+            "oracle 0.17.1", package_root=package, backup_root=backup
+        )
+    assert mismatch.value.code == "ORACLE_FILE_HASH_MISMATCH"
+
+
+def test_fresh_lf_install_applies_final_strict_patch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A pristine LF install must patch directly to the final strict result
+    # without any legacy migration step.
+    compat = load_compat()
+    relative = "dist/src/browser/actions/thinkingTime.js"
+    contract = compat.VERSION_PATCHES["0.17.1"][relative]
+    monkeypatch.setattr(compat, "VERSION_PATCHES", {"0.17.1": {relative: contract}})
+    package = tmp_path / "package"
+    target = package / Path(relative)
+    target.parent.mkdir(parents=True)
+    (package / "package.json").write_text('{"version":"0.17.1"}', encoding="utf-8")
+    target.write_bytes(PRISTINE_THINKING_TIME)
+    assert compat.sha256_file(target) == contract["pristine"]
+
+    result = compat.ensure_oracle_compatibility("oracle 0.17.1", package_root=package)
+    assert result["changed"] == [relative]
+    assert compat.sha256_file(target) == contract["patched"]
+    assert compat.inspect_oracle_compatibility(
+        "oracle 0.17.1", package_root=package
+    )["ready"] is True
 
 
 def test_prompt_composer_patch_applies_to_pristine_0170_and_is_idempotent(
@@ -873,7 +1070,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "dist/src/browser/index.js": ("335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11", "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895"),
         "dist/src/browser/actions/assistantResponse.js": ("0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d", "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4"),
         "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f"),
-        "dist/src/browser/actions/thinkingTime.js": ("508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca", "300e910c1f592ccdda933d865525f303a6d255b43c71c6bcaff33d8186dccd0d"),
+        "dist/src/browser/actions/thinkingTime.js": ("508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca", "3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3"),
     }
 
     patches = {
@@ -883,13 +1080,64 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
     assert 'process.platform === "win32"' in patches["dist/src/browser/profileCopy.js"]
     assert "options.browserManualLogin = false" in patches["dist/src/cli/browserConfig.js"]
     assert "config = { ...config, manualLogin: false" in patches["dist/src/browser/index.js"]
-    assert 'strictRegularExtraHigh = targetModelKind !== "pro" && level === "extra-high"' in patches["dist/src/browser/actions/thinkingTime.js"]
-    assert '(level === "heavy" || level === "extended")' in patches["dist/src/browser/actions/thinkingTime.js"]
-    assert 'level === "heavy" ? "Pro Heavy" : "Pro Extended"' in patches["dist/src/browser/actions/thinkingTime.js"]
-    assert "refusing to submit without confirmed ${requiredEffortLabel}" in patches["dist/src/browser/actions/thinkingTime.js"]
+    thinking_patch = patches["dist/src/browser/actions/thinkingTime.js"]
+    assert 'composer-model-picker-slider-simple-view' in thinking_patch
+    assert 'composer-model-picker-slider-advanced-view' in thinking_patch
+    assert "exactGpt56ProProof" in thinking_patch
+    assert "const POWER_TARGET" in thinking_patch
+    assert "strictGpt56Effort" in thinking_patch
+    assert "selection-unverified" in thinking_patch
+    assert "refusing to submit without confirmed ${requiredEffortLabel}" in thinking_patch
     thinking = contracts["dist/src/browser/actions/thinkingTime.js"]
-    assert thinking["legacy_patched"] == ["21027b691a86a3278e6c0b6e69c8b6ce0325b984cda7e4fca3ca284422958b16"]
-    assert thinking["legacy_upgrade_patch"] == "thinkingTime.pro-heavy-upgrade.patch"
+    assert thinking["legacy_patched"] == [
+        # Fork legacy levels (canonical LF hashes; deployed copies carried raw
+        # CRLF hashes 21027b691a... and 300e910c1f...).
+        "4106ed89a032d06fadcf1c1600e238e26243c02d1c3ef4261ea70169396d464e",
+        "1464b79c1d0bb8913963ab12c55fbc843fe760f367be2b68b1c36d62e43ff5e4",
+        # Parent-project legacy levels from the audited 9542abee donor.
+        "536571fccc3f8137bfbf0ea96dfd827f1eabdaf92f93fe7cff92af242ef01d53",
+        "fe6db3c1d48ccf7eff212dab7e69a2b3c7439f44b5cc823d474aa4fbd0925151",
+        "ce0fa250ba4b28aeff9e3e80267b3f55bd08f7d25c9890a0eb09debcae447b8b",
+        "686e80ee7480686622eab7bc8863eccdf3ad57e64f662bfcbfbc4852802c7aaa",
+        "4e73e1c1d9c04e7bea7811a5e32bf17c559a2e1171581dc4cc33f48163ef28e7",
+        "374f0fabd62ea82ecf359c3050995da7a3de2d791905d04742f91ebe098d910a",
+        "864f8365ecbd0aef9b631f7ae61c80b3e43424dc37c34cdfd5c6e5aa06b0c1b3",
+        "d8fbe1394314efaa38343539ad7be519212fd5301f74e4aa92336f6925e3b5fd",
+        "9ac1cab3200fb848ca2f88c07f98b19d94c7d4ad5a9b2e578c1c5a9dee4df15f",
+        "2baba20f9162eea8b4659ff42d85c26064d037bb18dd90f2022cf4764ddd710d",
+        "0cb7bf4774e5507fb97682cf4e350fea03998c2a44548065bf8e9eb57fe16707",
+        "b55897a9d90627b226e39e77339819e446927ffc66f78181f5c2851cbcfe5f97",
+    ]
+    assert thinking["legacy_patch"] == "thinkingTime.strict.pre-power.patch"
+    assert thinking["legacy_patches"]["4106ed89a032d06fadcf1c1600e238e26243c02d1c3ef4261ea70169396d464e"] == [
+        "thinkingTime.extra-high-fail-closed.patch",
+    ]
+    assert thinking["legacy_patches"]["1464b79c1d0bb8913963ab12c55fbc843fe760f367be2b68b1c36d62e43ff5e4"] == [
+        "thinkingTime.extra-high-fail-closed.patch",
+        "thinkingTime.pro-heavy-upgrade.patch",
+    ]
+    assert thinking["legacy_patches"]["b55897a9d90627b226e39e77339819e446927ffc66f78181f5c2851cbcfe5f97"] == (
+        "thinkingTime.strict.pre-advanced-view-sibling.patch"
+    )
+    assert "536571fccc3f8137bfbf0ea96dfd827f1eabdaf92f93fe7cff92af242ef01d53" not in thinking["legacy_patches"]
+    for patch_name in {
+        "thinkingTime.strict.patch",
+        "thinkingTime.strict.pre-power.patch",
+        "thinkingTime.strict.broken-power.patch",
+        "thinkingTime.strict.double-escaped-power.patch",
+        "thinkingTime.strict.single-escaped-power.patch",
+        "thinkingTime.strict.regex-power.patch",
+        "thinkingTime.strict.compact-power.patch",
+        "thinkingTime.strict.hidden-slider.patch",
+        "thinkingTime.strict.pro-proof-model-bound.patch",
+        "thinkingTime.strict.null-model-menu-closed.patch",
+        "thinkingTime.strict.pre-outer-model-proof.patch",
+        "thinkingTime.strict.pre-visible-advanced-proof.patch",
+        "thinkingTime.strict.pre-advanced-view-sibling.patch",
+        "thinkingTime.extra-high-fail-closed.patch",
+        "thinkingTime.pro-heavy-upgrade.patch",
+    }:
+        assert (compat.patch_root("0.17.1") / patch_name).is_file(), patch_name
 
 
 def test_copy_profile_recovery_patch_reuses_only_the_persisted_profile_seed() -> None:

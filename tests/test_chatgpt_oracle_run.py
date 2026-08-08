@@ -110,7 +110,7 @@ def pro_manifest(tmp_path: Path, prompt_text: str = "pro instructions", **extra)
         tmp_path,
         transport="pro-attachment-only",
         app_name=None,
-        model="gpt-5.5-pro",
+        model="gpt-5.6-sol",
         model_strategy="select",
         thinking_time="heavy",
         attachments=[str(prompt.resolve()), str(packet.resolve())],
@@ -675,7 +675,7 @@ def test_pro_dry_run_uses_oracle_attachments_and_no_app_mention(tmp_path: Path) 
     attachments = [argv[index + 1] for index, value in enumerate(argv) if value == "--file"]
     assert result["transport"] == "pro-attachment-only"
     assert result["contains_file_flag"] is True
-    assert argv[argv.index("--model") + 1] == "gpt-5.5-pro"
+    assert argv[argv.index("--model") + 1] == "gpt-5.6-sol"
     assert argv[argv.index("--browser-attachments") + 1] == "always"
     assert argv.count("--wait") == 1
     assert attachments == [
@@ -1625,6 +1625,78 @@ def test_unconfirmed_pro_heavy_is_proven_pre_submit_and_releases_project(
         runner.STATE.load_manifest(pro_manifest(tmp_path)).run_root,
         tmp_path,
     ) == []
+
+
+def test_model_switcher_failure_is_proven_pre_submit_not_executed_and_releases_project(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+
+    def model_switcher_no_cookie(command, **kwargs):
+        slug = command[command.index("--slug") + 1]
+        marker = (
+            'Unable to find model option matching "Pro" in the model switcher. '
+            "Available: Advanced, ModelGPT-5.6 Sol, EffortHigh. "
+            "No cookies were applied; log in to ChatGPT in Chrome or provide inline cookies."
+        )
+        kwargs["stdout"].write(
+            (
+                f"Session: {slug}\n"
+                f"ERROR: {marker}\n"
+                f"User error (browser-automation): {marker}\n"
+            ).encode()
+        )
+        kwargs["stdout"].flush()
+        return Process(1, [])
+
+    result = execute_run(
+        runner,
+        pro_manifest(tmp_path, run_id="f" * 32),
+        run_factory=version_runner,
+        popen_factory=model_switcher_no_cookie,
+    )
+    run_dir = Path(result["run_dir"])
+    state = runner.STATE.load_state(run_dir / "state.json")
+
+    assert result["status"] == "pre_submit_failed"
+    assert result["safe_for_fresh_run"] is True
+    assert state["session_authority"] == "pre_submit"
+    assert state["transport_status"] == "failed_pre_submit"
+    assert state["task_outcome"] == "not_executed"
+    assert state["pre_submit_failure"]["code"] == "ORACLE_MODEL_SWITCHER_PRE_SUBMIT_FAILED"
+    assert runner.STATE.unresolved_project_sessions(
+        runner.STATE.load_manifest(pro_manifest(tmp_path)).run_root,
+        tmp_path,
+    ) == []
+
+
+def test_model_switcher_failure_with_a_conversation_url_does_not_release_lock(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+
+    def model_switcher_no_cookie(command, **kwargs):
+        kwargs["stdout"].write(
+            b'ERROR: Unable to find model option matching "Pro" in the model switcher. '
+            b"No cookies were applied; log in to ChatGPT in Chrome or provide inline cookies.\n"
+        )
+        kwargs["stdout"].flush()
+        return Process(1, [])
+
+    initial = execute_run(
+        runner,
+        pro_manifest(tmp_path, run_id="g" * 32),
+        run_factory=version_runner,
+        popen_factory=model_switcher_no_cookie,
+    )
+    state_path = Path(initial["run_dir"]) / "state.json"
+    legacy = runner.STATE.load_state(state_path)
+    legacy["session_authority"] = "submitted_unknown"
+    legacy["oracle"]["conversation_url"] = "https://chatgpt.com/c/exact-submitted-session"
+    legacy.pop("pre_submit_failure", None)
+    runner.STATE.write_json_atomic(state_path, legacy)
+    assert runner.STATE.settle_proven_pre_submit_failure(state_path) is None
+    assert runner.STATE.load_state(state_path)["session_authority"] == "submitted_unknown"
 
 
 def test_profile_copy_ebusy_is_proven_pre_submit_and_releases_project(tmp_path: Path) -> None:

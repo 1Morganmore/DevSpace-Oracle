@@ -14,9 +14,11 @@ Codex가 웹 ChatGPT에 계획·리서치·검토·코드 구현을 맡기고, �
 - [DevSpace](https://github.com/Waishnav/devspace): 사용자가 허용한 로컬
   프로젝트의 파일 읽기·쓰기와 명령 실행
 
-일반 GPT 작업은 Oracle이 `GPT-5.6 Sol`과 보이는 `Extra High` 등급을
-확인한 뒤 `@DevSpace`와 미션 파일 경로를 ChatGPT에 전달합니다. Pro 작업은
-`gpt-5.5-pro`와 정확한 첨부 파일만 사용하며 DevSpace를 사용하지 않습니다.
+일반 GPT 작업은 Oracle이 `GPT-5.6 Sol`과 보이는 `Extra High` 등급
+(`Power 4 of 5`)을 확인한 뒤 정확히 `@DevSpace`와 절대 UTF-8 미션 파일
+경로만 ChatGPT에 전달합니다. Pro 작업은 `gpt-5.6-sol`과 증명된
+`Power 5 of 5`(`Pro`) 등급, 정확한 첨부 파일만 사용하며 DevSpace를
+사용하지 않습니다.
 
 ## 이 도구로 할 수 있는 일
 
@@ -64,7 +66,7 @@ Codex가 해시·상태·최종 결정론적 테스트만 확인
 | Web Multi-GPT | Web Multi-GPT | 여러 관점의 독립 탐색·검증 | 독립 Oracle 세션 2~25개 + merger |
 | Local Multi-GPT | Local Multi-GPT | 로컬 병렬 자문·반례 탐색 | `gpt-5.6-luna` + `max` 고정, 읽기 전용 |
 | 종합모드 | comprehensive mode | 계획부터 구현·최종 게이트까지 자동 연결 | plan → 명시적으로 선택한 Pro/Web Multi → review → implementation → gate |
-| Pro | `pro` / Pro | 독립적인 최종 판단·설계 검토 후 결과만 반환 | Oracle `gpt-5.5-pro`, 첨부 전용, DevSpace 없음 |
+| Pro | `pro` / Pro | 독립적인 최종 판단·설계 검토 후 결과만 반환 | Oracle `gpt-5.6-sol` + `Power 5 of 5`, 첨부 전용, DevSpace 없음 |
 
 지휘는 웹 제출 한 번으로 끝나는 실행 모드입니다. 종합모드는 지휘와 같은
 구현 단계를 포함하면서 계획·독립 검토·선택적 Pro/Web Multi·최종 게이트를

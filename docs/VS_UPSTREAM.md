@@ -5,10 +5,10 @@ This file binds package compatibility to exact public artifacts. The local fork 
 ## A. Fork versus parent project
 
 - Local ref: the exact commit containing this document in `1Morganmore/DevSpace-Oracle`.
-- Parent main: `ventianima-lab/codexpro-automation@250b839a559cb61442feeb64bff6d49dfa185169`.
+- Parent main: `ventianima-lab/codexpro-automation@9542abeef6aa544f4ee6af03bab61cef3474f9e4`.
 - Merge-base before this release commit: `250b839a559cb61442feeb64bff6d49dfa185169`.
-- Pre-release ancestry: 15 commits ahead, 0 behind; the release commit adds one local commit.
-- Final fork-versus-parent tree difference: 211 files, 16,631 insertions, and 53,955 deletions. The local release slice itself changes 178 files with 1,807 insertions and 52,844 deletions relative to its pre-release HEAD. The exact release commit is reported externally because a commit cannot contain its own hash.
+- Pre-release ancestry: 20 commits ahead, 21 behind; the release commit adds one local commit.
+- Final fork-versus-parent tree difference: 212 files, 17,124 insertions, and 53,968 deletions at the pre-release head. The exact release commit is reported externally because a commit cannot contain its own hash.
 
 The fork keeps Oracle-only browser submission, DevSpace workspace transport, exact-slug recovery, per-project locks, receipt-owned installation, Windows process/profile isolation, and bounded Web Multi sessions. Parent sync must preserve monotonic terminal authority, exact package/hash gating, host-only state, mutex/schema/receipt identities, and the absence of automatic Web Multi or alternate-backend fallback.
 
@@ -41,9 +41,33 @@ The exact 0.17.1 npm dist uses these hash-gated patches:
 | `dist/src/browser/index.js` | `335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11` | `9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895` |
 | `dist/src/browser/actions/assistantResponse.js` | `0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d` | `18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4` |
 | `dist/src/browser/actions/promptComposer.js` | `db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000` | `a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f` |
-| `dist/src/browser/actions/thinkingTime.js` | `508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca` | `300e910c1f592ccdda933d865525f303a6d255b43c71c6bcaff33d8186dccd0d` |
+| `dist/src/browser/actions/thinkingTime.js` | `508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca` | `3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3` |
 
-Oracle 0.17.1 avoids selecting the Pro model row for GPT-5.6, but approval-gated live runs exposed two option misses: regular `extra-high` and Pro `heavy`, both while the UI remained on `GPT-5.6 Sol` with Effort `Pro`. The local thinking-time patch therefore fails closed for both contracts instead of treating the visible `Pro` effort as an `Extra High` alias or silently submitting the wrong Pro model/effort. Pro remains attachment-only `gpt-5.5-pro` with `heavy` pending a successful live proof.
+The thinking-time row is the final upstream Power-slider patch from the
+audited donor `9542abee` (`thinkingTime.strict.patch`).  All package hashes
+are computed over canonical LF bytes: a fresh npx install keeps LF dist bytes
+while an older Windows deployment can carry CRLF bytes for the same patched
+result, so canonical hashing makes one contract hash bind both flavors
+instead of accepting two ambiguous hashes.  Known fork legacy levels migrate
+safely to the final patched result: the previously shipped extra-high
+fail-closed patch (deployed raw CRLF
+`21027b691a86a3278e6c0b6e69c8b6ce0325b984cda7e4fca3ca284422958b16`) and that
+patch plus the Pro-heavy upgrade (deployed raw CRLF
+`300e910c1f592ccdda933d865525f303a6d255b43c71c6bcaff33d8186dccd0d`) are both
+recognized by their canonical hashes and restored to pristine bytes before
+the strict patch is applied; unknown bytes always fail closed.
+
+Oracle 0.17.1 now treats GPT-5.6 Sol effort as a visible Power slider.
+Regular runs are the single supported `extra-high` tier and require the
+visible `Power 4 of 5` proof before send; misleading `Medium` or `High`
+aliases are rejected without silent downgrade.  Pro remains attachment-only
+with no DevSpace or app: it uses the same account-visible `gpt-5.6-sol` model
+with `heavy` (Oracle's internal token) and requires the full `Power 5 of 5`
+(`Pro`) proof including the hidden-stale-picker and Unicode-label handling
+from the donor.  A proven model-switcher, profile-flag, or effort
+selection-unverified failure settles only while the conversation URL and any
+durable output are absent, and monotonic exact-session authority is never
+regressed.
 
 For a new Oracle release, query registry metadata, download the exact npm tarball, verify integrity, calculate every pristine hash, dry-apply each patch, review changed upstream sources, calculate patched hashes, and only then update the version table and manifest. Source tags never substitute for npm dist bytes.
 
@@ -52,7 +76,7 @@ For a new Oracle release, query registry metadata, download the exact npm tarbal
 - npm package: `@waishnav/devspace@1.0.6`
 - npm integrity: `sha512-lLwUip5Wv1mwpEmAbpms7bourW5g0a0US1PDHCD2CITgCK6DnMTh5++6z8ODIEY+T30oxoTQlxdH4T+VkWlbNA==`
 - npm tarball SHA-256: `1148a45afd70668ead498671eb47e080bad9cf36cf37ee2382add01612163b4a`
-- source tag: `v1.0.6` at `074292acf19a7fe3407bdf6c7565ffd28c17656c`
+- source tag: `v1.0.6`; tag object `074292acf19a7fe3407bdf6c7565ffd28c17656c`, peeled commit `3bd0378b128c048add810dff00efeff4e7326eb9`
 
 | Dist target | Pristine SHA-256 | Patched SHA-256 | Meaning |
 |---|---|---|---|

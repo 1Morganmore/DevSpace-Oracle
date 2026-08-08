@@ -162,11 +162,68 @@ PATCHES_0171 = {
         "patched": "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f",
     },
     "dist/src/browser/actions/thinkingTime.js": {
-        "patch": "thinkingTime.patch",
+        "patch": "thinkingTime.strict.patch",
         "pristine": "508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca",
-        "patched": "300e910c1f592ccdda933d865525f303a6d255b43c71c6bcaff33d8186dccd0d",
-        "legacy_patched": ["21027b691a86a3278e6c0b6e69c8b6ce0325b984cda7e4fca3ca284422958b16"],
-        "legacy_upgrade_patch": "thinkingTime.pro-heavy-upgrade.patch",
+        "patched": "3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3",
+        "legacy_patched": [
+            # Fork levels: canonical LF hashes of the two shipped patch results.
+            # Deployed Windows copies carried the raw CRLF hashes
+            # 21027b691a... (extra-high fail-closed) and 300e910c1f... (Pro
+            # heavy upgrade); canonical hashing makes both byte flavors bind
+            # to these single hashes instead of accepting ambiguous ones.
+            "4106ed89a032d06fadcf1c1600e238e26243c02d1c3ef4261ea70169396d464e",
+            "1464b79c1d0bb8913963ab12c55fbc843fe760f367be2b68b1c36d62e43ff5e4",
+            # Parent-project legacy levels from the audited 9542abee donor.
+            "536571fccc3f8137bfbf0ea96dfd827f1eabdaf92f93fe7cff92af242ef01d53",
+            "fe6db3c1d48ccf7eff212dab7e69a2b3c7439f44b5cc823d474aa4fbd0925151",
+            "ce0fa250ba4b28aeff9e3e80267b3f55bd08f7d25c9890a0eb09debcae447b8b",
+            "686e80ee7480686622eab7bc8863eccdf3ad57e64f662bfcbfbc4852802c7aaa",
+            "4e73e1c1d9c04e7bea7811a5e32bf17c559a2e1171581dc4cc33f48163ef28e7",
+            "374f0fabd62ea82ecf359c3050995da7a3de2d791905d04742f91ebe098d910a",
+            "864f8365ecbd0aef9b631f7ae61c80b3e43424dc37c34cdfd5c6e5aa06b0c1b3",
+            "d8fbe1394314efaa38343539ad7be519212fd5301f74e4aa92336f6925e3b5fd",
+            "9ac1cab3200fb848ca2f88c07f98b19d94c7d4ad5a9b2e578c1c5a9dee4df15f",
+            "2baba20f9162eea8b4659ff42d85c26064d037bb18dd90f2022cf4764ddd710d",
+            "0cb7bf4774e5507fb97682cf4e350fea03998c2a44548065bf8e9eb57fe16707",
+            "b55897a9d90627b226e39e77339819e446927ffc66f78181f5c2851cbcfe5f97",
+        ],
+        "legacy_patch": "thinkingTime.strict.pre-power.patch",
+        "legacy_patches": {
+            # The fork shipped two former levels: `thinkingTime.patch`
+            # (extra-high fail-closed, raw CRLF 21027b69...) and that patch
+            # plus `thinkingTime.pro-heavy-upgrade.patch` (raw CRLF
+            # 300e910c...).  Each entry lists the forward-application order
+            # used to build the level; migration reverses them.
+            "4106ed89a032d06fadcf1c1600e238e26243c02d1c3ef4261ea70169396d464e": [
+                "thinkingTime.extra-high-fail-closed.patch",
+            ],
+            "1464b79c1d0bb8913963ab12c55fbc843fe760f367be2b68b1c36d62e43ff5e4": [
+                "thinkingTime.extra-high-fail-closed.patch",
+                "thinkingTime.pro-heavy-upgrade.patch",
+            ],
+            "fe6db3c1d48ccf7eff212dab7e69a2b3c7439f44b5cc823d474aa4fbd0925151":
+                "thinkingTime.strict.broken-power.patch",
+            "ce0fa250ba4b28aeff9e3e80267b3f55bd08f7d25c9890a0eb09debcae447b8b":
+                "thinkingTime.strict.double-escaped-power.patch",
+            "686e80ee7480686622eab7bc8863eccdf3ad57e64f662bfcbfbc4852802c7aaa":
+                "thinkingTime.strict.single-escaped-power.patch",
+            "4e73e1c1d9c04e7bea7811a5e32bf17c559a2e1171581dc4cc33f48163ef28e7":
+                "thinkingTime.strict.regex-power.patch",
+            "374f0fabd62ea82ecf359c3050995da7a3de2d791905d04742f91ebe098d910a":
+                "thinkingTime.strict.compact-power.patch",
+            "864f8365ecbd0aef9b631f7ae61c80b3e43424dc37c34cdfd5c6e5aa06b0c1b3":
+                "thinkingTime.strict.hidden-slider.patch",
+            "d8fbe1394314efaa38343539ad7be519212fd5301f74e4aa92336f6925e3b5fd":
+                "thinkingTime.strict.pro-proof-model-bound.patch",
+            "9ac1cab3200fb848ca2f88c07f98b19d94c7d4ad5a9b2e578c1c5a9dee4df15f":
+                "thinkingTime.strict.null-model-menu-closed.patch",
+            "2baba20f9162eea8b4659ff42d85c26064d037bb18dd90f2022cf4764ddd710d":
+                "thinkingTime.strict.pre-outer-model-proof.patch",
+            "0cb7bf4774e5507fb97682cf4e350fea03998c2a44548065bf8e9eb57fe16707":
+                "thinkingTime.strict.pre-visible-advanced-proof.patch",
+            "b55897a9d90627b226e39e77339819e446927ffc66f78181f5c2851cbcfe5f97":
+                "thinkingTime.strict.pre-advanced-view-sibling.patch",
+        },
     },
 }
 
@@ -183,7 +240,11 @@ class OracleCompatError(RuntimeError):
 
 
 def sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    # Fresh npx installs keep LF dist bytes; older Windows deployments of the
+    # patched package can carry CRLF bytes for the same logical file.  Hash the
+    # canonical LF form so one contract hash binds both byte flavors instead of
+    # accepting two ambiguous hashes for the same patched result.
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def package_version(package_root: Path) -> str:
@@ -282,21 +343,28 @@ def _migrate_known_legacy_patch(
     package_root: Path,
     target: Path,
     relative: str,
-    patch_path: Path,
+    patch_paths: Sequence[Path],
     pristine_hash: str,
 ) -> None:
-    """Restore one known former patch level to its verified pristine bytes."""
+    """Restore one known former patch level to its verified pristine bytes.
+
+    ``patch_paths`` lists the forward-application order of the legacy patches
+    that produced the installed level; migration reverses them in reverse
+    order and verifies the exact canonical pristine hash of the restored
+    bytes.  Unknown levels are never guessed at and fail closed.
+    """
     with tempfile.TemporaryDirectory(prefix="oracle-compat-migrate-") as temporary:
         staged_root = Path(temporary)
         staged_target = staged_root / Path(relative)
         staged_target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(target, staged_target)
-        _apply_patch(staged_root, patch_path, reverse=True)
+        for patch_path in reversed(patch_paths):
+            _apply_patch(staged_root, patch_path, reverse=True)
         if sha256_file(staged_target) != pristine_hash:
             raise OracleCompatError(
                 "ORACLE_LEGACY_PATCH_RESTORE_INVALID",
                 "Known legacy Oracle patch did not restore the exact pristine bytes",
-                {"path": str(target), "patch": str(patch_path)},
+                {"path": str(target), "patch": [str(path) for path in patch_paths]},
             )
         shutil.copy2(staged_target, target)
 
@@ -385,43 +453,27 @@ def ensure_oracle_compatibility(
                 continue
             backup_path = backup / Path(relative)
             if current in contract.get("legacy_patched", []):
-                legacy_upgrade_patch = contract.get("legacy_upgrade_patch")
-                if isinstance(legacy_upgrade_patch, str) and legacy_upgrade_patch:
-                    with tempfile.TemporaryDirectory(prefix="oracle-compat-upgrade-") as temporary:
-                        staged_root = Path(temporary)
-                        staged_target = staged_root / Path(relative)
-                        staged_target.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(target, staged_target)
-                        legacy_uses_crlf = b"\r\n" in staged_target.read_bytes()
-                        _apply_patch(staged_root, patches / legacy_upgrade_patch)
-                        if legacy_uses_crlf:
-                            staged_bytes = staged_target.read_bytes()
-                            staged_target.write_bytes(
-                                staged_bytes.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
-                            )
-                        if sha256_file(staged_target) != contract["patched"]:
-                            raise OracleCompatError(
-                                "ORACLE_LEGACY_PATCH_UPGRADE_INVALID",
-                                "Known legacy Oracle patch did not produce the expected patched bytes",
-                                {"path": str(target), "patch": str(patches / legacy_upgrade_patch)},
-                            )
-                        legacy_backup = backup / "legacy-patched" / current / Path(relative)
-                        legacy_backup.parent.mkdir(parents=True, exist_ok=True)
-                        if not legacy_backup.exists():
-                            shutil.copy2(target, legacy_backup)
-                        shutil.copy2(staged_target, target)
-                    changed.append(item)
-                    continue
                 if not backup_path.exists() or sha256_file(backup_path) != contract["pristine"]:
-                    legacy_patch = contract.get("legacy_patch")
-                    if not isinstance(legacy_patch, str) or not legacy_patch:
+                    legacy_patches = contract.get("legacy_patches")
+                    legacy_patch = (
+                        legacy_patches.get(current)
+                        if isinstance(legacy_patches, dict)
+                        else None
+                    ) or contract.get("legacy_patch")
+                    if isinstance(legacy_patch, str):
+                        patch_paths = [patches / legacy_patch]
+                    elif isinstance(legacy_patch, list) and legacy_patch and all(
+                        isinstance(item, str) and item for item in legacy_patch
+                    ):
+                        patch_paths = [patches / item for item in legacy_patch]
+                    else:
                         raise OracleCompatError(
                             "ORACLE_LEGACY_PATCH_BACKUP_INVALID",
                             "A legacy Oracle patch cannot be migrated without the exact pristine backup",
                             {"path": str(target), "backup": str(backup_path), "actual": current},
                         )
                     _migrate_known_legacy_patch(
-                        root, target, relative, patches / legacy_patch, str(contract["pristine"])
+                        root, target, relative, patch_paths, str(contract["pristine"])
                     )
                     backup_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(target, backup_path)

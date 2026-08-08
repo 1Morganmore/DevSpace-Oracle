@@ -618,7 +618,7 @@ def _oracle_manifest(
         "mission_path": str(mission),
         "mission_sha256": mission_sha,
         "mode": "browser",
-        "model": "gpt-5.5-pro" if stage == "pro" else config["model"],
+        "model": "gpt-5.6-sol" if stage == "pro" else config["model"],
         "model_strategy": "select",
         "thinking_time": "heavy" if stage == "pro" else "extra-high",
         "research": "off",

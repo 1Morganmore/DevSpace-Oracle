@@ -29,14 +29,11 @@ def test_regular_modes_use_plain_devspace_handoff_and_high_only(tmp_path: Path, 
     contract = profiles.build_launch_contract(mode, mission_path=mission)
     assert contract["route"] == "oracle-devspace"
     assert contract["reasoning_level"] == "Very High"
+    assert contract["thinking_time"] == "extra-high"
     assert contract["attachments"] == []
     assert contract["app_picker"] is False
     assert contract["app_settings_automation"] is False
-    assert contract["composer_prompt"].startswith(
-        f"@DevSpace Read and execute the mission file: {mission}."
-    )
-    assert "retry that same exact root once" in contract["composer_prompt"]
-    assert "never substitute a parent, child, active workspace" in contract["composer_prompt"]
+    assert contract["composer_prompt"] == f"@DevSpace {mission}"
     assert "\n" not in contract["composer_prompt"]
 
 
@@ -45,18 +42,31 @@ def test_deep_research_is_only_a_mode_flag() -> None:
     contract = profiles.build_launch_contract("deep_research", mission_path=Path.cwd().resolve() / "mission.md")
     assert contract["research"] is True
     assert contract["reasoning_level"] == "Very High"
+    assert contract["thinking_time"] == "extra-high"
     assert "research_picker" not in contract
     assert "research_app" not in contract
     assert contract["attachments"] == []
 
 
-@pytest.mark.parametrize("level", ["xhigh", "Medium"])
-def test_regular_reasoning_rejects_unsupported_level_without_downgrade(tmp_path: Path, level: str) -> None:
+@pytest.mark.parametrize("level", ["xhigh", "extra-high", "very high", "매우 높음"])
+def test_regular_reasoning_accepts_only_extra_high_aliases(tmp_path: Path, level: str) -> None:
+    profiles = load_profiles()
+    contract = profiles.build_launch_contract(
+        "plan", mission_path=(tmp_path / "mission.md").resolve(), reasoning_level=level
+    )
+    assert contract["reasoning_level"] == "Very High"
+    assert contract["thinking_time"] == "extra-high"
+
+
+@pytest.mark.parametrize("level", ["high", "medium", "Very High Pro", "max"])
+def test_regular_reasoning_rejects_misleading_medium_or_high_without_downgrade(
+    tmp_path: Path, level: str
+) -> None:
     profiles = load_profiles()
     with pytest.raises(profiles.OracleProfileError) as exc:
         profiles.build_launch_contract("plan", mission_path=(tmp_path / "mission.md").resolve(), reasoning_level=level)
     assert exc.value.code == "REGULAR_REASONING_UNAVAILABLE"
-    assert exc.value.evidence["supported"] == ["Very High", "High"]
+    assert exc.value.evidence["supported"] == ["Very High"]
 
 
 def test_pro_is_oracle_attachment_only_and_manual_launches_nothing(tmp_path: Path) -> None:
@@ -69,7 +79,8 @@ def test_pro_is_oracle_attachment_only_and_manual_launches_nothing(tmp_path: Pat
     assert pro["app_policy"] == "forbidden"
     assert pro["oracle_launch"] is True
     assert pro["devspace_required"] is False
-    assert pro["model"] == "gpt-5.5-pro"
+    assert pro["model"] == "gpt-5.6-sol"
+    assert pro["thinking_time"] == "heavy"
     assert pro["attachment_policy"] == "always"
     assert pro["attachments"] == [str(mission), str(packet)]
     assert pro["composer_prompt"] == "Read the attached prompt/instructions and all attached files, then complete the task."

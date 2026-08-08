@@ -1,0 +1,34 @@
+diff --git a/dist/src/browser/actions/thinkingTime.js b/dist/src/browser/actions/thinkingTime.js
+--- a/dist/src/browser/actions/thinkingTime.js
++++ b/dist/src/browser/actions/thinkingTime.js
+@@ -32,6 +32,8 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
+     const targetModelKind = inferThinkingTargetModelKind(desiredModel);
+     const observedModelKind = result && "modelKind" in result ? result.modelKind : null;
+     const strictProEffort = (targetModelKind === "pro" || observedModelKind === "pro") && level === "extended";
++    const strictRegularExtraHigh = targetModelKind !== "pro" && level === "extra-high";
++    const requiredEffortLabel = strictProEffort ? "Pro Extended" : strictRegularExtraHigh ? "Extra High" : null;
+     switch (result?.status) {
+         case "already-selected":
+             logger(formatBrowserThinkingLog(`${result.label ?? capitalizedLevel} (already selected)`));
+@@ -49,9 +51,9 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
+             const kindHint = result.status === "model-kind-not-found" && result.modelKind
+                 ? ` for ${result.modelKind}`
+                 : targetModelKind
+                     ? ` for ${targetModelKind}`
+                     : "";
+             const message = `Thinking time: ${result.status.replaceAll("-", " ")}${kindHint} (requested ${capitalizedLevel})`;
+-            if (strictProEffort) {
+-                throw new Error(`${message}; refusing to submit without confirmed Pro Extended.`);
++            if (requiredEffortLabel) {
++                throw new Error(`${message}; refusing to submit without confirmed ${requiredEffortLabel}.`);
+             }
+@@ -62,7 +64,7 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
+         default: {
+             await logDomFailure(Runtime, logger, "thinking-time-unknown");
+             logPickerDiagnostic(result, logger);
+-            if (strictProEffort) {
+-                throw new Error(`Thinking time: unknown outcome selecting ${capitalizedLevel}; refusing to submit without confirmed Pro Extended.`);
++            if (requiredEffortLabel) {
++                throw new Error(`Thinking time: unknown outcome selecting ${capitalizedLevel}; refusing to submit without confirmed ${requiredEffortLabel}.`);
+             }
+             logger(formatBrowserThinkingLog(`unknown outcome selecting ${capitalizedLevel}; continuing with ChatGPT default.`));

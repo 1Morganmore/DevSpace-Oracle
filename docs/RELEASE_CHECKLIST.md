@@ -3,7 +3,7 @@
 - Confirm package metadata remains `1.8.0` with Node.js `>=24 <27`.
 - Confirm new runs pin Oracle `0.17.1`; exact recovery accepts only `0.16.1`, `0.17.0`, and `0.17.1`.
 - Confirm DevSpace setup pins `1.0.6` and both npm integrities match `install-manifest.json`.
-- Confirm regular routes use `GPT-5.6 Sol` and `extra-high`; Pro remains attachment-only `gpt-5.5-pro` and `heavy`.
+- Confirm regular routes use `GPT-5.6 Sol` and `extra-high` with the visible `Power 4 of 5` proof; Pro remains attachment-only `gpt-5.6-sol` and `heavy` with the `Power 5 of 5` proof.
 - Confirm no route enters Web Multi automatically or uses another backend as a fallback.
 - Confirm WAL v3 and receipt v4 removal migration, crash recovery, rollback, and uninstall in a temporary `CODEX_HOME`.
 - Confirm modified, symlinked, unowned, active-run, and ambiguous-receipt inputs fail before mutation and preserve user bytes.

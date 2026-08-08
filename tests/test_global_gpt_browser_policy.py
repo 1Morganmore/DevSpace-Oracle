@@ -29,7 +29,7 @@ def test_pro_is_oracle_attachment_only_heavy_and_has_no_app_fallback() -> None:
     value = text(PRO)
     assert "Oracle is the only backend for a new Pro run" in value
     assert "There is no DevSpace, alternate app, in-app Browser" in value
-    assert "gpt-5.5-pro" in value and "heavy" in value
+    assert "gpt-5.6-sol" in value and "heavy" in value
     assert "never downgrade" in value
 
 

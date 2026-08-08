@@ -57,10 +57,11 @@ def compile_manifest(
         "mission_path": contract["mission_path"],
         "mission_sha256": RUNNER.STATE.sha256_file(Path(contract["mission_path"]).resolve(strict=True)),
         "mode": "browser",
+        "task_kind": contract["task_kind"],
         "transport": "pro-attachment-only" if contract["mode"] == "pro" else "devspace",
         "model": contract.get("model") or "gpt-5.6",
         "model_strategy": "select",
-        "thinking_time": "heavy" if is_pro else "extra-high",
+        "thinking_time": contract["thinking_time"],
         "research": "deep" if contract["research"] else "off",
         "archive": "auto",
     }

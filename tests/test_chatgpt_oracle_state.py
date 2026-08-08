@@ -323,9 +323,10 @@ def test_prompt_is_plain_app_plus_absolute_mission_instruction(tmp_path: Path) -
     mission.write_text("work", encoding="utf-8")
     config = state.load_manifest(manifest(tmp_path, mission.resolve()))
     prompt = state.composer_prompt(config)
-    assert prompt.startswith(f"@DevSpace {mission.resolve()} 파일을 읽고 끝까지 수행하세요.")
-    assert "동일한 정확한 루트만 한 번 재시도" in prompt
-    assert "상위·하위·현재 활성 작업공간이나 셸 경계 우회" in prompt
+    # Single composer authority: exactly at-DevSpace plus the absolute UTF-8
+    # mission path, with no task body or extra operational prose.
+    assert prompt == f"@DevSpace {mission.resolve()}"
+    assert prompt == state.composer_prompt(config, mission.resolve())
     assert "\n" not in prompt
 
 
@@ -341,7 +342,7 @@ def test_pro_manifest_is_attachment_only_and_hashes_exact_files(tmp_path: Path) 
             prompt.resolve(),
             transport="pro-attachment-only",
             app_name=None,
-            model="gpt-5.5-pro",
+            model="gpt-5.6-sol",
             thinking_time="heavy",
             attachments=[str(prompt.resolve()), str(packet.resolve())],
         )
@@ -396,7 +397,7 @@ def test_pro_manifest_requires_caller_pinned_attachment_and_context_hashes(
         prompt.resolve(),
         transport="pro-attachment-only",
         app_name=None,
-        model="gpt-5.5-pro",
+        model="gpt-5.6-sol",
         thinking_time="heavy",
         attachments=[str(prompt.resolve()), str(packet.resolve())],
     )
@@ -434,7 +435,7 @@ def test_context_manifest_is_required_only_for_pro(tmp_path: Path) -> None:
             mission.resolve(),
             transport="pro-attachment-only",
             app_name=None,
-            model="gpt-5.5-pro",
+            model="gpt-5.6-sol",
             thinking_time="heavy",
             attachments=[str(mission.resolve())],
             project_context_manifest_path=None,
@@ -449,7 +450,7 @@ def test_context_manifest_is_required_only_for_pro(tmp_path: Path) -> None:
             mission.resolve(),
             transport="pro-attachment-only",
             app_name=None,
-            model="gpt-5.5-pro",
+            model="gpt-5.6-sol",
             thinking_time="heavy",
             attachments=[str(mission.resolve())],
             project_context_manifest_path=str(outside.resolve()),
@@ -471,7 +472,7 @@ def test_pro_composer_identity_changes_with_project_or_attachment_bytes(tmp_path
             prompt.resolve(),
             transport="pro-attachment-only",
             app_name=None,
-            model="gpt-5.5-pro",
+            model="gpt-5.6-sol",
             thinking_time="heavy",
             attachments=[str(prompt.resolve()), str(packet.resolve())],
         ))
@@ -506,7 +507,7 @@ def test_pro_manifest_fails_closed_without_exact_contract(tmp_path: Path, extra:
     value = {
         "transport": "pro-attachment-only",
         "app_name": None,
-        "model": "gpt-5.5-pro",
+        "model": "gpt-5.6-sol",
         "thinking_time": "heavy",
         "attachments": [str(prompt.resolve())],
     }

@@ -15,15 +15,16 @@ persisted with that version.
 `manual-no-launch` profile, not a new submission route. `answer` in
 `chatgpt-question-designer` is the prompt-design alias for dispatcher mode
 `direct`, not a separate dispatcher key. Regular routes
-select `gpt-5.6` and send only `@DevSpace` plus the absolute project mission
-path and a compact exact-workspace guard. The web GPT must use only the exact
-project root recorded in that mission, read the mission and applicable
+select `gpt-5.6` and send exactly `@DevSpace` plus the absolute UTF-8 mission
+path — no task body and no extra operational prose. The web GPT must use only
+the exact project root recorded in that mission, read the mission and applicable
 `AGENTS.md` completely first, and may retry that same root once after a timeout.
 It must not substitute a parent, child, active workspace, or shell boundary
-workaround. Pro selects `gpt-5.5-pro` and sends one short instruction plus exact
-attachment files; it never mentions DevSpace.
-Regular routes select `GPT-5.6 Sol` with `heavy` and require Oracle
-evidence for visible `Extra High`. Never invent xhigh or silently downgrade.
+workaround. Pro selects `gpt-5.6-sol` with `heavy` and sends one short
+instruction plus exact attachment files; it never mentions DevSpace.
+Regular routes use the single supported `extra-high` tier and require Oracle
+evidence for the visible `Extra High` (`Power 4 of 5`). Never invent xhigh,
+use `Medium`/`High`, or silently downgrade.
 Web Multi runs only when explicitly selected; it is never an automatic
 transition or fallback for a regular or failed run.
 

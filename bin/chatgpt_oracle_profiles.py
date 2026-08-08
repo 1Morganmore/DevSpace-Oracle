@@ -15,9 +15,16 @@ from pathlib import Path
 from typing import Any
 
 
-REGULAR_REASONING_LEVELS = ("Very High", "High")
+REGULAR_REASONING_LEVELS = ("Very High",)
+# Regular GPT-5.6 Sol has exactly one supported tier: the visible Extra High
+# (Power 4 of 5).  `extra-high` is Oracle's compatibility token for it; the
+# label aliases below all describe that same tier, never a lower one.
+REGULAR_THINKING_TIME = "extra-high"
 DEVSPACE_APP_NAME = "DevSpace"
-PRO_MODEL = "gpt-5.5-pro"
+# Current ChatGPT exposes Pro as the maximum effort for GPT-5.6 Sol, not as a
+# separate model row.  Oracle 0.17.1 verifies that Pro effort independently
+# (Power 5 of 5 proof); `heavy` is only Oracle's compatibility token for it.
+PRO_MODEL = "gpt-5.6-sol"
 PRO_COMPOSER_PROMPT = "Read the attached prompt/instructions and all attached files, then complete the task."
 
 
@@ -85,10 +92,11 @@ def _resolve_reasoning(requested: str | None) -> str:
     if requested is None or not str(requested).strip():
         return REGULAR_REASONING_LEVELS[0]
     normalized = str(requested).strip().casefold()
-    if normalized in {"very high", "very-high", "extra high", "extra-high", "매우 높음"}:
+    if normalized in {"very high", "very-high", "extra high", "extra-high", "xhigh", "매우 높음"}:
         return "Very High"
-    if normalized == "high":
-        return "High"
+    # Medium/High are misleading aliases for tiers this fork does not support:
+    # accepting them would silently downgrade the only supported Extra High
+    # contract.  Reject them exactly like any other unavailable level.
     raise OracleProfileError(
         "REGULAR_REASONING_UNAVAILABLE",
         "requested regular reasoning level is unavailable; no downgrade was made",
@@ -97,14 +105,14 @@ def _resolve_reasoning(requested: str | None) -> str:
 
 
 def composer_handoff(mission_path: str | Path) -> str:
-    """The only regular-GPT composer text: app mention plus the absolute mission."""
+    """The single regular-GPT composer text: exactly the app mention plus the absolute UTF-8 mission path.
+
+    No task body and no operational prose: the mission file is the task, and
+    DevSpace is the only route authority.  The path is kept as one absolute
+    UTF-8 string so non-ASCII project paths survive the Windows npx.cmd prompt.
+    """
     mission = _absolute_mission_path(mission_path)
-    return (
-        f"@{DEVSPACE_APP_NAME} Read and execute the mission file: {mission}. "
-        "Use only the exact project root recorded there; read the mission and applicable AGENTS.md fully first. "
-        "If workspace opening times out, retry that same exact root once; never substitute a parent, child, active "
-        "workspace, or shell boundary workaround."
-    )
+    return f"@{DEVSPACE_APP_NAME} {mission}"
 
 
 def _attachment_paths(values: list[str | Path] | tuple[str | Path, ...] | None) -> list[Path]:
@@ -168,6 +176,10 @@ def build_launch_contract(
             "attachments": [str(path) for path in attachments],
             "model": PRO_MODEL,
             "reasoning_level": "Pro",
+            # `heavy` is Oracle's compatibility token for the account-visible
+            # Pro power tier (Power 5 of 5).  Keep it explicit so parent
+            # runners cannot fall back to the regular Extra High default.
+            "thinking_time": "heavy",
             "mission_path": str(mission),
             "composer_prompt": PRO_COMPOSER_PROMPT,
         })
@@ -177,11 +189,15 @@ def build_launch_contract(
             "REGULAR_ATTACHMENTS_FORBIDDEN",
             "non-Pro Oracle modes use DevSpace and must not attach files",
         )
+    reasoning = _resolve_reasoning(reasoning_level)
     result.update({
         "route": "oracle-devspace",
         "app_policy": "prompt-mention-only",
         "app_name": DEVSPACE_APP_NAME,
-        "reasoning_level": _resolve_reasoning(reasoning_level),
+        "reasoning_level": reasoning,
+        # Regular GPT-5.6 Sol runs always use the single supported Extra High
+        # tier; carry it explicitly so dispatch can never silently downgrade.
+        "thinking_time": REGULAR_THINKING_TIME,
         "mission_path": str(mission),
         "composer_prompt": composer_handoff(mission),
     })

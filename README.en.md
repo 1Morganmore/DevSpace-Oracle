@@ -15,9 +15,11 @@ It connects two upstream tools:
 - [DevSpace](https://github.com/Waishnav/devspace) lets ChatGPT read, edit, and
   run commands only inside project roots approved by the user.
 
-Regular GPT runs verify `GPT-5.6 Sol` at the visible `Extra High` tier, then
-send one line containing `@DevSpace` and the absolute UTF-8 mission-file path.
-Pro runs use `gpt-5.5-pro` with exact, hash-frozen attachments and no DevSpace.
+Regular GPT runs verify `GPT-5.6 Sol` at the visible `Extra High` tier (`Power
+4 of 5`), then send one line containing exactly `@DevSpace` and the absolute
+UTF-8 mission-file path.
+Pro runs use `gpt-5.6-sol` with the proven `Power 5 of 5` (`Pro`) effort,
+exact hash-frozen attachments, and no DevSpace.
 
 ## What it provides
 
@@ -61,7 +63,7 @@ Host state and ChatGPT output are stored outside DevSpace projects under
 | Web Multi-GPT | Web Multi-GPT | Independent parallel perspectives and merger | 2-25 Oracle sessions |
 | Local Multi-GPT | Local Multi-GPT | Local advisory synthesis and counterexample search | Fixed `gpt-5.6-luna` + `max`, read-only |
 | Comprehensive | comprehensive mode | Plan, explicitly selected Pro/Web Multi, review, implementation, gate | Staged Oracle workflow |
-| Pro | `pro` / Pro | Independent final judgment or design review; result only | Oracle attachments only; `gpt-5.5-pro` |
+| Pro | `pro` / Pro | Independent final judgment or design review; result only | Oracle attachments only; `gpt-5.6-sol` + `Power 5 of 5` |
 
 Orchestrator mode is a single web submission. Comprehensive mode contains an
 orchestrator-equivalent implementation stage plus planning, independent review,
