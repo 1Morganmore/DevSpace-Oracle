@@ -159,14 +159,21 @@ PATCHES_0171 = {
     "dist/src/browser/actions/promptComposer.js": {
         "patch": "promptComposer.patch",
         "pristine": "db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000",
-        "patched": "bb85c6f09f23c4e0c9093bd472c83b17b1ef7325bcd89a3348429610eeefbd74",
+        "patched": "87911b46026d3dd08a643b90aab5dc7009704956a3b5fed493cc600abcb7739a",
         "legacy_patched": [
-            # One-shot mention path before the split `@` trigger: inserting the
-            # whole `@App` in a single browser input batch can leave literal
-            # text with no suggestion UI on the current ChatGPT composer.
+            # Both deployed Input.insertText levels fail to generate the key
+            # event required by the current ChatGPT mention picker.
             "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f",
+            "bb85c6f09f23c4e0c9093bd472c83b17b1ef7325bcd89a3348429610eeefbd74",
         ],
-        "legacy_patch": "promptComposer.pre-split-trigger.patch",
+        "legacy_patches": {
+            "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f": (
+                "promptComposer.pre-split-trigger.patch"
+            ),
+            "bb85c6f09f23c4e0c9093bd472c83b17b1ef7325bcd89a3348429610eeefbd74": (
+                "promptComposer.pre-key-event-trigger.patch"
+            ),
+        },
     },
     "dist/src/browser/actions/thinkingTime.js": {
         "patch": "thinkingTime.strict.patch",

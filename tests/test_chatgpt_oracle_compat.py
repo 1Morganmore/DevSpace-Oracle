@@ -48,7 +48,7 @@ def run_prompt_route_case(
     pill_editable: bool = False,
     suggestion_case: str = "option",
     diagnostic_stop_before_send: bool = False,
-    trigger_split: bool = False,
+    trigger_key_event: bool = False,
 ) -> tuple[dict[str, object], str]:
     compat = load_compat()
     relative = Path("dist/src/browser/actions/promptComposer.js")
@@ -108,7 +108,7 @@ class BrowserAutomationError extends Error {
             "pillIconVisible": pill_icon_visible,
             "pillEditable": pill_editable,
             "suggestionCase": suggestion_case,
-            "triggerSplit": trigger_split,
+            "triggerKeyEvent": trigger_key_event,
         }
     )
     harness = f"""
@@ -124,8 +124,9 @@ let suggestionObserved = false;
 let initialRouteConfirmed = false;
 let finalRouteConfirmed = false;
 let routeChecks = 0;
-let atTriggered = false;
+let mentionKeyTriggered = false;
 const inserted = [];
+const keyEvents = [];
 
 class FakeNode {{
   constructor(text, attrs = {{}}, visible = true) {{
@@ -258,7 +259,7 @@ const document = {{
   activeElement: composer,
   querySelectorAll(selector) {{
     if (selector.includes('[role="option"]')) {{
-      if (scenario.triggerSplit && !atTriggered) return [];
+      if (scenario.triggerKeyEvent && !mentionKeyTriggered) return [];
       return suggestionSurfaces;
     }}
     if (selector.includes('#prompt-textarea')) return [composer];
@@ -321,9 +322,14 @@ const runtime = {{
 const input = {{
   async insertText({{ text }}) {{
     inserted.push(text);
-    if (scenario.triggerSplit && text === '@') atTriggered = true;
   }},
-  async dispatchKeyEvent() {{}},
+  async dispatchKeyEvent(event) {{
+    keyEvents.push(event);
+    if (event.type === 'keyDown' && event.text) {{
+      inserted.push(event.text);
+      if (scenario.triggerKeyEvent && event.text === '@') mentionKeyTriggered = true;
+    }}
+  }},
 }};
 let error = null;
 let result = null;
@@ -349,6 +355,7 @@ console.log(JSON.stringify({{
   clearCount,
   sendAttempts,
   inserted,
+  keyEvents,
 }}));
 """
     completed = subprocess.run(
@@ -776,53 +783,70 @@ def test_fresh_lf_install_applies_final_strict_patch(tmp_path: Path, monkeypatch
     )["ready"] is True
 
 
-def test_old_prompt_composer_level_migrates_to_split_trigger(
+def test_old_prompt_composer_levels_migrate_to_key_event_trigger(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The previously shipped one-shot mention patch (a3882c78...) must migrate
-    # to the split `@`-trigger level via the preserved legacy patch, from both
-    # LF and CRLF deployments, while unknown bytes fail closed.
+    # Both shipped Input.insertText levels must migrate through their exact
+    # legacy patches, from LF or CRLF deployments, while unknown bytes fail
+    # closed.
     compat = load_compat()
     relative = "dist/src/browser/actions/promptComposer.js"
     patches = compat.patch_root("0.17.1")
     contract = compat.VERSION_PATCHES["0.17.1"][relative]
     monkeypatch.setattr(compat, "VERSION_PATCHES", {"0.17.1": {relative: contract}})
 
-    package = tmp_path / "package"
-    target = package / Path(relative)
-    target.parent.mkdir(parents=True)
-    (package / "package.json").write_text('{"version":"0.17.1"}', encoding="utf-8")
-    target.write_bytes(PRISTINE_PROMPT_COMPOSER.read_bytes())
-    compat._apply_patch(package, patches / "promptComposer.pre-split-trigger.patch")
-    era_bytes = target.read_bytes()
-    assert digest(era_bytes) == (
-        "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f"
-    )
+    legacy_levels = []
+    for label, patch_name, expected in (
+        (
+            "one-shot",
+            "promptComposer.pre-split-trigger.patch",
+            "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f",
+        ),
+        (
+            "split-insert-text",
+            "promptComposer.pre-key-event-trigger.patch",
+            "bb85c6f09f23c4e0c9093bd472c83b17b1ef7325bcd89a3348429610eeefbd74",
+        ),
+    ):
+        package = tmp_path / f"fixture-{label}"
+        target = package / Path(relative)
+        target.parent.mkdir(parents=True)
+        (package / "package.json").write_text(
+            '{"version":"0.17.1"}', encoding="utf-8"
+        )
+        target.write_bytes(PRISTINE_PROMPT_COMPOSER.read_bytes())
+        compat._apply_patch(package, patches / patch_name)
+        legacy_bytes = target.read_bytes()
+        assert digest(legacy_bytes) == expected
+        legacy_levels.append((label, legacy_bytes))
 
     backup = tmp_path / "backup"
-    for label, legacy_bytes in (
-        ("era-lf", era_bytes),
-        ("era-crlf", era_bytes.replace(b"\n", b"\r\n")),
-    ):
-        instance = tmp_path / f"package-{label}"
-        instance_target = instance / Path(relative)
-        instance_target.parent.mkdir(parents=True)
-        (instance / "package.json").write_text('{"version":"0.17.1"}', encoding="utf-8")
-        instance_target.write_bytes(legacy_bytes)
-        result = compat.ensure_oracle_compatibility(
-            "oracle 0.17.1", package_root=instance, backup_root=backup
-        )
-        assert result["changed"] == [relative]
-        assert compat.sha256_file(instance_target) == contract["patched"] == (
-            "bb85c6f09f23c4e0c9093bd472c83b17b1ef7325bcd89a3348429610eeefbd74"
-        )
-        assert compat.sha256_file(backup / Path(relative)) == contract["pristine"]
+    for level, legacy_bytes in legacy_levels:
+        for newline, deployed_bytes in (
+            ("lf", legacy_bytes),
+            ("crlf", legacy_bytes.replace(b"\n", b"\r\n")),
+        ):
+            instance = tmp_path / f"package-{level}-{newline}"
+            instance_target = instance / Path(relative)
+            instance_target.parent.mkdir(parents=True)
+            (instance / "package.json").write_text(
+                '{"version":"0.17.1"}', encoding="utf-8"
+            )
+            instance_target.write_bytes(deployed_bytes)
+            result = compat.ensure_oracle_compatibility(
+                "oracle 0.17.1", package_root=instance, backup_root=backup
+            )
+            assert result["changed"] == [relative]
+            assert compat.sha256_file(instance_target) == contract["patched"] == (
+                "87911b46026d3dd08a643b90aab5dc7009704956a3b5fed493cc600abcb7739a"
+            )
+            assert compat.sha256_file(backup / Path(relative)) == contract["pristine"]
 
     unknown = tmp_path / "package-unknown"
     unknown_target = unknown / Path(relative)
     unknown_target.parent.mkdir(parents=True)
     (unknown / "package.json").write_text('{"version":"0.17.1"}', encoding="utf-8")
-    unknown_target.write_bytes(era_bytes + b"// drift\n")
+    unknown_target.write_bytes(legacy_levels[0][1] + b"// drift\n")
     with pytest.raises(compat.OracleCompatError) as mismatch:
         compat.ensure_oracle_compatibility(
             "oracle 0.17.1", package_root=unknown, backup_root=backup
@@ -965,11 +989,10 @@ def test_group_suggestion_resolver_refuses_non_authoritative_candidates_before_s
     assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
 
 
-def test_split_mention_trigger_opens_suggestion_before_app_name(tmp_path: Path) -> None:
-    # ChatGPT is expected to open the app picker on a bare `@` trigger as its
-    # own browser input event.  The one-shot path must split the mention:
-    # insert '@', one bounded settle, then the app name, so the picker can
-    # open before app-name filtering narrows the results.
+def test_keyboard_mention_trigger_opens_suggestion_before_app_name(tmp_path: Path) -> None:
+    # The picker requires a key event, not CDP Input.insertText. Emit one
+    # keyDown/keyUp pair for '@', then retain the bounded settle and fast text
+    # insertion for the app name.
     result, stderr = run_prompt_route_case(
         tmp_path,
         suggestion="DevSpace",
@@ -977,11 +1000,32 @@ def test_split_mention_trigger_opens_suggestion_before_app_name(tmp_path: Path) 
         semantic_identity_attr=None,
         semantic_layout="pill",
         suggestion_case="group",
-        trigger_split=True,
+        trigger_key_event=True,
     )
 
     assert result["error"] is None
     assert result["inserted"] == ["@", "DevSpace", " mission"]
+    mention_events = [event for event in result["keyEvents"] if event.get("key") == "@"]
+    assert mention_events == [
+        {
+            "type": "keyDown",
+            "key": "@",
+            "code": "Digit2",
+            "text": "@",
+            "unmodifiedText": "@",
+            "windowsVirtualKeyCode": 50,
+            "nativeVirtualKeyCode": 50,
+            "modifiers": 8,
+        },
+        {
+            "type": "keyUp",
+            "key": "@",
+            "code": "Digit2",
+            "windowsVirtualKeyCode": 50,
+            "nativeVirtualKeyCode": 50,
+            "modifiers": 8,
+        },
+    ]
     assert result["suggestionObserved"] is True
     assert result["suggestionClicks"] == 1
     assert result["initialRouteConfirmed"] is True
@@ -991,15 +1035,15 @@ def test_split_mention_trigger_opens_suggestion_before_app_name(tmp_path: Path) 
     assert "APP_MENTION_ROUTE_UNCONFIRMED" not in stderr
 
 
-def test_split_mention_trigger_without_surface_fails_closed(tmp_path: Path) -> None:
+def test_keyboard_mention_trigger_without_surface_fails_closed(tmp_path: Path) -> None:
     # With no suggestion surface at all (e.g. the app is not selectable in
-    # the account), the split trigger must keep the exact fail-closed path:
+    # the account), the keyboard trigger must keep the exact fail-closed path:
     # no click, no send, APP_MENTION_ROUTE_UNCONFIRMED before submission.
     result, stderr = run_prompt_route_case(
         tmp_path,
         suggestion=None,
         semantic_token=None,
-        trigger_split=True,
+        trigger_key_event=True,
     )
 
     assert result["suggestionClicks"] == 0
@@ -1176,7 +1220,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "dist/src/cli/browserConfig.js": ("989f14399c8aa51913752306135e11d97e4f1c55b2baf984907f1b54959cc340", "bd18d11e4770fa5335c889b7856622f2da4199351ec65bc17a5ec1f472e2506f"),
         "dist/src/browser/index.js": ("335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11", "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895"),
         "dist/src/browser/actions/assistantResponse.js": ("0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d", "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4"),
-        "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "bb85c6f09f23c4e0c9093bd472c83b17b1ef7325bcd89a3348429610eeefbd74"),
+        "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "87911b46026d3dd08a643b90aab5dc7009704956a3b5fed493cc600abcb7739a"),
         "dist/src/browser/actions/thinkingTime.js": ("508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca", "3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3"),
     }
 
@@ -1230,9 +1274,23 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
     composer = contracts["dist/src/browser/actions/promptComposer.js"]
     assert composer["legacy_patched"] == [
         "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f",
+        "bb85c6f09f23c4e0c9093bd472c83b17b1ef7325bcd89a3348429610eeefbd74",
     ]
-    assert composer["legacy_patch"] == "promptComposer.pre-split-trigger.patch"
-    assert "await input.insertText({ text: \"@\" })" in patches["dist/src/browser/actions/promptComposer.js"]
+    assert composer["legacy_patches"] == {
+        "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f": (
+            "promptComposer.pre-split-trigger.patch"
+        ),
+        "bb85c6f09f23c4e0c9093bd472c83b17b1ef7325bcd89a3348429610eeefbd74": (
+            "promptComposer.pre-key-event-trigger.patch"
+        ),
+    }
+    prompt_patch = patches["dist/src/browser/actions/promptComposer.js"]
+    assert 'type: "keyDown"' in prompt_patch
+    assert 'key: "@"' in prompt_patch
+    assert 'text: "@"' in prompt_patch
+    assert 'type: "keyUp"' in prompt_patch
+    assert 'code: "Digit2"' in prompt_patch
+    assert "await input.insertText({ text: \"@\" })" not in prompt_patch
     assert "await delay(250)" in patches["dist/src/browser/actions/promptComposer.js"]
     assert "await input.insertText({ text: appName })" in patches["dist/src/browser/actions/promptComposer.js"]
     assert "mentionSurfaceDeadline" not in patches["dist/src/browser/actions/promptComposer.js"]
@@ -1253,6 +1311,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "thinkingTime.strict.pre-advanced-view-sibling.patch",
         "thinkingTime.extra-high-fail-closed.patch",
         "thinkingTime.pro-heavy-upgrade.patch",
+        "promptComposer.pre-key-event-trigger.patch",
         "promptComposer.pre-split-trigger.patch",
     }:
         assert (compat.patch_root("0.17.1") / patch_name).is_file(), patch_name

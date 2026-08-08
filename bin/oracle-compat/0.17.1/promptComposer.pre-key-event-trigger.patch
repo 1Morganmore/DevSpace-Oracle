@@ -1,8 +1,8 @@
 diff --git a/dist/src/browser/actions/promptComposer.js b/dist/src/browser/actions/promptComposer.js
-index c643386..dfa9102 100644
+index c643386..6a3e0fc 100644
 --- a/dist/src/browser/actions/promptComposer.js
 +++ b/dist/src/browser/actions/promptComposer.js
-@@ -14,6 +14,10 @@ const ENTER_KEY_TEXT = "\r";
+@@ -14,6 +14,10 @@
  export async function submitPrompt(deps, prompt, logger) {
      const { runtime, input } = deps;
      await waitForDomReady(runtime, logger, deps.inputTimeoutMs ?? undefined);
@@ -13,7 +13,7 @@ index c643386..dfa9102 100644
      const encodedPrompt = JSON.stringify(prompt);
      const focusResult = await runtime.evaluate({
          expression: `(() => {
-@@ -67,7 +71,318 @@ export async function submitPrompt(deps, prompt, logger) {
+@@ -67,7 +71,301 @@
          await logDomFailure(runtime, logger, "focus-textarea");
          throw new Error("Failed to focus prompt textarea");
      }
@@ -59,31 +59,14 @@ index c643386..dfa9102 100644
 +    if (mentionMatch) {
 +        const appName = mentionMatch[1].slice(1);
 +        routedAppName = appName;
-+        // CDP Input.insertText explicitly represents text that does not come
-+        // from a key press. ChatGPT's current mention picker ignores both a
-+        // one-shot `@App` insert and a separately inserted bare `@` (verified
-+        // by two live fail-closed runs), so emit the trigger as one real key
-+        // event while leaving the remaining text on the existing fast path.
-+        await input.dispatchKeyEvent({
-+            type: "keyDown",
-+            key: "@",
-+            code: "Digit2",
-+            text: "@",
-+            unmodifiedText: "@",
-+            windowsVirtualKeyCode: 50,
-+            nativeVirtualKeyCode: 50,
-+            modifiers: 8,
-+        });
-+        await input.dispatchKeyEvent({
-+            type: "keyUp",
-+            key: "@",
-+            code: "Digit2",
-+            windowsVirtualKeyCode: 50,
-+            nativeVirtualKeyCode: 50,
-+            modifiers: 8,
-+        });
-+        // The exact discovery/click and semantic-pill guards below remain the
-+        // authoritative gates and fail closed before either send path.
++        await input.insertText({ text: "@" });
++        // ChatGPT is expected to open the app picker on the bare `@` trigger
++        // as its own browser input event; a single `@App` insert can leave
++        // literal text with no suggestion UI (live-observed).  The split is
++        // the smallest evidence-backed hypothesis for that failure, so give
++        // the picker one bounded settle before typing the app name.  The
++        // exact discovery/click and semantic-pill guards below stay the
++        // authoritative gates and remain fail-closed.
 +        await delay(250);
 +        await input.insertText({ text: appName });
 +        // Discovery and click must resolve the same unique suggestion. Current
@@ -333,10 +316,11 @@ index c643386..dfa9102 100644
      // Some pages (notably ChatGPT when subscriptions/widgets load) need a brief settle
      // before the send button becomes enabled; give it a short breather to avoid races.
      await delay(500);
-@@ -167,6 +482,57 @@ export async function submitPrompt(deps, prompt, logger) {
+@@ -166,6 +464,57 @@
+             promptLength,
              observedLength,
          });
-     }
++    }
 +    // The empty-readback fallback can replace Lexical content with literal
 +    // text. Revalidate the semantic token after every possible composer
 +    // mutation and immediately before either send-button or Enter submission.
@@ -387,7 +371,6 @@ index c643386..dfa9102 100644
 +                appName: routedAppName,
 +            });
 +        }
-+    }
+     }
      const clicked = await attemptSendButton(runtime, input, logger, deps?.attachmentNames, deps?.attachmentTimeoutMs);
      if (!clicked) {
-         await input.dispatchKeyEvent({

@@ -60,10 +60,20 @@ def test_all_hash_gated_compatibility_patch_assets_are_installed() -> None:
     include = set(values()[0]["include"])
     oracle = runpy.run_path(str(ROOT / "bin/chatgpt_oracle_compat.py"))
     devspace = runpy.run_path(str(ROOT / "bin/chatgpt_devspace_compat.py"))
+
+    def patch_names(contract: dict) -> list[str]:
+        names = [contract["patch"]]
+        if contract.get("legacy_patch"):
+            names.append(contract["legacy_patch"])
+        for value in contract.get("legacy_patches", {}).values():
+            names.extend([value] if isinstance(value, str) else value)
+        return names
+
     required = {
-        f"bin/oracle-compat/{version}/{contract['patch']}"
+        f"bin/oracle-compat/{version}/{patch}"
         for version, patches in oracle["VERSION_PATCHES"].items()
         for contract in patches.values()
+        for patch in patch_names(contract)
     } | {
         f"bin/devspace-compat/{devspace['SUPPORTED_VERSION']}/{contract['patch']}"
         for contract in devspace["PATCHES"].values()
