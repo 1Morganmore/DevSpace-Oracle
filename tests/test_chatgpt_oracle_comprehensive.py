@@ -50,6 +50,21 @@ def run_workflow(module, path: Path, **kwargs):
     )
 
 
+def test_project_url_is_normalized_and_propagated_to_comprehensive_stages(tmp_path: Path) -> None:
+    module = load()
+    path = manifest(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["chatgpt_project_url"] = "https://chatgpt.com/g/g-p-example/project/"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    config = module.load_manifest(path)
+    config["_parallel_parent_id"] = "b" * 64
+    mission = config["initial_mission_path"]
+    regular = module._oracle_manifest(
+        config, mission, tmp_path / "regular", "regular-run-id", stage="plan", mission_sha=module.sha(mission)
+    )
+    assert json.loads(regular.read_text(encoding="utf-8"))["chatgpt_project_url"] == config["chatgpt_project_url"]
+
+
 def assert_pro_context(module, payload: dict, mission: Path, evidence: tuple[Path, ...]) -> Path:
     context_manifest = Path(payload["project_context_manifest_path"])
     context = json.loads(context_manifest.read_text(encoding="utf-8"))

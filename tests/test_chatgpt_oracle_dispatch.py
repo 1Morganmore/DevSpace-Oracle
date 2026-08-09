@@ -108,6 +108,19 @@ def test_context_manifest_is_required_for_pro_and_forbidden_for_regular_modes(tm
         )
 
 
+def test_project_url_is_bound_into_a_regular_manifest(tmp_path: Path) -> None:
+    module = load()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    project_url = "https://chatgpt.com/g/g-p-example/project"
+    target = tmp_path / "regular.json"
+    module.compile_manifest(
+        mode="GPT", project_root=tmp_path, mission_path=mission, output_path=target,
+        chatgpt_project_url=project_url,
+    )
+    assert json.loads(target.read_text(encoding="utf-8"))["chatgpt_project_url"] == project_url
+
+
 def test_live_dispatch_requires_and_propagates_preview_hash(monkeypatch, capsys, tmp_path: Path) -> None:
     module = load()
     mission = tmp_path / "mission.md"

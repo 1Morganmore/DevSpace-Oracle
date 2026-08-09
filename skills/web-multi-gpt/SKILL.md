@@ -14,6 +14,8 @@ Use `bin/chatgpt_oracle_multi.py` with schema
 - `merger_mission_path` and its exact lowercase `merger_mission_sha256`
 - `max_concurrency`: 1..5
 - optional `next_stage_result_path` for comprehensive relay
+- optional exact `chatgpt_project_url` to start every independent solver and
+  merger conversation inside the same ChatGPT Project
 
 Advisory lanes are `access: read-only`. A write lane must declare
 `access: worktree-write` and a distinct pre-created worktree `project_root`;

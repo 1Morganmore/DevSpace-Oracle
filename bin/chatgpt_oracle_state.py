@@ -16,9 +16,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
+from urllib.parse import urlsplit
 
 SCHEMA = "codex.chatgpt.oracle-run/v1"
 DEVSPACE_APP_NAME = "DevSpace"
+REGULAR_MODEL = "gpt-5.6"
+REGULAR_MODEL_STRATEGY = "select"
+REGULAR_THINKING_TIME = "extra-high"
 ORACLE_ACTIVE_VERSION = "0.17.1"
 ORACLE_RECOVERABLE_VERSIONS = ("0.16.1", "0.17.0", ORACLE_ACTIVE_VERSION)
 WAIT_CAPABLE_VERSIONS = {"0.17.0", ORACLE_ACTIVE_VERSION}
@@ -159,6 +163,7 @@ SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{7,95}$")
 WEB_MULTI_CHILD_RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[a-f0-9]{12}$")
 CHATGPT_CONVERSATION_URL_RE = re.compile(r"https://chatgpt\.com/c/[A-Za-z0-9_-]+", re.IGNORECASE)
+CHATGPT_PROJECT_PATH_RE = re.compile(r"^/g/[A-Za-z0-9_-]+/project/?$")
 _THREAD_MUTEXES: dict[str, threading.Lock] = {}
 _THREAD_MUTEXES_GUARD = threading.Lock()
 
@@ -205,6 +210,7 @@ class OracleConfig:
     bound_input_sha256s: tuple[str, ...]
     web_multi_child_provenance_path: Path | None
     web_multi_child_provenance_sha256: str | None
+    chatgpt_project_url: str | None
 
 
 @dataclass(frozen=True)
@@ -299,6 +305,33 @@ def is_within(root: Path, candidate: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def normalize_chatgpt_project_url(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlsplit(raw)
+        valid = (
+            parsed.scheme.casefold() == "https"
+            and (parsed.hostname or "").casefold() == "chatgpt.com"
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.port is None
+            and CHATGPT_PROJECT_PATH_RE.fullmatch(parsed.path) is not None
+            and not parsed.query
+            and not parsed.fragment
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise OracleStateError(
+            "CHATGPT_PROJECT_URL_INVALID",
+            "chatgpt_project_url must be an exact https://chatgpt.com/g/<project>/project URL",
+            {"chatgpt_project_url": raw},
+        )
+    return f"https://chatgpt.com{parsed.path.rstrip('/')}"
 
 
 def oracle_state_root() -> Path:
@@ -596,6 +629,21 @@ def load_manifest(
             raise OracleStateError("PRO_MODEL_STRATEGY_INVALID", "Pro requires explicit model selection")
         if thinking_time != "heavy":
             raise OracleStateError("PRO_THINKING_TIME_INVALID", "Pro requires heavy reasoning")
+    else:
+        if model.casefold() != REGULAR_MODEL:
+            raise OracleStateError(
+                "REGULAR_MODEL_INVALID",
+                "DevSpace runs require the exact GPT-5.6 browser model; no alternate model is allowed",
+                {"model": model},
+            )
+        if model_strategy != REGULAR_MODEL_STRATEGY:
+            raise OracleStateError("REGULAR_MODEL_STRATEGY_INVALID", "DevSpace runs require explicit model selection")
+        if thinking_time != REGULAR_THINKING_TIME:
+            raise OracleStateError(
+                "REGULAR_THINKING_TIME_INVALID",
+                "DevSpace runs require the visible Extra High reasoning tier; no downgrade is allowed",
+            )
+    chatgpt_project_url = normalize_chatgpt_project_url(payload.get("chatgpt_project_url"))
     copy_profile_raw = str(payload.get("copy_profile") or "").strip()
     if copy_profile_raw:
         copy_profile = absolute_path(copy_profile_raw, label="copy_profile", must_exist=True)
@@ -685,6 +733,7 @@ def load_manifest(
         bound_input_sha256s,
         provenance_path,
         provenance_sha256,
+        chatgpt_project_url,
     )
 
 
@@ -744,6 +793,7 @@ def state_payload(config: OracleConfig, layout: RunLayout, *, status: str, resol
             "copy_profile": str(config.copy_profile) if config.copy_profile else None,
             "research": config.research,
             "archive": config.archive,
+            "chatgpt_project_url": config.chatgpt_project_url,
         },
         "parallel_parent_id": config.parallel_parent_id,
         "manifest": {

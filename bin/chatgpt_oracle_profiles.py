@@ -59,8 +59,19 @@ _PROFILES = {
     "pro": OracleModeProfile("pro", "pro", True, False),
 }
 _ALIASES = {
+    "gpt": "direct",
+    "answer": "direct",
+    "일반 gpt": "direct",
+    "직접": "direct",
+    "계획": "plan",
+    "검토": "review",
+    "수정": "edit",
+    "지휘": "orchestrator",
+    "지휘모드": "orchestrator",
+    "딥 리서치": "deep-research",
     "deep_research": "deep-research",
     "deep research": "deep-research",
+    "프로": "pro",
     "pro": "pro",
     "gpt-pro": "pro",
 }

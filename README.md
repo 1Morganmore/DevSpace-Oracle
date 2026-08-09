@@ -145,6 +145,20 @@ ChatGPT 설정·앱 목록·권한·삭제·선택 UI를 자동화하지 않습�
 [DevSpace + Tailscale 설정](docs/DEVSPACE_TAILSCALE_SETUP.md)을
 참고하세요.
 
+허용 경로만 바꿀 때는 Owner 인증을 다시 만들지 않습니다. 현재 값을 확인하고,
+교체할 전체 목록을 미리 본 뒤 적용합니다.
+
+```powershell
+python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py roots
+python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py roots `
+  --root C:\projects\alpha --root D:\work\beta --dry-run
+python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py roots `
+  --root C:\projects\alpha --root D:\work\beta --apply --restart
+```
+
+`roots`는 `config.json`의 `allowedRoots`만 원자적으로 교체하고 다른 설정과
+`auth.json`은 보존합니다. `--restart`를 생략하면 다음 DevSpace 재시작 때 반영됩니다.
+
 ## 일반 GPT 실행 예시
 
 프로젝트 안에 UTF-8 미션 파일을 만든 뒤 먼저 미리보기 합니다.
@@ -156,8 +170,15 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
   --mission-path C:\project\mission.md `
   --manifest-output C:\project\.ai-bridge\oracle.json `
   --reasoning-level "Very High" `
+  --chatgpt-project-url https://chatgpt.com/g/g-p-example/project `
   --dry-run
 ```
+
+`--chatgpt-project-url`은 선택 사항입니다. 지정하면 Oracle이 그 ChatGPT Project에서
+새 채팅을 만듭니다. 이름을 퍼지 검색하지 않고 정확한
+`https://chatgpt.com/g/<id>/project` URL만 받습니다. 생략하면 기존처럼 일반 새
+채팅을 사용합니다. 같은 필드는 Pro, 종합모드, Web Multi-GPT 매니페스트에도
+사용할 수 있습니다.
 
 실제 실행 승인이 있을 때만 `--dry-run`을 제거하고, 같은 명령에 미리보기의
 최상위 `oracle_manifest_sha256`을
@@ -176,6 +197,7 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
   --context-manifest C:\project\.ai-bridge\pro-context-manifest.json `
   --attachment C:\project\.ai-bridge\packet.zip `
   --manifest-output C:\project\.ai-bridge\pro.json `
+  --chatgpt-project-url https://chatgpt.com/g/g-p-example/project `
   --dry-run
 ```
 

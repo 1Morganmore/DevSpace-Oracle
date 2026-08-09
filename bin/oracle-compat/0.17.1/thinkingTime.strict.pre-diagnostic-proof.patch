@@ -2,7 +2,7 @@ diff --git a/dist/src/browser/actions/thinkingTime.js b/dist/src/browser/actions
 index 491445b..d0f4637 100644
 --- a/dist/src/browser/actions/thinkingTime.js
 +++ b/dist/src/browser/actions/thinkingTime.js
-@@ -32,6 +32,29 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
+@@ -32,6 +32,13 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
      const targetModelKind = inferThinkingTargetModelKind(desiredModel);
      const observedModelKind = result && "modelKind" in result ? result.modelKind : null;
      const strictProEffort = (targetModelKind === "pro" || observedModelKind === "pro") && level === "extended";
@@ -13,26 +13,10 @@ index 491445b..d0f4637 100644
 +        (level === "extra-high" || level === "heavy");
 +    const strictRequestedEffort = strictProEffort || strictGpt56Effort;
 +    const requiredEffortLabel = strictProEffort ? "Pro Extended" : capitalizedLevel;
-+    // The picker can finish rendering between the in-page selection probe and
-+    // its final diagnostic snapshot. Accept only the same exact visible proof:
-+    // GPT-5.6 Sol, Pro effort, and Power 5 of 5.
-+    const diagnosticItems = (result?.diagnostic?.menus ?? []).flatMap((menu) => menu?.items ?? []);
-+    const diagnosticProProof = strictGpt56Effort && level === "heavy" &&
-+        String(result?.diagnostic?.modelButton?.text ?? "").trim().toLowerCase() === "pro" &&
-+        diagnosticItems.some((item) => item?.testid === "composer-model-picker-slider-simple-view" &&
-+            /\bpro\b/i.test(String(item?.text ?? "")) &&
-+            /\b5\s+of\s+5\b/i.test(String(item?.text ?? ""))) &&
-+        diagnosticItems.some((item) => item?.testid === "composer-model-picker-slider-advanced-view" &&
-+            /model\s*gpt-?5[._ -]6\s*sol/i.test(String(item?.text ?? "")) &&
-+            /effort\s*pro/i.test(String(item?.text ?? "")));
-+    if (diagnosticProProof) {
-+        logger(formatBrowserThinkingLog("Power 5 of 5 (Pro) (already selected)"));
-+        return;
-+    }
      switch (result?.status) {
          case "already-selected":
              logger(formatBrowserThinkingLog(`${result.label ?? capitalizedLevel} (already selected)`));
-@@ -52,8 +75,8 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
+@@ -52,8 +59,8 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
                      ? ` for ${targetModelKind}`
                      : "";
              const message = `Thinking time: ${result.status.replaceAll("-", " ")}${kindHint} (requested ${capitalizedLevel})`;
@@ -43,7 +27,7 @@ index 491445b..d0f4637 100644
              }
              // Nothing was clicked, so the tab keeps whatever effort it already had —
              // which is not necessarily ChatGPT's default.
-@@ -63,8 +86,8 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
+@@ -63,8 +70,8 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
          default: {
              await logDomFailure(Runtime, logger, "thinking-time-unknown");
              logPickerDiagnostic(result, logger);
@@ -54,7 +38,7 @@ index 491445b..d0f4637 100644
              }
              logger(formatBrowserThinkingLog(`unknown outcome selecting ${capitalizedLevel}; continuing with ChatGPT default.`));
              return;
-@@ -371,6 +394,105 @@ function buildThinkingTimeExpression(level, desiredModel) {
+@@ -371,6 +378,105 @@ function buildThinkingTimeExpression(level, desiredModel) {
        ...extra,
        diagnostic: collectPickerDiagnostic(),
      });
@@ -160,7 +144,7 @@ index 491445b..d0f4637 100644
      const findOptionInMenu = (menu, modelKindOverride = null) => {
        const items = Array.from(menu.querySelectorAll(MENU_ITEM_SELECTOR));
        const modelKind = modelKindOverride || effectiveTargetModelKind();
-@@ -560,6 +682,10 @@ function buildThinkingTimeExpression(level, desiredModel) {
+@@ -560,6 +666,10 @@ function buildThinkingTimeExpression(level, desiredModel) {
          TARGET_MODEL_KIND ||
          modelKindFromNode(trigger) ||
          effectiveTargetModelKind();
@@ -171,7 +155,7 @@ index 491445b..d0f4637 100644
        const option = findOption();
        if (!option && TARGET_IS_GPT56_MODEL && TARGET_LEVEL === 'heavy') {
          // GPT-5.6 has no "heavy" tier: Pro is the closest thing. Accept a pill that
-@@ -686,6 +812,8 @@ function buildThinkingTimeExpression(level, desiredModel) {
+@@ -686,6 +796,8 @@ function buildThinkingTimeExpression(level, desiredModel) {
      };
      let composerEffortPill = findComposerEffortPill();
      let modelBtn = findModelButton();
@@ -180,7 +164,7 @@ index 491445b..d0f4637 100644
      const modelKindFromLegacyTrailing = (trailing) => {
        const row = trailing.closest?.(
          '[role="menuitem"], [role="menuitemradio"], [data-radix-collection-item]',
-@@ -860,6 +988,10 @@ function buildThinkingTimeExpression(level, desiredModel) {
+@@ -860,6 +972,10 @@ function buildThinkingTimeExpression(level, desiredModel) {
        dispatchClickSequence(modelBtn);
        await sleep(INITIAL_WAIT_MS);
      }

@@ -48,6 +48,17 @@ def test_deep_research_is_only_a_mode_flag() -> None:
     assert contract["attachments"] == []
 
 
+@pytest.mark.parametrize(
+    ("alias", "mode"),
+    [
+        ("GPT", "direct"), ("answer", "direct"), ("계획", "plan"), ("검토", "review"),
+        ("수정", "edit"), ("지휘모드", "orchestrator"), ("딥 리서치", "deep-research"), ("프로", "pro"),
+    ],
+)
+def test_user_facing_mode_aliases_resolve_to_existing_profiles(alias: str, mode: str) -> None:
+    assert load_profiles().resolve_profile(alias).mode == mode
+
+
 @pytest.mark.parametrize("level", ["xhigh", "extra-high", "very high", "매우 높음"])
 def test_regular_reasoning_accepts_only_extra_high_aliases(tmp_path: Path, level: str) -> None:
     profiles = load_profiles()

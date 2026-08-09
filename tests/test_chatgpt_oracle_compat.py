@@ -759,12 +759,24 @@ def test_fork_legacy_thinking_time_levels_migrate_to_final_strict_patch(
     era_bytes = era_target.read_bytes()
     assert digest(era_bytes) == "4106ed89a032d06fadcf1c1600e238e26243c02d1c3ef4261ea70169396d464e"
 
+    prior_work = tmp_path / "stage-prior-strict"
+    prior_target = prior_work / Path(relative)
+    prior_target.parent.mkdir(parents=True)
+    prior_target.write_bytes(pristine.replace(b"\r\n", b"\n"))
+    compat._apply_patch(
+        prior_work, patches / "thinkingTime.strict.pre-diagnostic-proof.patch"
+    )
+    prior_bytes = prior_target.read_bytes()
+    assert digest(prior_bytes) == "3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3"
+
     backup = tmp_path / "backup"
     for label, legacy_bytes in (
         ("era-lf", era_bytes),
         ("era-crlf", era_bytes.replace(b"\n", b"\r\n")),
         ("upgraded-lf", upgraded),
         ("upgraded-crlf", upgraded.replace(b"\n", b"\r\n")),
+        ("prior-strict-lf", prior_bytes),
+        ("prior-strict-crlf", prior_bytes.replace(b"\n", b"\r\n")),
     ):
         package = tmp_path / f"package-{label}"
         target = package / Path(relative)
@@ -776,7 +788,7 @@ def test_fork_legacy_thinking_time_levels_migrate_to_final_strict_patch(
         )
         assert result["changed"] == [relative]
         assert compat.sha256_file(target) == contract["patched"] == (
-            "3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3"
+            "fd7e6fcf2f38e0367b50501e7546244f0e3e2cdb95e8905c388798c5fed5a4f5"
         )
         assert compat.sha256_file(backup / Path(relative)) == contract["pristine"]
 
@@ -1412,7 +1424,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "dist/src/browser/index.js": ("335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11", "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895"),
         "dist/src/browser/actions/assistantResponse.js": ("0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d", "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4"),
         "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96"),
-        "dist/src/browser/actions/thinkingTime.js": ("508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca", "3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3"),
+        "dist/src/browser/actions/thinkingTime.js": ("508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca", "fd7e6fcf2f38e0367b50501e7546244f0e3e2cdb95e8905c388798c5fed5a4f5"),
     }
 
     patches = {
@@ -1426,6 +1438,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
     assert 'composer-model-picker-slider-simple-view' in thinking_patch
     assert 'composer-model-picker-slider-advanced-view' in thinking_patch
     assert "exactGpt56ProProof" in thinking_patch
+    assert "diagnosticProProof" in thinking_patch
     assert "const POWER_TARGET" in thinking_patch
     assert "strictGpt56Effort" in thinking_patch
     assert "selection-unverified" in thinking_patch
@@ -1449,6 +1462,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "2baba20f9162eea8b4659ff42d85c26064d037bb18dd90f2022cf4764ddd710d",
         "0cb7bf4774e5507fb97682cf4e350fea03998c2a44548065bf8e9eb57fe16707",
         "b55897a9d90627b226e39e77339819e446927ffc66f78181f5c2851cbcfe5f97",
+        "3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3",
     ]
     assert thinking["legacy_patch"] == "thinkingTime.strict.pre-power.patch"
     assert thinking["legacy_patches"]["4106ed89a032d06fadcf1c1600e238e26243c02d1c3ef4261ea70169396d464e"] == [
@@ -1460,6 +1474,9 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
     ]
     assert thinking["legacy_patches"]["b55897a9d90627b226e39e77339819e446927ffc66f78181f5c2851cbcfe5f97"] == (
         "thinkingTime.strict.pre-advanced-view-sibling.patch"
+    )
+    assert thinking["legacy_patches"]["3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3"] == (
+        "thinkingTime.strict.pre-diagnostic-proof.patch"
     )
     assert "536571fccc3f8137bfbf0ea96dfd827f1eabdaf92f93fe7cff92af242ef01d53" not in thinking["legacy_patches"]
     composer = contracts["dist/src/browser/actions/promptComposer.js"]
@@ -1519,6 +1536,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "thinkingTime.strict.pre-outer-model-proof.patch",
         "thinkingTime.strict.pre-visible-advanced-proof.patch",
         "thinkingTime.strict.pre-advanced-view-sibling.patch",
+        "thinkingTime.strict.pre-diagnostic-proof.patch",
         "thinkingTime.extra-high-fail-closed.patch",
         "thinkingTime.pro-heavy-upgrade.patch",
         "promptComposer.pre-key-event-trigger.patch",

@@ -502,6 +502,7 @@ def build_oracle_argv(
     command = [
         *(runtime_command or config.oracle_command),
         "--engine", "browser",
+        *(["--chatgpt-url", config.chatgpt_project_url] if config.chatgpt_project_url else []),
         "--model", config.model,
         "--browser-model-strategy", config.model_strategy,
         "--browser-thinking-time", config.thinking_time,
@@ -661,6 +662,7 @@ def dry_run_payload(config, layout, argv: Sequence[str], prompt: str) -> dict[st
             "expected_sha256": config.expected_manifest_sha256,
         },
         "transport": config.transport,
+        "chatgpt_project_url": config.chatgpt_project_url,
         "attachments": [
             {"path": str(path), "sha256": digest}
             for path, digest in zip(config.attachments, config.attachment_sha256s, strict=True)

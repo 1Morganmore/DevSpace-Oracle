@@ -32,6 +32,20 @@ python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py setup 
 
 DevSpace prints an Owner password during initialization and stores it in its standard local configuration. Do not put that password in a script, manifest, issue, or repository.
 
+## Change allowed roots without reinitializing
+
+The `roots` command replaces the complete allowed-root list without reading or
+rewriting `auth.json`:
+
+```powershell
+python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py roots
+python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py roots --root C:\projects\one --root D:\work\two --dry-run
+python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py roots --root C:\projects\one --root D:\work\two --apply --restart
+```
+
+Omit `--restart` to persist the change for the next service start. The command
+preserves all other `config.json` keys and verifies the exact saved list.
+
 ## Manual ChatGPT registration
 
 Enable Developer Mode in ChatGPT and manually create the connector:

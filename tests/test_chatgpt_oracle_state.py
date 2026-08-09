@@ -330,6 +330,54 @@ def test_prompt_is_plain_app_plus_absolute_mission_instruction(tmp_path: Path) -
     assert "\n" not in prompt
 
 
+@pytest.mark.parametrize(
+    ("extra", "code"),
+    [
+        ({"model": "other-model"}, "REGULAR_MODEL_INVALID"),
+        ({"model_strategy": "current"}, "REGULAR_MODEL_STRATEGY_INVALID"),
+        ({"thinking_time": "light"}, "REGULAR_THINKING_TIME_INVALID"),
+    ],
+)
+def test_regular_manifest_cannot_downgrade_the_browser_profile(tmp_path: Path, extra: dict, code: str) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(tmp_path, mission.resolve(), **extra))
+    assert exc.value.code == code
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://chatgpt.com/g/g-p-example/project",
+        "https://evil.example/g/g-p-example/project",
+        "https://chatgpt.com/c/not-a-project",
+        "https://chatgpt.com/g/g-p-example/project?temporary-chat=true",
+    ],
+)
+def test_project_url_is_exact_and_fail_closed(tmp_path: Path, url: str) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(tmp_path, mission.resolve(), chatgpt_project_url=url))
+    assert exc.value.code == "CHATGPT_PROJECT_URL_INVALID"
+
+
+def test_project_url_is_normalized_and_retained_in_state(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    config = state.load_manifest(manifest(
+        tmp_path, mission.resolve(), chatgpt_project_url="https://chatgpt.com/g/g-p-example/project/"
+    ))
+    assert config.chatgpt_project_url == "https://chatgpt.com/g/g-p-example/project"
+    layout = state.create_layout(config, run_id="20260725T151414Z-a3aeba967d99")
+    payload = state.state_payload(config, layout, status="prepared", resolved_version="oracle 0.17.1")
+    assert payload["profile"]["chatgpt_project_url"] == config.chatgpt_project_url
+
+
 def test_pro_manifest_is_attachment_only_and_hashes_exact_files(tmp_path: Path) -> None:
     state = load_state()
     prompt = tmp_path / "prompt.txt"

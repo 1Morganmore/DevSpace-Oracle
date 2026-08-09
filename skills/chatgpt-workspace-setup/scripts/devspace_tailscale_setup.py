@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 DEFAULT_PORT = 7676
@@ -73,12 +73,7 @@ def _is_volume_root(path: Path) -> bool:
     return bool(path.anchor) and path == anchor
 
 
-def validate_config(
-    roots: Sequence[str],
-    hostname: str,
-    local_port: int = DEFAULT_PORT,
-    public_port: int = 443,
-) -> SetupConfig:
+def validate_roots(roots: Sequence[str]) -> tuple[Path, ...]:
     if not roots:
         raise SetupError("ALLOWED_ROOT_REQUIRED")
     resolved: list[Path] = []
@@ -93,6 +88,16 @@ def validate_config(
             raise SetupError("ALLOWED_ROOT_TOO_BROAD")
         if path not in resolved:
             resolved.append(path)
+    return tuple(resolved)
+
+
+def validate_config(
+    roots: Sequence[str],
+    hostname: str,
+    local_port: int = DEFAULT_PORT,
+    public_port: int = 443,
+) -> SetupConfig:
+    resolved = validate_roots(roots)
     hostname = hostname.strip().lower().rstrip(".")
     if not HOSTNAME_PATTERN.fullmatch(hostname):
         raise SetupError("TAILSCALE_HOSTNAME_REQUIRED")
@@ -100,7 +105,79 @@ def validate_config(
         raise SetupError("LOCAL_PORT_INVALID")
     if public_port not in {443, 8443, 10000}:
         raise SetupError("TAILSCALE_FUNNEL_PORT_INVALID")
-    return SetupConfig(tuple(resolved), hostname, local_port, public_port)
+    return SetupConfig(resolved, hostname, local_port, public_port)
+
+
+def devspace_config_path(env: Mapping[str, str] | None = None) -> Path:
+    values = os.environ if env is None else env
+    directory = Path(values.get("DEVSPACE_CONFIG_DIR") or (Path.home() / ".devspace")).expanduser()
+    return directory.resolve(strict=False) / "config.json"
+
+
+def load_devspace_config(path: Path | None = None) -> tuple[Path, dict[str, Any]]:
+    target = (path or devspace_config_path()).expanduser()
+    if target.is_symlink() or not target.is_file():
+        raise SetupError("DEVSPACE_CONFIG_FILE_REQUIRED")
+    target = target.resolve(strict=True)
+    try:
+        value = json.loads(target.read_bytes().decode("utf-8", errors="strict"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SetupError("DEVSPACE_CONFIG_INVALID") from exc
+    if not isinstance(value, dict) or not isinstance(value.get("allowedRoots"), list) or not all(
+        isinstance(item, str) for item in value["allowedRoots"]
+    ):
+        raise SetupError("DEVSPACE_CONFIG_INVALID")
+    return target, value
+
+
+def configure_roots(
+    roots: Sequence[str],
+    *,
+    apply: bool,
+    restart: bool = False,
+    config_path: Path | None = None,
+    runner: Callable[..., Any] = subprocess.run,
+    popen_factory: Callable[..., Any] = subprocess.Popen,
+) -> dict[str, Any]:
+    requested = validate_roots(roots)
+    target, current = load_devspace_config(config_path)
+    before = [str(Path(item).expanduser().resolve(strict=False)) for item in current["allowedRoots"]]
+    after = [str(item) for item in requested]
+    changed = before != after
+    result: dict[str, Any] = {
+        "action": "configure_devspace_roots",
+        "config_path": str(target),
+        "before": before,
+        "after": after,
+        "changed": changed,
+        "auth_unchanged": True,
+        "restart_required": changed and not restart,
+        "restart_performed": False,
+    }
+    if not apply:
+        return result
+    if changed:
+        updated = {**current, "allowedRoots": after}
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        try:
+            temporary.write_text(json.dumps(updated, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            if os.name != "nt":
+                temporary.chmod(0o600)
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+    _, readback = load_devspace_config(target)
+    if readback.get("allowedRoots") != after:
+        raise SetupError("DEVSPACE_ROOTS_READBACK_MISMATCH")
+    result["readback"] = after
+    if restart:
+        local_port = int(readback.get("port", DEFAULT_PORT))
+        run_checked(devspace_compat_argv(stop_exact_service=True, local_port=local_port), runner=runner)
+        launch_hidden(bash_argv(["npx", "--yes", DEVSPACE_PACKAGE, "serve"]), popen_factory=popen_factory)
+        run_checked(devspace_compat_argv(confirm_restarted=True, local_port=local_port), runner=runner)
+        result["restart_required"] = False
+        result["restart_performed"] = True
+    return result
 
 
 def git_bash_path() -> Path:
@@ -366,6 +443,11 @@ def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(description=__doc__)
     sub = value.add_subparsers(dest="command", required=True)
     sub.add_parser("serve")
+    roots = sub.add_parser("roots")
+    roots.add_argument("--root", action="append", default=[], help="Replacement allowed root; repeat as needed")
+    roots.add_argument("--dry-run", action="store_true")
+    roots.add_argument("--apply", action="store_true")
+    roots.add_argument("--restart", action="store_true", help="Restart the exact DevSpace service after applying")
     for name in ("setup", "doctor"):
         command = sub.add_parser(name)
         command.add_argument("--root", action="append", default=[], help="Narrow allowed DevSpace root; repeat as needed")
@@ -384,6 +466,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "serve":
             serve_foreground()
+            return 0
+        if args.command == "roots":
+            if not args.root:
+                if args.dry_run or args.apply or args.restart:
+                    raise SetupError("ALLOWED_ROOT_REQUIRED")
+                target, config = load_devspace_config()
+                print(json.dumps({"config_path": str(target), "allowed_roots": config["allowedRoots"]}, ensure_ascii=False, indent=2))
+                return 0
+            if args.dry_run == args.apply:
+                raise SetupError("CHOOSE_EXACTLY_ONE_OF_DRY_RUN_OR_APPLY")
+            if args.restart and not args.apply:
+                raise SetupError("RESTART_REQUIRES_APPLY")
+            print(json.dumps(configure_roots(args.root, apply=args.apply, restart=args.restart), ensure_ascii=False, indent=2))
             return 0
         config = validate_config(args.root, args.hostname, args.local_port, args.public_port)
         if args.command == "setup":

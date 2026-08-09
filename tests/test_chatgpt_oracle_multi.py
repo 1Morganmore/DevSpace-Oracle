@@ -63,6 +63,17 @@ def test_manifest_rejects_non_devspace_app(tmp_path: Path) -> None:
         module.load_manifest(path)
 
 
+def test_project_url_is_normalized_and_propagated_to_every_lane(tmp_path: Path) -> None:
+    module = load()
+    path = make_manifest(tmp_path, 2)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["chatgpt_project_url"] = "https://chatgpt.com/g/g-p-example/project/"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    config = module.load_manifest(path)
+    child = json.loads(module._child_manifest(config, config["solvers"][0], "a" * 64).read_text(encoding="utf-8"))
+    assert child["chatgpt_project_url"] == "https://chatgpt.com/g/g-p-example/project"
+
+
 def test_multi_uses_unique_child_manifests_waves_and_merger(tmp_path: Path) -> None:
     module = load()
     calls = []

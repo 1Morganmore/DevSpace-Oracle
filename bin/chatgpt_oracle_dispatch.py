@@ -33,6 +33,7 @@ def compile_manifest(
     reasoning_level: str | None = None,
     attachment_paths: Iterable[Path] | None = None,
     context_manifest_path: Path | None = None,
+    chatgpt_project_url: str | None = None,
 ) -> dict[str, Any]:
     contract = PROFILES.build_launch_contract(
         mode,
@@ -65,6 +66,9 @@ def compile_manifest(
         "research": "deep" if contract["research"] else "off",
         "archive": "auto",
     }
+    project_url = RUNNER.STATE.normalize_chatgpt_project_url(chatgpt_project_url)
+    if project_url:
+        manifest["chatgpt_project_url"] = project_url
     if is_pro:
         assert context_manifest_path is not None
         raw_context_manifest = context_manifest_path.expanduser()
@@ -102,6 +106,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--reasoning-level")
     parser.add_argument("--attachment", type=Path, action="append", default=[])
     parser.add_argument("--context-manifest", type=Path)
+    parser.add_argument("--chatgpt-project-url")
     parser.add_argument("--expected-manifest-sha256")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
@@ -114,6 +119,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             reasoning_level=args.reasoning_level,
             attachment_paths=args.attachment,
             context_manifest_path=args.context_manifest,
+            chatgpt_project_url=args.chatgpt_project_url,
         )
         if compiled["oracle_manifest_path"]:
             if not args.dry_run and args.expected_manifest_sha256 is None:

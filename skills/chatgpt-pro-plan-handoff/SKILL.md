@@ -27,11 +27,18 @@ implementation -> final web gate -> one deterministic local gate.
 
 ## Preview
 
-Create an absolute UTF-8 initial mission inside the exact project root, then
-compile without submitting:
+Create an absolute UTF-8 initial mission and a
+`codex.chatgpt.oracle-comprehensive/v1` manifest inside the exact project root.
+The manifest binds `workflow_id`, `project_root`, `workflow_dir`,
+`initial_mission_path`, `initial_mission_sha256`, `app_name`, `model`, and
+`local_gate_command`. It may also contain an exact `chatgpt_project_url`.
+Preview it without submitting:
 
 ```powershell
-python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_comprehensive.py" start --project-root C:\project --mission-path C:\project\mission.md --dry-run
+$manifest = 'C:\project\.ai-bridge\comprehensive.json'
+$sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $manifest).Hash.ToLowerInvariant()
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_comprehensive.py" `
+  --manifest $manifest --expected-manifest-sha256 $sha --dry-run
 ```
 
 Bind every regular stage to that exact root and mission path. DevSpace may retry

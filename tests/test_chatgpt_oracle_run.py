@@ -539,6 +539,14 @@ def test_copy_profile_is_first_class_and_outside_project(
     assert result["argv"][result["argv"].index("--copy-profile") + 1] == str(profile.resolve())
 
 
+def test_project_url_uses_oracles_native_project_entrypoint(tmp_path: Path) -> None:
+    runner = load_runner()
+    project_url = "https://chatgpt.com/g/g-p-example/project"
+    result = execute_run(runner, manifest(tmp_path, chatgpt_project_url=project_url), dry_run=True)
+    assert result["argv"][result["argv"].index("--chatgpt-url") + 1] == project_url
+    assert result["chatgpt_project_url"] == project_url
+
+
 def test_default_signed_in_profile_is_copied_per_run_and_window_is_hidden(
     tmp_path: Path, monkeypatch
 ) -> None:

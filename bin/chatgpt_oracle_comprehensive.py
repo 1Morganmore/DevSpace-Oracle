@@ -221,6 +221,7 @@ def load_manifest(
     app_name = str(value.get("app_name") or "DevSpace").strip()
     if app_name != "DevSpace":
         raise WorkflowError("app_name must be exactly DevSpace")
+    chatgpt_project_url = RUNNER.STATE.normalize_chatgpt_project_url(value.get("chatgpt_project_url"))
     return {
         **value,
         "manifest_path": manifest_path,
@@ -229,6 +230,7 @@ def load_manifest(
         "initial_mission_path": mission,
         "max_stages": maximum,
         "app_name": app_name,
+        "chatgpt_project_url": chatgpt_project_url,
         "model": str(value.get("model") or "gpt-5.6"),
         "local_gate_command": list(local_gate),
         "manifest_sha256": manifest_sha256,
@@ -626,6 +628,8 @@ def _oracle_manifest(
         "parallel_parent_id": config["_parallel_parent_id"],
         "run_id": run_id,
     }
+    if config.get("chatgpt_project_url"):
+        payload["chatgpt_project_url"] = config["chatgpt_project_url"]
     if stage == "pro":
         evidence = tuple(pro_attachments)
         if not evidence:

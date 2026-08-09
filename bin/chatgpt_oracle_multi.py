@@ -157,6 +157,7 @@ def load_manifest(path: Path, *, expected_manifest_sha256: str | None = None) ->
     app_name = str(value.get("app_name") or "DevSpace").strip()
     if app_name != "DevSpace":
         raise MultiError("app_name must be exactly DevSpace")
+    chatgpt_project_url = STATE.normalize_chatgpt_project_url(value.get("chatgpt_project_url"))
     return {
         **value,
         "project_root": root,
@@ -167,6 +168,7 @@ def load_manifest(path: Path, *, expected_manifest_sha256: str | None = None) ->
         "next_stage_result_path": next_stage_result,
         "max_concurrency": concurrency,
         "app_name": app_name,
+        "chatgpt_project_url": chatgpt_project_url,
         "model": str(value.get("model") or "gpt-5.6").strip(),
         "copy_profile": Path(
             str(value.get("copy_profile") or (Path.home() / ".oracle" / "browser-profile"))
@@ -227,6 +229,7 @@ def _child_manifest(config: dict[str, Any], lane: dict[str, Any], parent_id: str
             "research": "off",
             "archive": "auto",
             "parallel_parent_id": parent_id,
+            **({"chatgpt_project_url": config["chatgpt_project_url"]} if config.get("chatgpt_project_url") else {}),
             **({"bound_inputs": lane["bound_inputs"]} if "bound_inputs" in lane else {}),
             "web_multi_child_provenance_path": str(provenance),
         },

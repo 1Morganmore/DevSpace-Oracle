@@ -11,8 +11,12 @@ For new work, create one absolute UTF-8 mission file inside the project and
 resolve the requested mode through:
 
 ```powershell
-python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" --mode <direct|plan|review|edit|orchestrator> --project-root C:\project --mission-path C:\project\mission.md --manifest-output C:\project\.ai-bridge\oracle.json --reasoning-level "Very High" --dry-run
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" --mode <direct|plan|review|edit|orchestrator> --project-root C:\project --mission-path C:\project\mission.md --manifest-output C:\project\.ai-bridge\oracle.json --reasoning-level "Very High" --chatgpt-project-url https://chatgpt.com/g/g-p-example/project --dry-run
 ```
+
+`--chatgpt-project-url` is optional. When present it must be the exact project
+URL; Oracle starts the new conversation inside that project. Never fuzzy-match a
+project name or silently fall back to the ChatGPT root page.
 
 For an explicitly authorized live web run, replace `--dry-run` with
 `--expected-manifest-sha256 <oracle_manifest_sha256>` using the exact top-level
