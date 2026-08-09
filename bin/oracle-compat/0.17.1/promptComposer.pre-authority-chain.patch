@@ -95,8 +95,8 @@ index c643386..c845262 100644
 +          const MENTION_CENSUS_STAGE = ${JSON.stringify(stage)};
 +          const MENTION_CENSUS_COLLECT_REJECTIONS = ${JSON.stringify(collectRejections)};
 +          const wanted = ${JSON.stringify(appName)};
-+          // Selection scans the same complete surface/node set as the click resolver.
-+          // Caps below limit only serialized diagnostic output, never classification.
++          const MAX_SURFACES = 8;
++          const MAX_NODES = 12;
 +          const MAX_TEXT = 120;
 +          const MAX_REJECTIONS = 8;
 +          const MAX_CONTROLS = 12;
@@ -152,9 +152,9 @@ index c643386..c845262 100644
 +            '[role="option"],[role="menuitem"],[role="group"],[data-radix-collection-item]';
 +          const actionSelector =
 +            'button,[role="option"],[role="menuitem"],[data-radix-collection-item],[data-fill][tabindex]';
-+          const surfaces = Array.from(document.querySelectorAll(surfaceSelector));
++          const surfaces = Array.from(document.querySelectorAll(surfaceSelector)).slice(0, MAX_SURFACES);
 +          const visibleSurfaces = surfaces.filter(visible);
-+          const actionSurfaceVisible = visibleSurfaces.length > 0;
++          const pickerOpen = surfaces.length > 0;
 +          const rejections = [];
 +          const recordRejection = (reason, node) => {
 +            if (!MENTION_CENSUS_COLLECT_REJECTIONS || rejections.length >= MAX_REJECTIONS) return;
@@ -170,7 +170,7 @@ index c643386..c845262 100644
 +          let visibleExactFound = false;
 +          const dispatchableTargets = [];
 +          for (const surface of surfaces) {
-+            const nodes = [surface, ...Array.from(surface.querySelectorAll('*'))];
++            const nodes = [surface, ...Array.from(surface.querySelectorAll('*'))].slice(0, MAX_NODES);
 +            const exactNodes = nodes.filter((node) => exactIdentity(node));
 +            const exactLeaves = exactNodes.filter((node) => !exactNodes.some((other) =>
 +              other !== node && node.contains?.(other)
@@ -206,9 +206,9 @@ index c643386..c845262 100644
 +          const discriminator = !editorFound ? 'no-editor-found'
 +            : !editorFocused ? 'editor-not-focused'
 +            : !caretInEditor ? 'caret-outside-editor'
-+            : !actionSurfaceVisible ? (MENTION_CENSUS_STAGE === 'P0' ? 'no-visible-action-surface-before-app-name' : 'no-visible-action-surface')
-+            : MENTION_CENSUS_STAGE === 'P0' ? 'visible-action-surface-before-app-name'
-+            : !exactTextFound ? 'no-exact-app-action-observed'
++            : !pickerOpen ? (MENTION_CENSUS_STAGE === 'P0' ? 'picker-closed' : 'key-event-missed')
++            : MENTION_CENSUS_STAGE === 'P0' ? 'picker-open'
++            : !exactTextFound ? 'picker-open-no-devspace'
 +            : visibleSurfaces.length === 0 ? 'candidate-rejected-by-locator'
 +            : !visibleExactFound ? 'candidate-rejected-by-locator'
 +            : dispatchableCount === 0 ? 'candidate-rejected-by-locator'
@@ -223,7 +223,7 @@ index c643386..c845262 100644
 +            activeElement: describe(active),
 +            caretNode: caretNode ? describe(caretNode) : null,
 +            controls,
-+            actionSurfaceVisible,
++            pickerOpen,
 +            surfaceCount: surfaces.length,
 +            visibleSurfaceCount: visibleSurfaces.length,
 +            exactTextFound,
@@ -375,7 +375,7 @@ index c643386..c845262 100644
 +                  return editors.filter(visible).some((editor) =>
 +                    Array.from(editor.querySelectorAll(semanticMentionSelectors))
 +                      .some((node) => visible(node) &&
-+                        (${JSON.stringify(exactAppSuggestionActionDispatched)} && (exactAppIdentity(node) || exactSelectedAppPill(node, editor))))
++                        (exactAppIdentity(node) || exactSelectedAppPill(node, editor)))
 +                  );
 +                })()`,
 +                returnByValue: true,
@@ -509,7 +509,7 @@ index c643386..c845262 100644
 +              return editors.filter(visible).some((editor) =>
 +                Array.from(editor.querySelectorAll(semanticMentionSelectors))
 +                  .some((node) => visible(node) &&
-+                    (${JSON.stringify(exactAppSuggestionSelected)} && (exactAppIdentity(node) || exactSelectedAppPill(node, editor))))
++                    (exactAppIdentity(node) || exactSelectedAppPill(node, editor)))
 +              );
 +            })()`,
 +            returnByValue: true,
@@ -525,8 +525,8 @@ index c643386..c845262 100644
 +            });
 +        }
 +    }
-+    if (process.env.ORACLE_APP_MENTION_DIAGNOSTIC_NO_SUBMISSION === "1") {
-+        logger(`APP_MENTION_DIAGNOSTIC_NO_SUBMISSION=1; ${routedAppName ? "semantic route confirmed" : "no routed app established"}; send suppressed.`);
++    if (routedAppName && process.env.ORACLE_APP_MENTION_DIAGNOSTIC_NO_SUBMISSION === "1") {
++        logger("APP_MENTION_DIAGNOSTIC_NO_SUBMISSION=1; semantic route confirmed; send suppressed.");
 +        await clearPromptComposer(runtime, logger);
 +        throw new BrowserAutomationError("APP_MENTION_DIAGNOSTIC_NO_SUBMISSION", {
 +            stage: "submit-prompt",

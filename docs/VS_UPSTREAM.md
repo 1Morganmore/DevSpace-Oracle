@@ -40,21 +40,24 @@ The exact 0.17.1 npm dist uses these hash-gated patches:
 | `dist/src/cli/browserConfig.js` | `989f14399c8aa51913752306135e11d97e4f1c55b2baf984907f1b54959cc340` | `bd18d11e4770fa5335c889b7856622f2da4199351ec65bc17a5ec1f472e2506f` |
 | `dist/src/browser/index.js` | `335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11` | `9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895` |
 | `dist/src/browser/actions/assistantResponse.js` | `0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d` | `18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4` |
-| `dist/src/browser/actions/promptComposer.js` | `db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000` | `87911b46026d3dd08a643b90aab5dc7009704956a3b5fed493cc600abcb7739a` |
+| `dist/src/browser/actions/promptComposer.js` | `db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000` | `3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96` |
 | `dist/src/browser/actions/thinkingTime.js` | `508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca` | `3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3` |
 
 The promptComposer row emits the bare `@` through CDP `Input.dispatchKeyEvent`,
 then uses one fixed `delay(250)` settle before inserting the app name. Two live
 fail-closed runs showed that both one-shot and split `Input.insertText` leave
 literal `@DevSpace` with no suggestion UI; CDP documents `insertText` as input
-that does not come from a key press. The unchanged exact suggestion click,
-semantic pill confirmation, and final pre-send revalidation remain the
-authoritative fail-closed gates. A live canary must still confirm the picker and
-exact DevSpace pill before this level is called proven. The deployed
-`a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f` and
-`bb85c6f09f23c4e0c9093bd472c83b17b1ef7325bcd89a3348429610eeefbd74`
-levels are restored to pristine bytes through their exact legacy patches before
-the new patch is applied.
+that does not come from a key press. The resolver accepts an exact visible app
+label inside the current Plugins result group, then requires both that unique
+action receipt and ChatGPT's exact semantic app pill before the initial and
+final pre-send gates pass. The diagnostic no-submission switch suppresses every
+send path, including prompts that do not parse as app routes. Its census reports
+generic visible action surfaces only as observations, not as proof that the
+mention picker opened or that an app is unavailable. The five deployed
+legacy levels `a3882c7881...`, `bb85c6f09f23...`, `87911b46026d...`,
+`e9f28f36f652...`, and `dfbe8bfe8ff...` are
+restored to pristine bytes through their exact legacy patches before the new
+patch is applied.
 
 The thinking-time row is the final upstream Power-slider patch from the
 audited donor `9542abee` (`thinkingTime.strict.patch`).  All package hashes

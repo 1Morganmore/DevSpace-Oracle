@@ -1,5 +1,5 @@
 diff --git a/dist/src/browser/actions/promptComposer.js b/dist/src/browser/actions/promptComposer.js
-index c643386..c845262 100644
+index c643386..dfa9102 100644
 --- a/dist/src/browser/actions/promptComposer.js
 +++ b/dist/src/browser/actions/promptComposer.js
 @@ -14,6 +14,10 @@ const ENTER_KEY_TEXT = "\r";
@@ -13,7 +13,7 @@ index c643386..c845262 100644
      const encodedPrompt = JSON.stringify(prompt);
      const focusResult = await runtime.evaluate({
          expression: `(() => {
-@@ -67,7 +71,455 @@ export async function submitPrompt(deps, prompt, logger) {
+@@ -67,7 +71,318 @@ export async function submitPrompt(deps, prompt, logger) {
          await logDomFailure(runtime, logger, "focus-textarea");
          throw new Error("Failed to focus prompt textarea");
      }
@@ -85,168 +85,10 @@ index c643386..c845262 100644
 +        // The exact discovery/click and semantic-pill guards below remain the
 +        // authoritative gates and fail closed before either send path.
 +        await delay(250);
-+        // One shared evaluate-only census builder reports the mention-trigger
-+        // state at P0 (after the @ key settle, before the appName insert), P1
-+        // (after the appName insert and after the bounded suggestion wait),
-+        // and P2 (fail-closed route loss, with per-candidate rejection
-+        // reasons). It never clicks, types, or submits: editor/caret
-+        // membership, picker presence, and candidate filters are read-only.
-+        const buildMentionCensusExpression = (stage, collectRejections) => `(() => {
-+          const MENTION_CENSUS_STAGE = ${JSON.stringify(stage)};
-+          const MENTION_CENSUS_COLLECT_REJECTIONS = ${JSON.stringify(collectRejections)};
-+          const wanted = ${JSON.stringify(appName)};
-+          // Selection scans the same complete surface/node set as the click resolver.
-+          // Caps below limit only serialized diagnostic output, never classification.
-+          const MAX_TEXT = 120;
-+          const MAX_REJECTIONS = 8;
-+          const MAX_CONTROLS = 12;
-+          const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
-+          const cap = (value, length) => String(value || '').slice(0, length);
-+          const exactIdentity = (node) => [
-+            node?.getAttribute?.('data-app-name'),
-+            node?.getAttribute?.('aria-label'),
-+            node?.getAttribute?.('title'),
-+            node?.innerText,
-+            node?.textContent,
-+          ].some((value) => normalize(value).replace(/^@/, '') === wanted);
-+          const visible = (node) => {
-+            const rect = node?.getBoundingClientRect?.();
-+            if (!rect || rect.width <= 0 || rect.height <= 0) return false;
-+            if (node?.hasAttribute?.('hidden') || node?.getAttribute?.('aria-hidden') === 'true') return false;
-+            const style = window.getComputedStyle(node);
-+            return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
-+          };
-+          const enabled = (node) => {
-+            const style = window.getComputedStyle(node);
-+            return !node?.hasAttribute?.('disabled') &&
-+              node?.getAttribute?.('aria-disabled') !== 'true' &&
-+              node?.getAttribute?.('data-disabled') !== 'true' &&
-+              style.pointerEvents !== 'none';
-+          };
-+          const describe = (node) => {
-+            const rect = node?.getBoundingClientRect?.();
-+            return {
-+              tag: node?.tagName || null,
-+              role: node?.getAttribute?.('role') || null,
-+              testid: node?.getAttribute?.('data-testid') || null,
-+              ariaLabel: node?.getAttribute?.('aria-label') || null,
-+              title: node?.getAttribute?.('title') || null,
-+              ariaExpanded: node?.getAttribute?.('aria-expanded') || null,
-+              ariaHaspopup: node?.getAttribute?.('aria-haspopup') || null,
-+              text: cap(normalize(node?.innerText || node?.textContent), MAX_TEXT),
-+              visible: visible(node),
-+              rect: rect ? { width: rect.width, height: rect.height } : null,
-+            };
-+          };
-+          const editors = Array.from(document.querySelectorAll(
-+            ${JSON.stringify(INPUT_SELECTORS.join(","))}
-+          ));
-+          const active = document.activeElement || null;
-+          const selection = window.getSelection ? window.getSelection() : null;
-+          const caretNode = selection?.anchorNode || null;
-+          const editorContains = (node) => Boolean(node) && editors.some((editor) => editor.contains(node));
-+          const editorFound = editors.length > 0;
-+          const editorFocused = editorContains(active);
-+          const caretInEditor = editorContains(caretNode);
-+          const surfaceSelector =
-+            '[role="option"],[role="menuitem"],[role="group"],[data-radix-collection-item]';
-+          const actionSelector =
-+            'button,[role="option"],[role="menuitem"],[data-radix-collection-item],[data-fill][tabindex]';
-+          const surfaces = Array.from(document.querySelectorAll(surfaceSelector));
-+          const visibleSurfaces = surfaces.filter(visible);
-+          const actionSurfaceVisible = visibleSurfaces.length > 0;
-+          const rejections = [];
-+          const recordRejection = (reason, node) => {
-+            if (!MENTION_CENSUS_COLLECT_REJECTIONS || rejections.length >= MAX_REJECTIONS) return;
-+            const existing = rejections.find((entry) => entry.reason === reason);
-+            if (existing) { existing.count += 1; return; }
-+            rejections.push({
-+              reason,
-+              count: 1,
-+              text: cap(normalize(node?.innerText || node?.textContent), MAX_TEXT),
-+            });
-+          };
-+          let exactTextFound = false;
-+          let visibleExactFound = false;
-+          const dispatchableTargets = [];
-+          for (const surface of surfaces) {
-+            const nodes = [surface, ...Array.from(surface.querySelectorAll('*'))];
-+            const exactNodes = nodes.filter((node) => exactIdentity(node));
-+            const exactLeaves = exactNodes.filter((node) => !exactNodes.some((other) =>
-+              other !== node && node.contains?.(other)
-+            ));
-+            if (exactNodes.length > 0) exactTextFound = true;
-+            if (exactNodes.some(visible)) visibleExactFound = true;
-+            if (MENTION_CENSUS_STAGE === 'P0') continue;
-+            if (!visible(surface)) { recordRejection('surface-not-visible', surface); continue; }
-+            if (exactNodes.length === 0) { recordRejection('no-exact-text', surface); continue; }
-+            const visibleExactLeaves = exactLeaves.filter(visible);
-+            if (visibleExactLeaves.length === 0) { recordRejection('exact-node-hidden', surface); continue; }
-+            for (const label of visibleExactLeaves) {
-+              const action = label.closest?.(actionSelector);
-+              const target = action && surface.contains(action) ? action : label;
-+              if (!surface.contains(target)) { recordRejection('target-outside-surface', label); continue; }
-+              if (target === surface && surface.getAttribute?.('role') === 'group') {
-+                recordRejection('group-surface-only', surface);
-+                continue;
-+              }
-+              if (typeof target.click !== 'function') { recordRejection('target-not-clickable', label); continue; }
-+              if (!visible(target)) { recordRejection('target-not-visible', label); continue; }
-+              if (!enabled(target)) { recordRejection('target-not-enabled', label); continue; }
-+              if (!dispatchableTargets.includes(target)) dispatchableTargets.push(target);
-+            }
-+          }
-+          const dispatchableCount = dispatchableTargets.length;
-+          const composerScope = editors
-+            .map((editor) => editor.closest?.('form') || editor.parentElement)
-+            .find((scope) => scope?.querySelectorAll) || document;
-+          const controls = Array.from(composerScope.querySelectorAll(
-+            'button,[role="button"],[aria-haspopup],[data-testid]'
-+          )).filter(visible).slice(0, MAX_CONTROLS).map(describe);
-+          const discriminator = !editorFound ? 'no-editor-found'
-+            : !editorFocused ? 'editor-not-focused'
-+            : !caretInEditor ? 'caret-outside-editor'
-+            : !actionSurfaceVisible ? (MENTION_CENSUS_STAGE === 'P0' ? 'no-visible-action-surface-before-app-name' : 'no-visible-action-surface')
-+            : MENTION_CENSUS_STAGE === 'P0' ? 'visible-action-surface-before-app-name'
-+            : !exactTextFound ? 'no-exact-app-action-observed'
-+            : visibleSurfaces.length === 0 ? 'candidate-rejected-by-locator'
-+            : !visibleExactFound ? 'candidate-rejected-by-locator'
-+            : dispatchableCount === 0 ? 'candidate-rejected-by-locator'
-+            : dispatchableCount > 1 ? 'ambiguous-exact-actions'
-+            : 'candidate-found';
-+          return {
-+            stage: MENTION_CENSUS_STAGE,
-+            discriminator,
-+            editorFound,
-+            editorFocused,
-+            caretInEditor,
-+            activeElement: describe(active),
-+            caretNode: caretNode ? describe(caretNode) : null,
-+            controls,
-+            actionSurfaceVisible,
-+            surfaceCount: surfaces.length,
-+            visibleSurfaceCount: visibleSurfaces.length,
-+            exactTextFound,
-+            visibleExactFound,
-+            dispatchableCount,
-+            ...(MENTION_CENSUS_COLLECT_REJECTIONS ? { rejections } : {}),
-+          };
-+        })()`;
-+        const censusP0 = await runtime.evaluate({
-+            expression: buildMentionCensusExpression('P0', false),
-+            returnByValue: true,
-+        });
-+        logger(`App mention census P0: ${JSON.stringify(censusP0.result?.value ?? null)}`);
 +        await input.insertText({ text: appName });
-+        const censusP1Insert = await runtime.evaluate({
-+            expression: buildMentionCensusExpression('P1', false),
-+            returnByValue: true,
-+        });
-+        logger(`App mention census P1 after insert: ${JSON.stringify(censusP1Insert.result?.value ?? null)}`);
-+        // Discovery and click must resolve the same unique action containing
-+        // the exact app label. Current ChatGPT groups also contain category
-+        // and description text, so those sibling labels cannot define the
-+        // action's identity; the post-click semantic pill remains authoritative.
++        // Discovery and click must resolve the same unique suggestion. Current
++        // ChatGPT app results use a role=group wrapper whose exact action is a
++        // nested span, so never widen discovery beyond the click authority.
 +        const exactSuggestionExpression = (shouldClick) => `(() => {
 +          const wanted = ${JSON.stringify(appName)};
 +          const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
@@ -271,6 +113,15 @@ index c643386..c845262 100644
 +              node?.getAttribute?.('data-disabled') !== 'true' &&
 +              style.pointerEvents !== 'none';
 +          };
++          const visibleLeafTexts = (root) => {
++            if (!visible(root)) return [];
++            const children = Array.from(root.children || []).filter(visible);
++            if (children.length === 0) {
++              const value = normalize(root.innerText || root.textContent);
++              return value ? [value] : [];
++            }
++            return children.flatMap(visibleLeafTexts);
++          };
 +          const describe = (node) => ({
 +            tag: node?.tagName || null,
 +            role: node?.getAttribute?.('role') || null,
@@ -287,6 +138,11 @@ index c643386..c845262 100644
 +            const exactLeaves = exactNodes.filter((node) => !exactNodes.some((other) =>
 +              other !== node && node.contains?.(other)
 +            ));
++            const textSegments = visibleLeafTexts(surface);
++            const pureExactSurface = textSegments.length > 0 && textSegments.every((value) =>
++              normalize(value).replace(/^@/, '') === wanted
++            );
++            if (!pureExactSurface) continue;
 +            for (const label of exactLeaves) {
 +              const action = label.closest?.(actionSelector);
 +              const target = action && surface.contains(action) ? action : label;
@@ -326,11 +182,6 @@ index c643386..c845262 100644
 +            }
 +            await delay(100);
 +        }
-+        const censusP1Wait = await runtime.evaluate({
-+            expression: buildMentionCensusExpression('P1', false),
-+            returnByValue: true,
-+        });
-+        logger(`App mention census P1 after suggestion wait: ${JSON.stringify(censusP1Wait.result?.value ?? null)}`);
 +        const clickResult = await runtime.evaluate({
 +            expression: exactSuggestionExpression(true),
 +            returnByValue: true,
@@ -375,7 +226,7 @@ index c643386..c845262 100644
 +                  return editors.filter(visible).some((editor) =>
 +                    Array.from(editor.querySelectorAll(semanticMentionSelectors))
 +                      .some((node) => visible(node) &&
-+                        (${JSON.stringify(exactAppSuggestionActionDispatched)} && (exactAppIdentity(node) || exactSelectedAppPill(node, editor))))
++                        (exactAppIdentity(node) || exactSelectedAppPill(node, editor)))
 +                  );
 +                })()`,
 +                returnByValue: true,
@@ -393,11 +244,23 @@ index c643386..c845262 100644
 +          ? { ...clickResult.result?.value?.authority, semanticRouteConfirmed: true }
 +          : null;
 +        if (!routeConfirmed) {
-+            const censusP2 = await runtime.evaluate({
-+                expression: buildMentionCensusExpression('P2', true),
++            const diagnostic = await runtime.evaluate({
++                expression: `(() => {
++                  const describe = (node) => ({
++                    tag: node?.tagName || null,
++                    role: node?.getAttribute?.('role') || null,
++                    testid: node?.getAttribute?.('data-testid') || null,
++                    ariaLabel: node?.getAttribute?.('aria-label') || null,
++                    text: String(node?.innerText || node?.textContent || '').trim().slice(0, 240),
++                  });
++                  const editors = Array.from(document.querySelectorAll(
++                    ${JSON.stringify(INPUT_SELECTORS.join(","))}
++                  )).map(describe);
++                  return { editors, active: describe(document.activeElement) };
++                })()`,
 +                returnByValue: true,
 +            });
-+            logger(`App mention census P2: ${JSON.stringify(censusP2.result?.value ?? null)}`);
++            logger(`App mention route diagnostic: ${JSON.stringify(diagnostic.result?.value ?? null)}`);
 +            await logDomFailure(runtime, logger, "app-mention-route-unconfirmed");
 +            await clearPromptComposer(runtime, logger);
 +            throw new BrowserAutomationError("APP_MENTION_ROUTE_UNCONFIRMED", {
@@ -470,7 +333,7 @@ index c643386..c845262 100644
      // Some pages (notably ChatGPT when subscriptions/widgets load) need a brief settle
      // before the send button becomes enabled; give it a short breather to avoid races.
      await delay(500);
-@@ -167,6 +619,66 @@ export async function submitPrompt(deps, prompt, logger) {
+@@ -167,6 +482,57 @@ export async function submitPrompt(deps, prompt, logger) {
              observedLength,
          });
      }
@@ -509,7 +372,7 @@ index c643386..c845262 100644
 +              return editors.filter(visible).some((editor) =>
 +                Array.from(editor.querySelectorAll(semanticMentionSelectors))
 +                  .some((node) => visible(node) &&
-+                    (${JSON.stringify(exactAppSuggestionSelected)} && (exactAppIdentity(node) || exactSelectedAppPill(node, editor))))
++                    (exactAppIdentity(node) || exactSelectedAppPill(node, editor)))
 +              );
 +            })()`,
 +            returnByValue: true,
@@ -525,15 +388,6 @@ index c643386..c845262 100644
 +            });
 +        }
 +    }
-+    if (process.env.ORACLE_APP_MENTION_DIAGNOSTIC_NO_SUBMISSION === "1") {
-+        logger(`APP_MENTION_DIAGNOSTIC_NO_SUBMISSION=1; ${routedAppName ? "semantic route confirmed" : "no routed app established"}; send suppressed.`);
-+        await clearPromptComposer(runtime, logger);
-+        throw new BrowserAutomationError("APP_MENTION_DIAGNOSTIC_NO_SUBMISSION", {
-+            stage: "submit-prompt",
-+            code: "APP_MENTION_DIAGNOSTIC_NO_SUBMISSION",
-+            appName: routedAppName,
-+        });
-+    }
-    const clicked = await attemptSendButton(runtime, input, logger, deps?.attachmentNames, deps?.attachmentTimeoutMs);
+     const clicked = await attemptSendButton(runtime, input, logger, deps?.attachmentNames, deps?.attachmentTimeoutMs);
      if (!clicked) {
          await input.dispatchKeyEvent({

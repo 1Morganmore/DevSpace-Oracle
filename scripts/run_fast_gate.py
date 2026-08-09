@@ -64,7 +64,7 @@ FAST_NODE_IDS = [
     "tests/test_chatgpt_oracle_compat.py::test_prompt_composer_patch_applies_to_pristine_0170_and_is_idempotent",
     "tests/test_chatgpt_oracle_compat.py::test_compatibility_inspection_classifies_hashes_without_writing",
     "tests/test_chatgpt_oracle_compat.py::test_literal_devspace_without_semantic_token_clears_and_fails_before_send",
-    "tests/test_chatgpt_oracle_compat.py::test_exact_semantic_devspace_token_proceeds_when_transient_ui_is_absent",
+    "tests/test_chatgpt_oracle_compat.py::test_semantic_devspace_token_without_exact_action_fails_closed",
     "tests/test_chatgpt_oracle_compat.py::test_exact_clicked_app_accepts_live_noneditable_pill_with_exact_visible_label",
     "tests/test_chatgpt_oracle_compat.py::test_live_group_composer_sequence_stops_before_send_with_both_route_checks",
     "tests/test_chatgpt_oracle_compat.py::test_group_suggestion_resolver_refuses_non_authoritative_candidates_before_send",

@@ -49,6 +49,9 @@ def run_prompt_route_case(
     suggestion_case: str = "option",
     diagnostic_stop_before_send: bool = False,
     trigger_key_event: bool = False,
+    key_event_ignored: bool = False,
+    caret_outside_editor: bool = False,
+    prompt: str = "@DevSpace mission",
 ) -> tuple[dict[str, object], str]:
     compat = load_compat()
     relative = Path("dist/src/browser/actions/promptComposer.js")
@@ -60,18 +63,6 @@ def run_prompt_route_case(
     compat._apply_patch(package, compat.patch_root("0.17.1") / "promptComposer.patch")
     source = target.read_text(encoding="utf-8")
     source = source[source.index("const ENTER_KEY_EVENT") :]
-    if diagnostic_stop_before_send:
-        send_boundary = (
-            "    const clicked = await attemptSendButton(runtime, input, logger, "
-            "deps?.attachmentNames, deps?.attachmentTimeoutMs);"
-        )
-        assert source.count(send_boundary) == 1
-        source = source.replace(
-            send_boundary,
-            "    return { diagnosticStoppedBeforeSend: true, "
-            "exactAppSuggestionSelected };\n" + send_boundary,
-            1,
-        )
     stubs = """
 const INPUT_SELECTORS = ['#prompt-textarea'];
 const PROMPT_PRIMARY_SELECTOR = '#prompt-textarea';
@@ -109,10 +100,17 @@ class BrowserAutomationError extends Error {
             "pillEditable": pill_editable,
             "suggestionCase": suggestion_case,
             "triggerKeyEvent": trigger_key_event,
+            "keyEventIgnored": key_event_ignored,
+            "caretOutsideEditor": caret_outside_editor,
+            "diagnosticStopBeforeSend": diagnostic_stop_before_send,
         }
     )
     harness = f"""
 const scenario = {scenario};
+if (scenario.diagnosticStopBeforeSend)
+  process.env.ORACLE_APP_MENTION_DIAGNOSTIC_NO_SUBMISSION = '1';
+else
+  delete process.env.ORACLE_APP_MENTION_DIAGNOSTIC_NO_SUBMISSION;
 let now = 0;
 Date.now = () => (now += 1_000);
 let suggestionClicks = 0;
@@ -125,6 +123,7 @@ let initialRouteConfirmed = false;
 let finalRouteConfirmed = false;
 let routeChecks = 0;
 let mentionKeyTriggered = false;
+const censuses = [];
 const inserted = [];
 const keyEvents = [];
 
@@ -175,21 +174,35 @@ class FakeNode {{
   }}
 }}
 
-const liveGroup = (disabled = false) => {{
-  const group = new FakeNode(`${{scenario.suggestion}} ${{scenario.suggestion}}`, {{ role: 'group' }});
+const liveGroup = (disabled = false, withDescription = false) => {{
+  const secondaryText = withDescription
+    ? `${{scenario.suggestion}} - Oracle`
+    : scenario.suggestion;
+  const group = new FakeNode(
+    withDescription
+      ? `Plugins ${{scenario.suggestion}} ${{secondaryText}}`
+      : `${{scenario.suggestion}} ${{secondaryText}}`,
+    {{ role: 'group' }},
+  );
   const action = new FakeNode(
-    `${{scenario.suggestion}} ${{scenario.suggestion}}`,
+    `${{scenario.suggestion}} ${{secondaryText}}`,
     {{ 'data-fill': '', tabindex: '0', ...(disabled ? {{ 'aria-disabled': 'true' }} : {{}}) }},
   );
   action.tagName = 'DIV';
   action.suggestionAction = !disabled;
   const primary = new FakeNode(scenario.suggestion);
-  const secondary = new FakeNode(scenario.suggestion);
+  const secondary = new FakeNode(secondaryText);
   primary.parentElement = action;
   secondary.parentElement = action;
   action.children = [primary, secondary];
   action.parentElement = group;
-  group.children = [action];
+  if (withDescription) {{
+    const category = new FakeNode('Plugins');
+    category.parentElement = group;
+    group.children = [category, action];
+  }} else {{
+    group.children = [action];
+  }}
   return group;
 }};
 
@@ -199,7 +212,10 @@ if (scenario.suggestion !== null && scenario.suggestionCase === 'option') {{
   option.suggestionAction = true;
   suggestionSurfaces = [option];
 }} else if (scenario.suggestion !== null && scenario.suggestionCase !== 'outside-menu') {{
-  const group = liveGroup(scenario.suggestionCase === 'disabled');
+  const group = liveGroup(
+    scenario.suggestionCase === 'disabled',
+    scenario.suggestionCase === 'plugin-description',
+  );
   if (scenario.suggestionCase === 'ambiguous') {{
     suggestionSurfaces = [group, liveGroup()];
   }} else if (scenario.suggestionCase === 'group-lookalike') {{
@@ -247,8 +263,17 @@ if (scenario.semanticToken !== null && scenario.semanticLayout === 'pill') {{
   );
   semanticNodes = [tokenNode];
 }}
+const toolControl = new FakeNode('', {{
+  'data-testid': 'composer-tools-menu-button',
+  'aria-label': 'Add files and more',
+  'aria-haspopup': 'menu',
+  'aria-expanded': 'false',
+}});
+toolControl.tagName = 'BUTTON';
 const form = {{
-  querySelectorAll: () => tokenNode && scenario.semanticScope === 'form' ? semanticNodes : [],
+  querySelectorAll: (selector) => selector.includes('button')
+    ? [toolControl]
+    : tokenNode && scenario.semanticScope === 'form' ? semanticNodes : [],
 }};
 const composer = new FakeNode('');
 composer.querySelectorAll = () =>
@@ -259,6 +284,7 @@ const document = {{
   activeElement: composer,
   querySelectorAll(selector) {{
     if (selector.includes('[role="option"]')) {{
+      if (scenario.keyEventIgnored) return [];
       if (scenario.triggerKeyEvent && !mentionKeyTriggered) return [];
       return suggestionSurfaces;
     }}
@@ -270,6 +296,7 @@ const window = {{
   getComputedStyle(node) {{
     return {{ display: node.visible ? 'block' : 'none', visibility: 'visible', opacity: '1', pointerEvents: 'auto' }};
   }},
+  getSelection: () => ({{ anchorNode: scenario.caretOutsideEditor ? form : composer }}),
 }};
 const execute = (expression) =>
   Function('document', 'window', `return (${{expression}});`)(document, window);
@@ -283,6 +310,11 @@ const runtime = {{
     }}
     if (expression.includes('return {{ focused: true }}'))
       return {{ result: {{ value: {{ focused: true }} }} }};
+    if (expression.includes('MENTION_CENSUS_STAGE')) {{
+      const value = execute(expression);
+      censuses.push(value);
+      return {{ result: {{ value }} }};
+    }}
     if (expression.includes('const surfaceSelector =')) {{
       const value = execute(expression);
       if (value?.status === 'unique') suggestionObserved = true;
@@ -295,8 +327,6 @@ const runtime = {{
       if (value === true && routeChecks > 1) finalRouteConfirmed = true;
       return {{ result: {{ value }} }};
     }}
-    if (expression.includes('return {{ editors, active: describe(document.activeElement) }}'))
-      return {{ result: {{ value: {{ editors: [], active: null }} }} }};
     if (expression.includes('__oracleAppApprovalWatcher'))
       return {{ result: {{ value: true }} }};
     if (expression.includes('fallback.value =')) {{
@@ -334,7 +364,7 @@ const input = {{
 let error = null;
 let result = null;
 try {{
-  result = await submitPrompt({{ runtime, input, baselineTurns: 0 }}, '@DevSpace mission', console.error);
+  result = await submitPrompt({{ runtime, input, baselineTurns: 0 }}, {json.dumps(prompt)}, console.error);
 }} catch (caught) {{
   error = {{
     name: caught.name,
@@ -356,6 +386,7 @@ console.log(JSON.stringify({{
   sendAttempts,
   inserted,
   keyEvents,
+  censuses,
 }}));
 """
     completed = subprocess.run(
@@ -783,17 +814,30 @@ def test_fresh_lf_install_applies_final_strict_patch(tmp_path: Path, monkeypatch
     )["ready"] is True
 
 
-def test_old_prompt_composer_levels_migrate_to_key_event_trigger(
+def test_old_prompt_composer_levels_migrate_to_diagnostic_census(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Both shipped Input.insertText levels must migrate through their exact
-    # legacy patches, from LF or CRLF deployments, while unknown bytes fail
-    # closed.
+    # Every shipped prompt-composer level, including the immediately preceding
+    # census/locator result, must migrate from LF or CRLF deployments while
+    # unknown bytes fail closed.
     compat = load_compat()
     relative = "dist/src/browser/actions/promptComposer.js"
     patches = compat.patch_root("0.17.1")
     contract = compat.VERSION_PATCHES["0.17.1"][relative]
     monkeypatch.setattr(compat, "VERSION_PATCHES", {"0.17.1": {relative: contract}})
+
+    key_event_patch = patches / "promptComposer.key-event-trigger.patch"
+    assert digest(key_event_patch.read_bytes().replace(b"\r\n", b"\n")) == (
+        "8800a03a3a9a62005b59bdcc635ae2628fa3dbd92884273b66ce59fcb29795e3"
+    )
+    preceding_patch = patches / "promptComposer.pre-authority-chain.patch"
+    assert digest(preceding_patch.read_bytes().replace(b"\r\n", b"\n")) == (
+        "5a494c2f550923e3d22ed486dba88984dc1bceee0fdc7d3320e86a22806057e2"
+    )
+    observational_patch = patches / "promptComposer.pre-observational-census.patch"
+    assert digest(observational_patch.read_bytes().replace(b"\r\n", b"\n")) == (
+        "e38977eab590ce054db39c16c0320c435851a2b1f2f87377cddf1836591dd8d3"
+    )
 
     legacy_levels = []
     for label, patch_name, expected in (
@@ -806,6 +850,21 @@ def test_old_prompt_composer_levels_migrate_to_key_event_trigger(
             "split-insert-text",
             "promptComposer.pre-key-event-trigger.patch",
             "bb85c6f09f23c4e0c9093bd472c83b17b1ef7325bcd89a3348429610eeefbd74",
+        ),
+        (
+            "key-event-trigger",
+            "promptComposer.key-event-trigger.patch",
+            "87911b46026d3dd08a643b90aab5dc7009704956a3b5fed493cc600abcb7739a",
+        ),
+        (
+            "pre-authority-chain",
+            "promptComposer.pre-authority-chain.patch",
+            "e9f28f36f652f209a6c8e2aac42f0ddccae7e24bcd6c9b826eafcc4abf86b682",
+        ),
+        (
+            "pre-observational-census",
+            "promptComposer.pre-observational-census.patch",
+            "dfbe8bfe8ff616dfe94d71de6c17f906f72eae96fa30aa22bce4afd787ebc4fc",
         ),
     ):
         package = tmp_path / f"fixture-{label}"
@@ -838,7 +897,7 @@ def test_old_prompt_composer_levels_migrate_to_key_event_trigger(
             )
             assert result["changed"] == [relative]
             assert compat.sha256_file(instance_target) == contract["patched"] == (
-                "87911b46026d3dd08a643b90aab5dc7009704956a3b5fed493cc600abcb7739a"
+                "3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96"
             )
             assert compat.sha256_file(backup / Path(relative)) == contract["pristine"]
 
@@ -900,16 +959,31 @@ def test_literal_devspace_without_semantic_token_clears_and_fails_before_send(
     assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
 
 
-def test_exact_semantic_devspace_token_proceeds_when_transient_ui_is_absent(
+def test_semantic_devspace_token_without_exact_action_fails_closed(
     tmp_path: Path,
 ) -> None:
     result, stderr = run_prompt_route_case(tmp_path, suggestion=None, semantic_token="DevSpace")
 
-    assert result["error"] is None
-    assert result["result"] == 1
-    assert result["sendAttempts"] == 1
-    assert result["inserted"] == ["@", "DevSpace", " mission"]
-    assert "APP_MENTION_ROUTE_UNCONFIRMED" not in stderr
+    assert result["error"]["code"] == "APP_MENTION_ROUTE_UNCONFIRMED"
+    assert result["result"] is None
+    assert result["sendAttempts"] == 0
+    assert result["inserted"] == ["@", "DevSpace"]
+    assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
+
+
+def test_diagnostic_no_submission_blocks_non_app_prompt_before_send(tmp_path: Path) -> None:
+    result, stderr = run_prompt_route_case(
+        tmp_path,
+        suggestion=None,
+        semantic_token=None,
+        diagnostic_stop_before_send=True,
+        prompt="plain diagnostic mission",
+    )
+
+    assert result["error"]["code"] == "APP_MENTION_DIAGNOSTIC_NO_SUBMISSION"
+    assert result["sendAttempts"] == 0
+    assert result["inserted"] == ["plain diagnostic mission"]
+    assert "no routed app established; send suppressed" in stderr
 
 
 @pytest.mark.parametrize("pill_icon_visible", [False, True], ids=["hidden-icon", "visible-icon"])
@@ -945,11 +1019,8 @@ def test_live_group_composer_sequence_stops_before_send_with_both_route_checks(
         diagnostic_stop_before_send=True,
     )
 
-    assert result["error"] is None
-    assert result["result"] == {
-        "diagnosticStoppedBeforeSend": True,
-        "exactAppSuggestionSelected": True,
-    }
+    assert result["error"]["code"] == "APP_MENTION_DIAGNOSTIC_NO_SUBMISSION"
+    assert result["result"] is None
     assert result["suggestionObserved"] is True
     assert result["suggestionClicks"] == 1
     assert result["initialRouteConfirmed"] is True
@@ -957,14 +1028,13 @@ def test_live_group_composer_sequence_stops_before_send_with_both_route_checks(
     assert result["routeChecks"] == 2
     assert result["sendAttempts"] == 0
     assert "APP_MENTION_ROUTE_UNCONFIRMED" not in stderr
+    assert "APP_MENTION_DIAGNOSTIC_NO_SUBMISSION" in stderr
 
 
 @pytest.mark.parametrize(
     ("suggestion", "suggestion_case"),
     [
         pytest.param("DevSpace", "ambiguous", id="ambiguous-exact-actions"),
-        pytest.param("DevSpace", "group-lookalike", id="group-with-lookalike"),
-        pytest.param("DevSpace", "nested-unrelated", id="nested-unrelated-label"),
         pytest.param("DevSpace", "hidden", id="hidden-group"),
         pytest.param("DevSpace", "disabled", id="disabled-exact-action"),
         pytest.param("DevSpace", "outside-menu", id="outside-suggestion-surface"),
@@ -987,6 +1057,31 @@ def test_group_suggestion_resolver_refuses_non_authoritative_candidates_before_s
     assert result["sendAttempts"] == 0
     assert result["error"]["code"] == "APP_MENTION_ROUTE_UNCONFIRMED"
     assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
+
+
+@pytest.mark.parametrize(
+    "suggestion_case",
+    ["group-lookalike", "nested-unrelated", "plugin-description"],
+)
+def test_exact_app_action_ignores_nonidentity_group_metadata(
+    tmp_path: Path, suggestion_case: str,
+) -> None:
+    result, stderr = run_prompt_route_case(
+        tmp_path,
+        suggestion="DevSpace",
+        suggestion_case=suggestion_case,
+        semantic_token="DevSpace",
+        semantic_identity_attr=None,
+        semantic_layout="pill",
+        diagnostic_stop_before_send=True,
+    )
+
+    assert result["suggestionClicks"] == 1
+    assert result["sendAttempts"] == 0
+    assert result["error"]["code"] == "APP_MENTION_DIAGNOSTIC_NO_SUBMISSION"
+    assert result["initialRouteConfirmed"] is True
+    assert result["finalRouteConfirmed"] is True
+    assert "APP_MENTION_ROUTE_UNCONFIRMED" not in stderr
 
 
 def test_keyboard_mention_trigger_opens_suggestion_before_app_name(tmp_path: Path) -> None:
@@ -1051,6 +1146,102 @@ def test_keyboard_mention_trigger_without_surface_fails_closed(tmp_path: Path) -
     assert result["clearCount"] == 2
     assert result["error"]["code"] == "APP_MENTION_ROUTE_UNCONFIRMED"
     assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
+
+
+def test_key_event_miss_census_discriminates_before_send(tmp_path: Path) -> None:
+    # The @ keyDown/keyUp pair is dispatched but the mention picker never
+    # opens. The failure census must pin this as a key-event failure, with
+    # zero click and zero send attempts.
+    result, stderr = run_prompt_route_case(
+        tmp_path,
+        suggestion="DevSpace",
+        semantic_token=None,
+        key_event_ignored=True,
+    )
+
+    assert result["sendAttempts"] == 0
+    assert result["error"]["code"] == "APP_MENTION_ROUTE_UNCONFIRMED"
+    assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
+    assert [event for event in result["keyEvents"] if event.get("key") == "@"]
+    assert result["censuses"], "the census logs must be emitted"
+    assert result["censuses"][-1]["stage"] == "P2"
+    assert result["censuses"][-1]["discriminator"] == "no-visible-action-surface"
+    assert result["censuses"][-1]["controls"] == [
+        {
+            "tag": "BUTTON",
+            "role": None,
+            "testid": "composer-tools-menu-button",
+            "ariaLabel": "Add files and more",
+            "title": None,
+            "ariaExpanded": "false",
+            "ariaHaspopup": "menu",
+            "text": "",
+            "visible": True,
+            "rect": {"width": 10, "height": 10},
+        }
+    ]
+
+
+def test_caret_outside_editor_census_discriminates_before_send(tmp_path: Path) -> None:
+    # The editor is still focused but the Lexical caret/selection anchor sits
+    # outside the editor, so the mention key event cannot open the picker.
+    result, stderr = run_prompt_route_case(
+        tmp_path,
+        suggestion="DevSpace",
+        semantic_token=None,
+        caret_outside_editor=True,
+    )
+
+    assert result["sendAttempts"] == 0
+    assert result["error"]["code"] == "APP_MENTION_ROUTE_UNCONFIRMED"
+    assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
+    assert result["censuses"], "the census logs must be emitted"
+    assert result["censuses"][-1]["stage"] == "P2"
+    assert result["censuses"][-1]["discriminator"] == "caret-outside-editor"
+
+
+def test_visible_generic_surface_without_exact_app_does_not_claim_picker_evidence(
+    tmp_path: Path,
+) -> None:
+    # A generic surface with no exact app action is observable, but it is not
+    # authority that the mention picker opened or that the app is unavailable.
+    result, stderr = run_prompt_route_case(
+        tmp_path,
+        suggestion="OtherApp",
+        semantic_token=None,
+    )
+
+    assert result["sendAttempts"] == 0
+    assert result["error"]["code"] == "APP_MENTION_ROUTE_UNCONFIRMED"
+    assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
+    assert result["censuses"], "the census logs must be emitted"
+    assert result["censuses"][-1]["stage"] == "P2"
+    assert result["censuses"][-1]["discriminator"] == "no-exact-app-action-observed"
+    assert result["censuses"][-1]["actionSurfaceVisible"] is True
+    assert "pickerOpen" not in result["censuses"][-1]
+
+
+def test_devspace_item_rejected_by_current_locator_census_discriminates_before_send(
+    tmp_path: Path,
+) -> None:
+    # A DevSpace item with exact text is present, but the current locator
+    # rejects it (here: disabled action), so the failure census must report
+    # locator-drift with the per-candidate rejection reason.
+    result, stderr = run_prompt_route_case(
+        tmp_path,
+        suggestion="DevSpace",
+        suggestion_case="disabled",
+        semantic_token=None,
+    )
+
+    assert result["sendAttempts"] == 0
+    assert result["error"]["code"] == "APP_MENTION_ROUTE_UNCONFIRMED"
+    assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
+    assert result["censuses"], "the census logs must be emitted"
+    census = result["censuses"][-1]
+    assert census["stage"] == "P2"
+    assert census["discriminator"] == "candidate-rejected-by-locator"
+    assert any(entry["reason"] == "target-not-enabled" for entry in census["rejections"])
 
 
 @pytest.mark.parametrize(
@@ -1220,7 +1411,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "dist/src/cli/browserConfig.js": ("989f14399c8aa51913752306135e11d97e4f1c55b2baf984907f1b54959cc340", "bd18d11e4770fa5335c889b7856622f2da4199351ec65bc17a5ec1f472e2506f"),
         "dist/src/browser/index.js": ("335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11", "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895"),
         "dist/src/browser/actions/assistantResponse.js": ("0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d", "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4"),
-        "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "87911b46026d3dd08a643b90aab5dc7009704956a3b5fed493cc600abcb7739a"),
+        "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96"),
         "dist/src/browser/actions/thinkingTime.js": ("508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca", "3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3"),
     }
 
@@ -1275,6 +1466,9 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
     assert composer["legacy_patched"] == [
         "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f",
         "bb85c6f09f23c4e0c9093bd472c83b17b1ef7325bcd89a3348429610eeefbd74",
+        "87911b46026d3dd08a643b90aab5dc7009704956a3b5fed493cc600abcb7739a",
+        "e9f28f36f652f209a6c8e2aac42f0ddccae7e24bcd6c9b826eafcc4abf86b682",
+        "dfbe8bfe8ff616dfe94d71de6c17f906f72eae96fa30aa22bce4afd787ebc4fc",
     ]
     assert composer["legacy_patches"] == {
         "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f": (
@@ -1283,7 +1477,23 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "bb85c6f09f23c4e0c9093bd472c83b17b1ef7325bcd89a3348429610eeefbd74": (
             "promptComposer.pre-key-event-trigger.patch"
         ),
+        "87911b46026d3dd08a643b90aab5dc7009704956a3b5fed493cc600abcb7739a": (
+            "promptComposer.key-event-trigger.patch"
+        ),
+        "e9f28f36f652f209a6c8e2aac42f0ddccae7e24bcd6c9b826eafcc4abf86b682": (
+            "promptComposer.pre-authority-chain.patch"
+        ),
+        "dfbe8bfe8ff616dfe94d71de6c17f906f72eae96fa30aa22bce4afd787ebc4fc": (
+            "promptComposer.pre-observational-census.patch"
+        ),
     }
+    key_event_legacy = (
+        compat.patch_root("0.17.1") / "promptComposer.key-event-trigger.patch"
+    ).read_text(encoding="utf-8")
+    assert key_event_legacy.startswith(
+        "diff --git a/dist/src/browser/actions/promptComposer.js b/dist/src/browser/actions/promptComposer.js\n"
+    )
+    assert "await input.dispatchKeyEvent({" in key_event_legacy
     prompt_patch = patches["dist/src/browser/actions/promptComposer.js"]
     assert 'type: "keyDown"' in prompt_patch
     assert 'key: "@"' in prompt_patch
@@ -1312,7 +1522,9 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "thinkingTime.extra-high-fail-closed.patch",
         "thinkingTime.pro-heavy-upgrade.patch",
         "promptComposer.pre-key-event-trigger.patch",
+        "promptComposer.pre-authority-chain.patch",
         "promptComposer.pre-split-trigger.patch",
+        "promptComposer.pre-observational-census.patch",
     }:
         assert (compat.patch_root("0.17.1") / patch_name).is_file(), patch_name
 

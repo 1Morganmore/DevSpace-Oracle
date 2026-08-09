@@ -154,7 +154,7 @@ index c643386..c845262 100644
 +            'button,[role="option"],[role="menuitem"],[data-radix-collection-item],[data-fill][tabindex]';
 +          const surfaces = Array.from(document.querySelectorAll(surfaceSelector));
 +          const visibleSurfaces = surfaces.filter(visible);
-+          const actionSurfaceVisible = visibleSurfaces.length > 0;
++          const pickerOpen = visibleSurfaces.length > 0;
 +          const rejections = [];
 +          const recordRejection = (reason, node) => {
 +            if (!MENTION_CENSUS_COLLECT_REJECTIONS || rejections.length >= MAX_REJECTIONS) return;
@@ -206,7 +206,7 @@ index c643386..c845262 100644
 +          const discriminator = !editorFound ? 'no-editor-found'
 +            : !editorFocused ? 'editor-not-focused'
 +            : !caretInEditor ? 'caret-outside-editor'
-+            : !actionSurfaceVisible ? (MENTION_CENSUS_STAGE === 'P0' ? 'no-visible-action-surface-before-app-name' : 'no-visible-action-surface')
++            : !pickerOpen ? (MENTION_CENSUS_STAGE === 'P0' ? 'no-visible-action-surface-before-app-name' : 'no-visible-action-surface')
 +            : MENTION_CENSUS_STAGE === 'P0' ? 'visible-action-surface-before-app-name'
 +            : !exactTextFound ? 'no-exact-app-action-observed'
 +            : visibleSurfaces.length === 0 ? 'candidate-rejected-by-locator'
@@ -223,7 +223,7 @@ index c643386..c845262 100644
 +            activeElement: describe(active),
 +            caretNode: caretNode ? describe(caretNode) : null,
 +            controls,
-+            actionSurfaceVisible,
++            pickerOpen,
 +            surfaceCount: surfaces.length,
 +            visibleSurfaceCount: visibleSurfaces.length,
 +            exactTextFound,

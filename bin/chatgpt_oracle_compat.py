@@ -159,12 +159,21 @@ PATCHES_0171 = {
     "dist/src/browser/actions/promptComposer.js": {
         "patch": "promptComposer.patch",
         "pristine": "db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000",
-        "patched": "87911b46026d3dd08a643b90aab5dc7009704956a3b5fed493cc600abcb7739a",
+        "patched": "3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96",
         "legacy_patched": [
             # Both deployed Input.insertText levels fail to generate the key
             # event required by the current ChatGPT mention picker.
             "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f",
             "bb85c6f09f23c4e0c9093bd472c83b17b1ef7325bcd89a3348429610eeefbd74",
+            # Former real-key-event level; superseded by the evaluate-only
+            # mention census. Keep its exact reverse patch as a normal asset.
+            "87911b46026d3dd08a643b90aab5dc7009704956a3b5fed493cc600abcb7739a",
+            # Previously deployed census/locator level. Reverse its exact
+            # patch before applying the stricter authority-chain result.
+            "e9f28f36f652f209a6c8e2aac42f0ddccae7e24bcd6c9b826eafcc4abf86b682",
+            # Immediately preceding authority-chain level. Its census still
+            # named generic document-global surfaces as a picker.
+            "dfbe8bfe8ff616dfe94d71de6c17f906f72eae96fa30aa22bce4afd787ebc4fc",
         ],
         "legacy_patches": {
             "a3882c7881a7e787a33092350c494d950a6f67c38e6801cd1eaff20ac317532f": (
@@ -172,6 +181,15 @@ PATCHES_0171 = {
             ),
             "bb85c6f09f23c4e0c9093bd472c83b17b1ef7325bcd89a3348429610eeefbd74": (
                 "promptComposer.pre-key-event-trigger.patch"
+            ),
+            "87911b46026d3dd08a643b90aab5dc7009704956a3b5fed493cc600abcb7739a": (
+                "promptComposer.key-event-trigger.patch"
+            ),
+            "e9f28f36f652f209a6c8e2aac42f0ddccae7e24bcd6c9b826eafcc4abf86b682": (
+                "promptComposer.pre-authority-chain.patch"
+            ),
+            "dfbe8bfe8ff616dfe94d71de6c17f906f72eae96fa30aa22bce4afd787ebc4fc": (
+                "promptComposer.pre-observational-census.patch"
             ),
         },
     },
