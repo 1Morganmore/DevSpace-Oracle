@@ -2399,7 +2399,7 @@ def resolve_lifecycle(state: dict[str, Any], *, output_is_present: bool | None =
 
 
 TASK_OUTCOME_RE = re.compile(
-    r"TASK_OUTCOME:\s*(EXECUTED|NOT_EXECUTED|BLOCKED)",
+    r"(?:\*\*)?TASK_OUTCOME:\s*(EXECUTED|NOT_EXECUTED|BLOCKED)(?:\*\*)?",
     re.IGNORECASE,
 )
 

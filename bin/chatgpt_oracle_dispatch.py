@@ -21,6 +21,7 @@ def _load(name: str, path: Path):
 
 
 PROFILES = _load("oracle_dispatch_profiles", BIN / "chatgpt_oracle_profiles.py")
+PROJECTS = _load("oracle_dispatch_projects", BIN / "chatgpt_oracle_projects.py")
 RUNNER = _load("oracle_dispatch_runner", BIN / "chatgpt_oracle_run.py")
 
 
@@ -106,11 +107,19 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--reasoning-level")
     parser.add_argument("--attachment", type=Path, action="append", default=[])
     parser.add_argument("--context-manifest", type=Path)
-    parser.add_argument("--chatgpt-project-url")
+    project = parser.add_mutually_exclusive_group()
+    project.add_argument("--chatgpt-project-url")
+    project.add_argument("--chatgpt-project", help="Named exact-URL profile from chatgpt_oracle_projects.py")
+    parser.add_argument("--project-profile-store", type=Path)
     parser.add_argument("--expected-manifest-sha256")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     try:
+        project_url = (
+            PROJECTS.resolve_profile(args.chatgpt_project, args.project_profile_store)
+            if args.chatgpt_project
+            else args.chatgpt_project_url
+        )
         compiled = compile_manifest(
             mode=args.mode,
             project_root=args.project_root,
@@ -119,7 +128,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             reasoning_level=args.reasoning_level,
             attachment_paths=args.attachment,
             context_manifest_path=args.context_manifest,
-            chatgpt_project_url=args.chatgpt_project_url,
+            chatgpt_project_url=project_url,
         )
         if compiled["oracle_manifest_path"]:
             if not args.dry_run and args.expected_manifest_sha256 is None:

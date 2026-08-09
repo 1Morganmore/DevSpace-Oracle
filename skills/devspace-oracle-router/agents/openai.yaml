@@ -1,0 +1,6 @@
+interface:
+  display_name: "DevSpace Oracle Router"
+  short_description: "Route natural-language GPT work through DevSpace Oracle"
+  default_prompt: "Use $devspace-oracle-router to route this request through the correct DevSpace Oracle mode."
+policy:
+  allow_implicit_invocation: true

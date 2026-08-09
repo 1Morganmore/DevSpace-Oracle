@@ -13,6 +13,9 @@ Use `bin/chatgpt_oracle_multi.py` with schema
   lowercase `mission_sha256` values for the authored bytes
 - `merger_mission_path` and its exact lowercase `merger_mission_sha256`
 - `max_concurrency`: 1..5
+- optional `parallel_policy` with exact `when: explicit-user-request`, a
+  `max_total_sessions` cap counting every solver plus the merger, and a
+  `max_concurrency` cap. New natural-language multi requests include it.
 - optional `next_stage_result_path` for comprehensive relay
 - optional exact `chatgpt_project_url` to start every independent solver and
   merger conversation inside the same ChatGPT Project
@@ -30,6 +33,9 @@ Use the preview's exact `manifest_sha256` for the authorized live run:
 ```powershell
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_multi.py" --manifest C:\project\multi.json --expected-manifest-sha256 <manifest_sha256>
 ```
+
+The preview returns `parallel_plan` with solver, merger, total-session, and
+concurrency counts. Review those counts before authorizing a live run.
 
 Each lane receives its own Oracle slug/run/output and only `@DevSpace` plus its
 mission path. Lanes run in stable waves of at most five; a larger topology is

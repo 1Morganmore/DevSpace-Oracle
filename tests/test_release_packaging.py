@@ -21,10 +21,12 @@ def test_manifest_and_package_cover_the_active_release_surface() -> None:
     required = {
         "bin/chatgpt_oracle_run.py",
         "bin/chatgpt_oracle_dispatch.py",
+        "bin/chatgpt_oracle_projects.py",
         "bin/chatgpt_oracle_multi.py",
         "bin/chatgpt_oracle_comprehensive.py",
         "bin/chatgpt_devspace_compat.py",
         "skills/chatgpt-pro-plan-handoff/SKILL.md",
+        "skills/devspace-oracle-router/SKILL.md",
         "scripts/run_release_contract_tests.py",
         "scripts/check_upstream.py",
         "contracts/install/*.json",
@@ -98,6 +100,18 @@ def test_release_workflow_uses_only_the_current_focused_and_full_runner() -> Non
     focused = workflow.index("python scripts/run_release_contract_tests.py --focused")
     full = workflow.index("python scripts/run_release_contract_tests.py --full")
     assert install < focused < full
+
+
+def test_workflows_use_current_node24_action_majors() -> None:
+    workflows = "\n".join(
+        path.read_text(encoding="utf-8") for path in (ROOT / ".github/workflows").glob("*.yml")
+    )
+    for action in ("actions/checkout", "actions/setup-python", "actions/setup-node"):
+        if action in workflows:
+            assert f"{action}@v7" in workflows
+    assert "actions/checkout@v4" not in workflows
+    assert "actions/setup-python@v5" not in workflows
+    assert "actions/setup-node@v4" not in workflows
 
 
 def test_upstream_drift_workflow_is_separate_read_only_and_non_required() -> None:

@@ -74,6 +74,52 @@ def test_project_url_is_normalized_and_propagated_to_every_lane(tmp_path: Path) 
     assert child["chatgpt_project_url"] == "https://chatgpt.com/g/g-p-example/project"
 
 
+def test_explicit_parallel_policy_caps_sessions_and_is_reported(tmp_path: Path) -> None:
+    module = load()
+    path = make_manifest(tmp_path, 2)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["max_concurrency"] = 2
+    payload["parallel_policy"] = {
+        "when": "explicit-user-request",
+        "max_total_sessions": 3,
+        "max_concurrency": 2,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    config = module.load_manifest(path)
+    assert config["parallel_plan"] == {
+        "when": "explicit-user-request",
+        "solver_sessions": 2,
+        "merger_sessions": 1,
+        "total_sessions": 3,
+        "max_total_sessions": 3,
+        "max_concurrency": 2,
+        "policy_max_concurrency": 2,
+    }
+    result = module.run_multi(
+        path,
+        expected_manifest_sha256=digest(path),
+        parent_id="a" * 64,
+        dry_run=True,
+        parent_lock_held=True,
+        execute=lambda *args, **kwargs: {"ok": True},
+    )
+    assert result["parallel_plan"] == config["parallel_plan"]
+
+    payload["parallel_policy"]["max_total_sessions"] = 2
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(module.MultiError, match="total session cap exceeded"):
+        module.load_manifest(path)
+
+    payload["parallel_policy"] = {
+        "when": "explicit-user-request",
+        "max_total_sessions": 3,
+        "max_concurrency": 2.0,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(module.MultiError, match="JSON integers"):
+        module.load_manifest(path)
+
+
 def test_multi_uses_unique_child_manifests_waves_and_merger(tmp_path: Path) -> None:
     module = load()
     calls = []

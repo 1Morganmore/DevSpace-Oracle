@@ -89,6 +89,45 @@ def _inside(root: Path, value: Any, *, exists: bool = True) -> Path:
     return path
 
 
+def _parallel_plan(value: dict[str, Any], solver_count: int, concurrency: int) -> dict[str, Any]:
+    total_sessions = solver_count + 1
+    raw = value.get("parallel_policy")
+    if raw is None:
+        return {
+            "when": "manifest-without-explicit-policy",
+            "solver_sessions": solver_count,
+            "merger_sessions": 1,
+            "total_sessions": total_sessions,
+            "max_concurrency": concurrency,
+        }
+    if not isinstance(raw, dict) or set(raw) != {"when", "max_total_sessions", "max_concurrency"}:
+        raise MultiError(
+            "parallel_policy must contain exactly when, max_total_sessions, and max_concurrency"
+        )
+    if raw["when"] != "explicit-user-request":
+        raise MultiError("parallel_policy.when must be explicit-user-request")
+    if any(
+        isinstance(raw[field], bool) or not isinstance(raw[field], int)
+        for field in ("max_total_sessions", "max_concurrency")
+    ):
+        raise MultiError("parallel policy caps must be JSON integers")
+    max_total = raw["max_total_sessions"]
+    policy_concurrency = raw["max_concurrency"]
+    if not 3 <= max_total <= 26 or total_sessions > max_total:
+        raise MultiError("parallel policy total session cap exceeded")
+    if not 1 <= policy_concurrency <= 5 or concurrency > policy_concurrency:
+        raise MultiError("parallel policy concurrency cap exceeded")
+    return {
+        "when": raw["when"],
+        "solver_sessions": solver_count,
+        "merger_sessions": 1,
+        "total_sessions": total_sessions,
+        "max_total_sessions": max_total,
+        "max_concurrency": concurrency,
+        "policy_max_concurrency": policy_concurrency,
+    }
+
+
 def load_manifest(path: Path, *, expected_manifest_sha256: str | None = None) -> dict[str, Any]:
     resolved = path.resolve(strict=True)
     raw = resolved.read_bytes()
@@ -157,6 +196,7 @@ def load_manifest(path: Path, *, expected_manifest_sha256: str | None = None) ->
     app_name = str(value.get("app_name") or "DevSpace").strip()
     if app_name != "DevSpace":
         raise MultiError("app_name must be exactly DevSpace")
+    parallel_plan = _parallel_plan(value, len(normalized), concurrency)
     chatgpt_project_url = STATE.normalize_chatgpt_project_url(value.get("chatgpt_project_url"))
     return {
         **value,
@@ -167,6 +207,7 @@ def load_manifest(path: Path, *, expected_manifest_sha256: str | None = None) ->
         "merger_mission_sha256": merger_sha256,
         "next_stage_result_path": next_stage_result,
         "max_concurrency": concurrency,
+        "parallel_plan": parallel_plan,
         "app_name": app_name,
         "chatgpt_project_url": chatgpt_project_url,
         "model": str(value.get("model") or "gpt-5.6").strip(),
@@ -342,6 +383,7 @@ def run_multi(
                 "status": "failed",
                 "parent_id": parent_id,
                 "manifest_sha256": config["manifest_sha256"],
+                "parallel_plan": config["parallel_plan"],
                 "lanes": lanes,
             }
             _publish_result(config["output_dir"] / "result.json", result, terminal_seal)
@@ -379,6 +421,7 @@ def run_multi(
         "status": status,
         "parent_id": parent_id,
         "manifest_sha256": config["manifest_sha256"],
+        "parallel_plan": config["parallel_plan"],
         "lanes": lanes,
         "merger_run_dir": merger.get("run_dir"),
         "successful_lane_count": len(successful),

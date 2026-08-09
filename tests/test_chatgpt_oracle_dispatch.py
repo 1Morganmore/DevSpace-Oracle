@@ -121,6 +121,27 @@ def test_project_url_is_bound_into_a_regular_manifest(tmp_path: Path) -> None:
     assert json.loads(target.read_text(encoding="utf-8"))["chatgpt_project_url"] == project_url
 
 
+def test_named_project_profile_resolves_to_the_exact_manifest_url(monkeypatch, capsys, tmp_path: Path) -> None:
+    module = load()
+    mission = tmp_path / "mission.md"
+    target = tmp_path / "regular.json"
+    mission.write_text("work", encoding="utf-8")
+    project_url = "https://chatgpt.com/g/g-p-example/project"
+    monkeypatch.setattr(module.PROJECTS, "resolve_profile", lambda name, store: project_url)
+    monkeypatch.setattr(module.RUNNER, "execute_run", lambda *args, **kwargs: {"ok": True})
+
+    assert module.main([
+        "--mode", "direct",
+        "--project-root", str(tmp_path),
+        "--mission-path", str(mission),
+        "--manifest-output", str(target),
+        "--chatgpt-project", "devspace-oracle",
+        "--dry-run",
+    ]) == 0
+    capsys.readouterr()
+    assert json.loads(target.read_text(encoding="utf-8"))["chatgpt_project_url"] == project_url
+
+
 def test_live_dispatch_requires_and_propagates_preview_hash(monkeypatch, capsys, tmp_path: Path) -> None:
     module = load()
     mission = tmp_path / "mission.md"

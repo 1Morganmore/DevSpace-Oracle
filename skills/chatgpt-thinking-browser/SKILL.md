@@ -18,6 +18,16 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" --mode <direct|p
 URL; Oracle starts the new conversation inside that project. Never fuzzy-match a
 project name or silently fall back to the ChatGPT root page.
 
+For a reusable local alias, set the exact URL with
+`chatgpt_oracle_projects.py set <name> <url>` and pass
+`--chatgpt-project <name>`. The dispatcher resolves the alias before hashing and
+stores only the exact URL in the launch manifest.
+
+Project placement does not prove that the DevSpace connector is available in
+that Project chat. A terminal `TASK_OUTCOME: BLOCKED` reporting an unavailable
+connector is a real capability failure: preserve that exact result and never
+resubmit or silently fall back to a root chat.
+
 For an explicitly authorized live web run, replace `--dry-run` with
 `--expected-manifest-sha256 <oracle_manifest_sha256>` using the exact top-level
 hash from that preview. The runtime

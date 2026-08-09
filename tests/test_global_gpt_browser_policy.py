@@ -11,6 +11,7 @@ HANDOFF = ROOT / "skills/chatgpt-pro-plan-handoff/SKILL.md"
 MULTI = ROOT / "skills/web-multi-gpt/SKILL.md"
 RESEARCH = ROOT / "skills/chatgpt-deep-research-browser/SKILL.md"
 DESIGNER = ROOT / "skills/chatgpt-question-designer/SKILL.md"
+ROUTER = ROOT / "skills/devspace-oracle-router/SKILL.md"
 
 
 def text(path: Path) -> str:
@@ -89,6 +90,19 @@ def test_standalone_pro_stops_after_one_result() -> None:
     assert "standalone, one-shot Pro route" in value
     assert "returns that durable Pro result to Codex" in value
     assert "never starts a review-to-implementation chain" in value
+
+
+def test_natural_language_router_covers_every_mode_and_safe_cost_gate() -> None:
+    value = text(ROUTER)
+    for phrase in (
+        "일반 GPT", "계획", "검토", "수정", "지휘모드", "딥 리서치",
+        "Web Multi-GPT", "Local Multi-GPT", "종합모드", "Pro",
+    ):
+        assert phrase in value
+    assert "--chatgpt-project <name>" in value
+    assert '"when": "explicit-user-request"' in value
+    assert "only after explicit authorization" in value
+    assert "TASK_OUTCOME: BLOCKED" in value and "do not resubmit" in value
 
 
 def test_oracle_runs_use_isolated_profiles_and_hidden_windows() -> None:

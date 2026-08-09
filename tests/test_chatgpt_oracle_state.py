@@ -860,6 +860,16 @@ def test_not_executed_outcome_needs_attention_even_when_terminal(tmp_path: Path)
     assert verdict["lifecycle"] == "needs_attention"
 
 
+def test_markdown_bold_terminal_outcome_is_classified(tmp_path: Path) -> None:
+    state = load_state()
+    output = tmp_path / "output.md"
+    output.write_text("Task could not run.\n\n**TASK_OUTCOME: BLOCKED**\n", encoding="utf-8")
+
+    assert state.classify_task_outcome(
+        output, contract="v1", transport="devspace"
+    ) == "blocked"
+
+
 def test_local_ledger_is_the_lowest_authority(tmp_path: Path) -> None:
     state = load_state()
 
