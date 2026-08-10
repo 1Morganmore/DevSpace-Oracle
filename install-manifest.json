@@ -45,6 +45,7 @@
     "bin/oracle-compat/0.17.1/thinkingTime.strict.hidden-slider.patch",
     "bin/oracle-compat/0.17.1/thinkingTime.strict.null-model-menu-closed.patch",
     "bin/oracle-compat/0.17.1/thinkingTime.strict.patch",
+    "bin/oracle-compat/0.17.1/thinkingTime.strict.pre-ancestor-opacity-proof.patch",
     "bin/oracle-compat/0.17.1/thinkingTime.strict.pre-primary-css-proof.patch",
     "bin/oracle-compat/0.17.1/thinkingTime.strict.pre-diagnostic-proof.patch",
     "bin/oracle-compat/0.17.1/thinkingTime.strict.pre-stable-visible-proof.patch",

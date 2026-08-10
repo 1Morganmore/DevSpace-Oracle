@@ -169,6 +169,7 @@ def run_gpt56_primary_css_visibility_cases(tmp_path: Path) -> dict[str, str]:
         {"label": "visibility-hidden", "display": "block", "visibility": "hidden", "opacity": "1", "ariaHidden": False},
         {"label": "visibility-collapse", "display": "block", "visibility": "collapse", "opacity": "1", "ariaHidden": False},
         {"label": "opacity-zero", "display": "block", "visibility": "visible", "opacity": "0", "ariaHidden": False},
+        {"label": "ancestor-opacity-zero", "display": "block", "visibility": "visible", "opacity": "1", "ancestorOpacity": "0", "ariaHidden": False},
         {"label": "aria-hidden", "display": "block", "visibility": "visible", "opacity": "1", "ariaHidden": True},
     ])
     harness = """
@@ -191,9 +192,13 @@ const expression = buildThinkingTimeExpressionForTest('heavy', 'gpt-5.6-sol');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const evaluateScenario = async (scenario) => {
   const hiddenAttrs = scenario.ariaHidden ? { 'aria-hidden': 'true' } : {};
+  const ancestor = node('');
   const model = node('Pro', { ...hiddenAttrs, 'aria-label': 'Pro', 'aria-expanded': 'true' });
   const slider = node('Power 5 of 5 Pro', { ...hiddenAttrs, 'aria-valuenow': '5' });
   const advanced = node('Model GPT-5.6 Sol Effort Pro', hiddenAttrs);
+  model.parentElement = ancestor;
+  slider.parentElement = ancestor;
+  advanced.parentElement = ancestor;
   const nodes = (selector) => {
     if (selector.includes('model-button')) return [model];
     if (selector.includes('slider-simple')) return [slider];
@@ -204,7 +209,11 @@ const evaluateScenario = async (scenario) => {
     querySelectorAll: nodes,
     querySelector: (selector) => nodes(selector)[0] ?? null,
   };
-  const window = { getComputedStyle: () => scenario };
+  const window = {
+    getComputedStyle: (target) => target === ancestor
+      ? { ...scenario, opacity: scenario.ancestorOpacity ?? '1' }
+      : scenario,
+  };
   let tick = 0;
   const performance = { now: () => (tick += 100) };
   const setTimeout = (resolve) => { resolve(); return 0; };
@@ -231,7 +240,14 @@ console.log(JSON.stringify(statuses));
 def test_gpt56_primary_proof_rejects_css_hidden_stale_candidates(tmp_path: Path) -> None:
     statuses = run_gpt56_primary_css_visibility_cases(tmp_path)
     assert statuses["visible"] == "already-selected"
-    for label in ("display-none", "visibility-hidden", "visibility-collapse", "opacity-zero", "aria-hidden"):
+    for label in (
+        "display-none",
+        "visibility-hidden",
+        "visibility-collapse",
+        "opacity-zero",
+        "ancestor-opacity-zero",
+        "aria-hidden",
+    ):
         assert statuses[label] not in {"already-selected", "switched"}
 
 
@@ -995,6 +1011,19 @@ def test_fork_legacy_thinking_time_levels_migrate_to_final_strict_patch(
         "5378da62f4374fcbf0d89fad17fba576c58859ebc5e072540d2222537c835225"
     )
 
+    prior_ancestor_work = tmp_path / "stage-prior-ancestor-opacity-proof"
+    prior_ancestor_target = prior_ancestor_work / Path(relative)
+    prior_ancestor_target.parent.mkdir(parents=True)
+    prior_ancestor_target.write_bytes(pristine.replace(b"\r\n", b"\n"))
+    compat._apply_patch(
+        prior_ancestor_work,
+        patches / "thinkingTime.strict.pre-ancestor-opacity-proof.patch",
+    )
+    prior_ancestor_bytes = prior_ancestor_target.read_bytes()
+    assert digest(prior_ancestor_bytes) == (
+        "2cf9f56afc8815533403020cde71063c775146acbac1fd5932906f9bf626d6a8"
+    )
+
     backup = tmp_path / "backup"
     for label, legacy_bytes in (
         ("era-lf", era_bytes),
@@ -1007,6 +1036,8 @@ def test_fork_legacy_thinking_time_levels_migrate_to_final_strict_patch(
         ("prior-visible-proof-crlf", prior_visible_bytes.replace(b"\n", b"\r\n")),
         ("prior-primary-css-proof-lf", prior_primary_css_bytes),
         ("prior-primary-css-proof-crlf", prior_primary_css_bytes.replace(b"\n", b"\r\n")),
+        ("prior-ancestor-opacity-proof-lf", prior_ancestor_bytes),
+        ("prior-ancestor-opacity-proof-crlf", prior_ancestor_bytes.replace(b"\n", b"\r\n")),
     ):
         package = tmp_path / f"package-{label}"
         target = package / Path(relative)
@@ -1018,7 +1049,7 @@ def test_fork_legacy_thinking_time_levels_migrate_to_final_strict_patch(
         )
         assert result["changed"] == [relative]
         assert compat.sha256_file(target) == contract["patched"] == (
-            "2cf9f56afc8815533403020cde71063c775146acbac1fd5932906f9bf626d6a8"
+            "01ad2aca046895140729866ab5da3b0e7cfd92a00618d61f1d4b9b4cf36365eb"
         )
         assert compat.sha256_file(backup / Path(relative)) == contract["pristine"]
 
@@ -1654,7 +1685,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "dist/src/browser/index.js": ("335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11", "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895"),
         "dist/src/browser/actions/assistantResponse.js": ("0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d", "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4"),
         "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96"),
-        "dist/src/browser/actions/thinkingTime.js": ("508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca", "2cf9f56afc8815533403020cde71063c775146acbac1fd5932906f9bf626d6a8"),
+        "dist/src/browser/actions/thinkingTime.js": ("508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca", "01ad2aca046895140729866ab5da3b0e7cfd92a00618d61f1d4b9b4cf36365eb"),
     }
 
     patches = {
@@ -1703,6 +1734,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3",
         "fd7e6fcf2f38e0367b50501e7546244f0e3e2cdb95e8905c388798c5fed5a4f5",
         "5378da62f4374fcbf0d89fad17fba576c58859ebc5e072540d2222537c835225",
+        "2cf9f56afc8815533403020cde71063c775146acbac1fd5932906f9bf626d6a8",
     ]
     assert thinking["legacy_patch"] == "thinkingTime.strict.pre-power.patch"
     assert thinking["legacy_patches"]["4106ed89a032d06fadcf1c1600e238e26243c02d1c3ef4261ea70169396d464e"] == [
@@ -1723,6 +1755,9 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
     )
     assert thinking["legacy_patches"]["5378da62f4374fcbf0d89fad17fba576c58859ebc5e072540d2222537c835225"] == (
         "thinkingTime.strict.pre-primary-css-proof.patch"
+    )
+    assert thinking["legacy_patches"]["2cf9f56afc8815533403020cde71063c775146acbac1fd5932906f9bf626d6a8"] == (
+        "thinkingTime.strict.pre-ancestor-opacity-proof.patch"
     )
     assert "536571fccc3f8137bfbf0ea96dfd827f1eabdaf92f93fe7cff92af242ef01d53" not in thinking["legacy_patches"]
     composer = contracts["dist/src/browser/actions/promptComposer.js"]
@@ -1783,6 +1818,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "thinkingTime.strict.pre-visible-advanced-proof.patch",
         "thinkingTime.strict.pre-advanced-view-sibling.patch",
         "thinkingTime.strict.pre-diagnostic-proof.patch",
+        "thinkingTime.strict.pre-ancestor-opacity-proof.patch",
         "thinkingTime.strict.pre-primary-css-proof.patch",
         "thinkingTime.strict.pre-stable-visible-proof.patch",
         "thinkingTime.extra-high-fail-closed.patch",

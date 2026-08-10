@@ -146,11 +146,11 @@ index 491445b..7f7f118 100644
 +    const isProProofVisible = (node) => {
 +      if (!isVisible(node)) return false;
 +      const style = window.getComputedStyle?.(node);
-+      if (!style || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility)) return false;
-+      for (let current = node; current; current = current.parentElement) {
-+        if (!(Number(window.getComputedStyle?.(current)?.opacity ?? '1') > 0)) return false;
-+      }
-+      return true;
++      return Boolean(
++        style && style.display !== 'none' &&
++        style.visibility !== 'hidden' && style.visibility !== 'collapse' &&
++        style.opacity !== '0',
++      );
 +    };
 +    const proofCandidates = (selector) => {
 +      const candidates = Array.from(document.querySelectorAll(selector));
