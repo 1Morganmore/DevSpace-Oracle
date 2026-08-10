@@ -94,12 +94,12 @@ def test_package_metadata_is_publishable_and_lockfile_matches() -> None:
     assert package["repository"]["url"] == "git+https://github.com/1Morganmore/DevSpace-Oracle.git"
 
 
-def test_release_workflow_uses_only_the_current_focused_and_full_runner() -> None:
+def test_release_workflow_runs_only_the_current_full_runner_after_install() -> None:
     workflow = (ROOT / ".github/workflows/release-portability.yml").read_text(encoding="utf-8")
     install = workflow.index("python -m pip install -r requirements-dev.txt")
-    focused = workflow.index("python scripts/run_release_contract_tests.py --focused")
     full = workflow.index("python scripts/run_release_contract_tests.py --full")
-    assert install < focused < full
+    assert install < full
+    assert "python scripts/run_release_contract_tests.py --focused" not in workflow
 
 
 def test_workflows_use_current_node24_action_majors() -> None:

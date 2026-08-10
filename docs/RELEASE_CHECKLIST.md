@@ -9,7 +9,7 @@
 - Confirm modified, symlinked, unowned, active-run, and ambiguous-receipt inputs fail before mutation and preserve user bytes.
 - Confirm removed paths have zero imports, callers, manifest/package/workflow entries, fixture/schema references, and tests.
 - Run `python scripts/check_portability.py --root .`, `python scripts/check_skill_metadata.py --root .`, `python scripts/run_fast_gate.py --enforce-budget`, and `python scripts/run_golden_path_smoke.py`.
-- Run `python scripts/run_release_contract_tests.py --focused` and `python scripts/run_release_contract_tests.py --full`.
+- Use `python scripts/run_release_contract_tests.py --focused` for optional local targeted diagnosis; release CI runs `python scripts/run_release_contract_tests.py --full` once after installation, which includes the focused files.
 - Run `npm pack --dry-run` and inspect the actual package tarball inventory.
 - Confirm third-party notices, `SECURITY.md`, `docs/VS_UPSTREAM.md`, package inventory, and install manifest agree.
 - Keep `.github/workflows/upstream-drift.yml` read-only and non-required. It may use `schedule` and `workflow_dispatch`, but must never mutate source/manifest, promote a patch, commit, push, open a PR/issue, or update a package.
