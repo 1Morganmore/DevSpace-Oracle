@@ -21,6 +21,13 @@ After reviewing the plan, use `--apply`. It invokes `devspace init` through Git 
 The helper pins DevSpace `1.0.6` and applies its exact hash-validated Windows
 compatibility patch before starting the service.
 
+Every managed `serve` entry advertises the `devspace` and `offline_access`
+OAuth scopes. DevSpace 1.0.6 already issues and rotates refresh tokens; the
+additional discovery scope lets ChatGPT request renewal after the one-hour
+access token expires. An app created before this metadata was exposed may need
+one manual reconnect or recreation so ChatGPT reads the updated discovery
+document. This tooling never performs that settings action.
+
 The helper will not overwrite an existing Funnel mapping. If port 443 is
 already owned by another local service, choose an unused supported Funnel port
 explicitly, for example `--public-port 8443`; the registration URL then becomes
@@ -46,6 +53,22 @@ python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py roots 
 Omit `--restart` to persist the change for the next service start. The command
 preserves all other `config.json` keys and verifies the exact saved list.
 
+## Restore an approved Funnel route
+
+After DevSpace or Tailscale restarts, explicitly restore only the reviewed
+route:
+
+```powershell
+python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py ensure --root C:\projects\one --hostname your-device.your-tailnet.ts.net
+```
+
+`ensure` waits up to 30 seconds for the exact local DevSpace `/healthz`
+identity. It reuses a matching Funnel, creates the exact mapping only when it
+is absent, refuses a conflicting mapping, reads the mapping back after any
+change, and requires the same exact identity through the public `/healthz`
+endpoint. It does not start DevSpace, change roots, register startup tasks, or
+touch ChatGPT settings or app registration.
+
 ## Manual ChatGPT registration
 
 Enable Developer Mode in ChatGPT and manually create the connector:
@@ -61,6 +84,6 @@ Approve the initial Owner-password page when DevSpace asks. This tooling never o
 python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py doctor --root C:\projects\one --hostname your-device.your-tailnet.ts.net
 ```
 
-Diagnosis checks local DevSpace `/mcp`, then `tailscale funnel status --json`, then the public `/mcp` endpoint. If the endpoint is healthy but a ChatGPT tool call fails, keep the server running and re-check the same manual connector URL; do not automate deletion or re-registration.
+Diagnosis checks the exact local DevSpace `/healthz` identity, then `tailscale funnel status --json`, then the exact public `/healthz` identity. If the endpoint is healthy but a ChatGPT tool call fails, keep the server running and re-check the same manual connector URL; do not automate deletion or re-registration.
 
 Tailscale Funnel makes the endpoint public. It requires Tailnet permissions and uses the device's stable MagicDNS name. Review Tailscale's policy and exposure rules before `--apply`.

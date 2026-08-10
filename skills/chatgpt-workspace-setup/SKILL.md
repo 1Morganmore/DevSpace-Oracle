@@ -25,6 +25,12 @@ python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py setup 
 
 `--apply` runs DevSpace through Git Bash without a visible Windows console, starts `devspace serve`, registers the per-user `DevSpace MCP Server` Windows login entry, and creates an HTTPS Funnel to `127.0.0.1:7676`. During `devspace init`, enter only the listed roots and the public origin `https://<hostname>` (without `/mcp`).
 
+Managed `serve` launches set
+`DEVSPACE_OAUTH_SCOPES=devspace,offline_access`. DevSpace 1.0.6 uses that value
+in OAuth discovery and already issues refresh tokens. If an older app was
+created before `offline_access` was advertised, the user may need one manual
+reconnect or recreation; never automate that ChatGPT settings action.
+
 ## Change allowed roots
 
 Do not rerun interactive initialization just to change filesystem access. Read,
@@ -66,3 +72,17 @@ python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py doctor
 ```
 
 If the public endpoint is healthy but a ChatGPT call still fails, report the same registration URL and stop. Do not re-register the app automatically.
+
+## Explicit Funnel repair
+
+Use this only when the user explicitly requests repair after a DevSpace or
+Tailscale restart and the approved service is already running:
+
+```powershell
+python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py ensure --root C:\projects\one --hostname your-device.your-tailnet.ts.net
+```
+
+The command waits for the exact local `/healthz` identity, reuses a matching
+Funnel, creates only an absent exact mapping, refuses conflicts, and proves the
+public `/healthz` identity. It does not start DevSpace, alter roots or startup,
+or inspect or mutate ChatGPT settings and registration.

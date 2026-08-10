@@ -14,6 +14,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -26,8 +27,12 @@ APP_NAME = "DevSpace"
 AUTOSTART_NAME = "DevSpace MCP Server"
 AUTOSTART_REG_KEY = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
 DEVSPACE_PACKAGE = "@waishnav/devspace@1.0.6"
+DEVSPACE_OAUTH_SCOPES = "devspace,offline_access"
 SECRET_PATTERN = re.compile(r"(?i)(password|token|secret|authorization)\s*([:=])\s*[^\s,;]+")
 HOSTNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.-]*\.ts\.net$", re.IGNORECASE)
+LOCAL_HEALTH_ATTEMPTS = 15
+LOCAL_HEALTH_INTERVAL_SECONDS = 1
+LOCAL_HEALTH_PROBE_TIMEOUT_SECONDS = 1
 
 
 class SetupError(ValueError):
@@ -173,7 +178,7 @@ def configure_roots(
     if restart:
         local_port = int(readback.get("port", DEFAULT_PORT))
         run_checked(devspace_compat_argv(stop_exact_service=True, local_port=local_port), runner=runner)
-        launch_hidden(bash_argv(["npx", "--yes", DEVSPACE_PACKAGE, "serve"]), popen_factory=popen_factory)
+        launch_hidden(devspace_serve_argv(), popen_factory=popen_factory)
         run_checked(devspace_compat_argv(confirm_restarted=True, local_port=local_port), runner=runner)
         result["restart_required"] = False
         result["restart_performed"] = True
@@ -201,6 +206,17 @@ def bash_argv(command: Sequence[str]) -> list[str]:
     return [str(git_bash_path()), "-lc", "exec " + " ".join(shlex.quote(part) for part in command)]
 
 
+def devspace_serve_argv() -> list[str]:
+    return bash_argv([
+        "env",
+        f"DEVSPACE_OAUTH_SCOPES={DEVSPACE_OAUTH_SCOPES}",
+        "npx",
+        "--yes",
+        DEVSPACE_PACKAGE,
+        "serve",
+    ])
+
+
 def devspace_compat_argv(
     *,
     confirm_restarted: bool = False,
@@ -225,7 +241,7 @@ def setup_plan(config: SetupConfig) -> dict[str, Any]:
         "action": "explicit_setup_only",
         "allowed_roots": [str(root) for root in config.roots],
         "devspace_init": bash_argv(["npx", "--yes", DEVSPACE_PACKAGE, "init"]),
-        "devspace_serve": bash_argv(["npx", "--yes", DEVSPACE_PACKAGE, "serve"]),
+        "devspace_serve": devspace_serve_argv(),
         "tailscale_funnel": [
             "tailscale",
             "funnel",
@@ -282,10 +298,7 @@ def autostart_argv() -> list[str]:
 
 def serve_foreground(*, runner: Callable[..., Any] = subprocess.run) -> None:
     run_checked(devspace_compat_argv(), runner=runner)
-    run_checked(
-        bash_argv(["npx", "--yes", DEVSPACE_PACKAGE, "serve"]),
-        runner=runner,
-    )
+    run_checked(devspace_serve_argv(), runner=runner)
 
 
 def apply_setup(
@@ -310,7 +323,7 @@ def apply_setup(
         runner=runner,
     )
     launch_hidden(
-        bash_argv(["npx", "--yes", DEVSPACE_PACKAGE, "serve"]),
+        devspace_serve_argv(),
         popen_factory=popen_factory,
     )
     run_checked(
@@ -339,10 +352,11 @@ def devspace_health_probe(
     url: str,
     *,
     opener: Callable[..., Any] = urllib.request.urlopen,
+    timeout: float = 5,
 ) -> dict[str, Any]:
     request = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
     try:
-        with opener(request, timeout=5) as response:
+        with opener(request, timeout=timeout) as response:
             raw = response.read(4097)
             if response.status != 200 or len(raw) > 4096:
                 return {"ok": False, "status": response.status, "url": url}
@@ -394,13 +408,85 @@ def funnel_status(
                     "mapping": "absent",
                     "error": None if allow_absent else "TAILSCALE_FUNNEL_MAPPING_MISSING",
                 }
-            flattened = json.dumps(entry, ensure_ascii=False).casefold()
-            if str(config.local_port) not in flattened:
+            proxy = None
+            if isinstance(entry, dict):
+                direct = entry.get("Proxy")
+                handlers = entry.get("Handlers")
+                if direct is not None and handlers is None:
+                    proxy = direct
+                elif direct is None and isinstance(handlers, dict) and set(handlers) == {"/"}:
+                    root_handler = handlers["/"]
+                    if isinstance(root_handler, dict):
+                        proxy = root_handler.get("Proxy")
+            expected_proxy = f"http://127.0.0.1:{config.local_port}"
+            if proxy != expected_proxy:
                 return {"ok": False, "mapping": "conflict", "error": "TAILSCALE_FUNNEL_MAPPING_MISMATCH"}
             return {"ok": True, "mapping": "match", "status": entry}
         return {"ok": True, "status": status}
     except json.JSONDecodeError:
         return {"ok": False, "error": "TAILSCALE_STATUS_JSON_INVALID"}
+
+
+def ensure_public_route(
+    config: SetupConfig,
+    *,
+    opener: Callable[..., Any] = urllib.request.urlopen,
+    runner: Callable[..., Any] = subprocess.run,
+) -> dict[str, Any]:
+    local: dict[str, Any] = {"ok": False}
+    attempts = 0
+    for attempts in range(1, LOCAL_HEALTH_ATTEMPTS + 1):
+        local = devspace_health_probe(
+            config.local_health_url,
+            opener=opener,
+            timeout=LOCAL_HEALTH_PROBE_TIMEOUT_SECONDS,
+        )
+        if local.get("ok"):
+            break
+        if attempts < LOCAL_HEALTH_ATTEMPTS:
+            time.sleep(LOCAL_HEALTH_INTERVAL_SECONDS)
+    report: dict[str, Any] = {
+        "ok": False,
+        "created": False,
+        "local": local,
+        "local_attempts": attempts,
+        "registration_url": config.registration_url,
+        "recommended_app_name": APP_NAME,
+    }
+    if not local.get("ok"):
+        return {**report, "next_action": "CHECK_DEVSPACE_LOCAL_SERVICE"}
+
+    funnel = funnel_status(config, runner=runner, allow_absent=True)
+    report["funnel"] = funnel
+    if not funnel.get("ok"):
+        return {**report, "next_action": "CHECK_TAILSCALE_FUNNEL"}
+
+    if funnel.get("mapping") == "absent":
+        try:
+            run_checked(
+                [
+                    "tailscale",
+                    "funnel",
+                    "--bg",
+                    f"--https={config.public_port}",
+                    f"http://127.0.0.1:{config.local_port}",
+                ],
+                runner=runner,
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            report["funnel"] = {**funnel, "ok": False, "error": type(error).__name__}
+            return {**report, "next_action": "CHECK_TAILSCALE_FUNNEL"}
+        report["created"] = True
+        funnel = funnel_status(config, runner=runner)
+        report["funnel"] = funnel
+        if not funnel.get("ok"):
+            return {**report, "next_action": "CHECK_TAILSCALE_FUNNEL"}
+
+    public = devspace_health_probe(config.public_health_url, opener=opener)
+    report["public"] = public
+    if not public.get("ok"):
+        return {**report, "next_action": "CHECK_PUBLIC_FUNNEL_ENDPOINT"}
+    return {**report, "ok": True, "next_action": "READY"}
 
 
 def doctor(
@@ -492,7 +578,7 @@ def parser() -> argparse.ArgumentParser:
     roots.add_argument("--dry-run", action="store_true")
     roots.add_argument("--apply", action="store_true")
     roots.add_argument("--restart", action="store_true", help="Restart the exact DevSpace service after applying")
-    for name in ("setup", "doctor"):
+    for name in ("setup", "ensure", "doctor"):
         command = sub.add_parser(name)
         command.add_argument("--root", action="append", default=[], help="Narrow allowed DevSpace root; repeat as needed")
         command.add_argument("--hostname", required=True, help="Tailscale MagicDNS hostname")
@@ -533,6 +619,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.apply:
                 apply_setup(config)
             return 0
+        if args.command == "ensure":
+            report = ensure_public_route(config)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return 0 if report["ok"] else 2
         print(json.dumps(doctor(
             config,
             chatgpt_call_failed=args.chatgpt_call_failed,
