@@ -26,6 +26,8 @@ def load():
 
 
 def make_manifest(tmp_path: Path, count: int = 7) -> Path:
+    copy_profile = tmp_path.parent / f"{tmp_path.name}-browser-profile"
+    copy_profile.mkdir()
     missions = []
     for index in range(count):
         path = tmp_path / f"solver-{index}.md"
@@ -42,6 +44,7 @@ def make_manifest(tmp_path: Path, count: int = 7) -> Path:
         "schema": "codex.chatgpt.oracle-multi/v1",
         "project_root": str(tmp_path.resolve()),
         "output_dir": str((tmp_path / "out").resolve()),
+        "copy_profile": str(copy_profile.resolve()),
         "app_name": "DevSpace",
         "model": "gpt-5.6",
         "max_concurrency": 5,
