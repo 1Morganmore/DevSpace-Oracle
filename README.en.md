@@ -105,10 +105,10 @@ backpressure queue: four by default, configurable from 1 through 20 with
 - An Oracle browser profile signed in to ChatGPT
 - One manually registered DevSpace app in ChatGPT Developer Mode
 
-The validated combination is Oracle `0.17.1` and DevSpace `1.0.6`. The installer
+The validated combination is Oracle `0.17.2` and DevSpace `1.0.6`. The installer
 applies Windows compatibility patches only when exact upstream file hashes
-match. Oracle `0.16.1` and `0.17.0` remain available only for exact recovery of
-runs already persisted with those versions.
+match. Oracle `0.16.1`, `0.17.0`, and `0.17.1` remain available only for exact
+recovery of runs already persisted with those versions.
 
 ## Install
 

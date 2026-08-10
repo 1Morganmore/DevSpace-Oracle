@@ -46,10 +46,10 @@ def test_exact_external_versions_integrities_and_source_authority() -> None:
     external = values()[0]["external"]
     assert external["oracle"] == {
         "package": "@steipete/oracle",
-        "tested_version": "0.17.1",
+        "tested_version": "0.17.2",
         "license": "MIT",
-        "integrity": "sha512-bq4SqMvRtT5Im+R57UPSXTV5p/BFTU24OXgGXqx2ckABWFX9uLDuKeJLoOdfBm7RzllrzjrlSSGgiMsrrvh+9Q==",
-        "installation": "npx -y @steipete/oracle@0.17.1",
+        "integrity": "sha512-Y2I/sTML2YPZrmYaw1QbpNd7bt6so9ld1pTjRP/MiEKTWanYjoICkmCpWBplPXq+KzHiVsgyPqUZpwxxOpa2Jg==",
+        "installation": "npx -y @steipete/oracle@0.17.2",
         "repository": "steipete/oracle",
         "release_tag_convention": "v{version}",
     }
@@ -147,6 +147,43 @@ def test_parent_upstream_report_parses_tab_counts_and_flags_unaudited_head(monke
     assert result["last_integrated_donor"] == "9542abeef6aa544f4ee6af03bab61cef3474f9e4"
     assert result["vendored_head_audited"] is False
     assert {"PARENT_HEAD_UNAUDITED", "PARENT_AUDITED_HEAD_MISMATCH"} <= set(result["flags"])
+
+
+def test_upstream_typescript_source_change_impacts_compiled_patch_target(monkeypatch) -> None:
+    module = runpy.run_path(str(ROOT / "scripts/check_upstream.py"))
+    check = module["check"]
+    integrity = "sha512-exact"
+
+    def fake_fetch(url: str) -> dict:
+        if "registry.npmjs.org" in url:
+            return {
+                "dist-tags": {"latest": "0.17.3"},
+                "versions": {"0.17.2": {"dist": {"integrity": integrity}}},
+            }
+        return {"files": [{"filename": "src/browser/actions/thinkingTime.ts"}]}
+
+    monkeypatch.setitem(check.__globals__, "fetch", fake_fetch)
+    monkeypatch.setitem(
+        check.__globals__,
+        "latest_tag",
+        lambda _repository: "v0.17.3",
+    )
+
+    result = check(
+        "oracle",
+        {
+            "package": "@steipete/oracle",
+            "repository": "steipete/oracle",
+            "tested_version": "0.17.2",
+            "integrity": integrity,
+            "release_tag_convention": "v{version}",
+        },
+        {"dist/src/browser/actions/thinkingTime.js"},
+    )
+
+    assert result["impacted_patch_targets"] == [
+        "dist/src/browser/actions/thinkingTime.js"
+    ]
 
 
 def test_public_notices_and_no_vendoring() -> None:

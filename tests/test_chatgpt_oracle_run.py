@@ -54,7 +54,7 @@ def manifest(tmp_path: Path, *, test_profile: bool = True, **extra) -> Path:
         "oracle_command": [
             "npx.cmd" if os.name == "nt" else "npx",
             "-y",
-            "@steipete/oracle@0.17.1",
+            "@steipete/oracle@0.17.2",
         ],
     }
     if test_profile and "copy_profile" not in extra:
@@ -123,7 +123,7 @@ def pro_manifest(tmp_path: Path, prompt_text: str = "pro instructions", **extra)
 
 
 def version_runner(command, **kwargs):
-    return subprocess.CompletedProcess(command, 0, stdout="oracle 0.17.1\n", stderr="")
+    return subprocess.CompletedProcess(command, 0, stdout="oracle 0.17.2\n", stderr="")
 
 
 def recovery_version_runner(command, **kwargs):
@@ -284,20 +284,20 @@ def test_pro_live_submission_never_calls_devspace_readiness_adapters(tmp_path: P
     assert result["ok"] is True
 
 
-def test_version_resolution_allows_a_bounded_slow_valid_oracle_0171() -> None:
+def test_version_resolution_allows_a_bounded_slow_valid_oracle_0172() -> None:
     runner = load_runner()
     captured = {}
 
     def slow_valid(command, **kwargs):
         captured["command"] = command
         captured["timeout"] = kwargs["timeout"]
-        return subprocess.CompletedProcess(command, 0, stdout="oracle 0.17.1\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="oracle 0.17.2\n", stderr="")
 
     assert runner.resolve_oracle_version(
-        ["npx.cmd", "-y", "@steipete/oracle@0.17.1"], run_factory=slow_valid
-    ) == "oracle 0.17.1"
+        ["npx.cmd", "-y", "@steipete/oracle@0.17.2"], run_factory=slow_valid
+    ) == "oracle 0.17.2"
     assert captured == {
-        "command": ["npx.cmd", "-y", "@steipete/oracle@0.17.1", "--version"],
+        "command": ["npx.cmd", "-y", "@steipete/oracle@0.17.2", "--version"],
         "timeout": runner.ORACLE_VERSION_RESOLUTION_TIMEOUT_SECONDS,
     }
     assert runner.ORACLE_VERSION_RESOLUTION_TIMEOUT_SECONDS == 90
@@ -309,19 +309,19 @@ def test_validated_package_root_is_the_exact_runtime_popen_target(tmp_path: Path
     cli = root / "dist" / "bin" / "oracle-cli.js"
     cli.parent.mkdir(parents=True)
     cli.write_text("// exact validated cli", encoding="utf-8")
-    (root / "package.json").write_text(json.dumps({"version": "0.17.1"}), encoding="utf-8")
+    (root / "package.json").write_text(json.dumps({"version": "0.17.2"}), encoding="utf-8")
     node = tmp_path / "node.exe"
     node.write_bytes(b"node")
     compatibility = {
         "ok": True,
-        "version": "0.17.1",
+        "version": "0.17.2",
         "package_root": str(root),
         "package_roots": [str(root)],
     }
 
     runtime_command = runner.validated_oracle_runtime_command(
         compatibility,
-        "oracle 0.17.1",
+        "oracle 0.17.2",
         which_runner=lambda name: str(node),
     )
     assert runtime_command == (str(node.resolve()), str(cli.resolve()))
@@ -370,17 +370,17 @@ def test_validated_runtime_rejects_an_unlisted_compatibility_root(tmp_path: Path
     runner = load_runner()
     root = tmp_path / "oracle"
     root.mkdir()
-    (root / "package.json").write_text(json.dumps({"version": "0.17.1"}), encoding="utf-8")
+    (root / "package.json").write_text(json.dumps({"version": "0.17.2"}), encoding="utf-8")
 
     with pytest.raises(runner.OracleRunError) as exc:
         runner.validated_oracle_runtime_command(
             {
                 "ok": True,
-                "version": "0.17.1",
+                "version": "0.17.2",
                 "package_root": str(root),
                 "package_roots": [str(tmp_path / "different")],
             },
-            "0.17.1",
+            "0.17.2",
             which_runner=lambda name: str(tmp_path / "node.exe"),
         )
 
@@ -391,7 +391,7 @@ def test_default_oracle_command_is_pinned_to_the_hash_validated_version() -> Non
     runner = load_runner()
 
     assert runner.STATE.default_oracle_command(platform_name="nt") == (
-        "npx.cmd", "-y", "@steipete/oracle@0.17.1",
+        "npx.cmd", "-y", "@steipete/oracle@0.17.2",
     )
     with pytest.raises(runner.STATE.OracleStateError) as exc:
         runner.STATE.validate_oracle_command(["npx.cmd", "-y", "@steipete/oracle@0.16.1"])
@@ -801,7 +801,7 @@ def test_complete_requires_zero_exit_and_nonempty_output(tmp_path: Path) -> None
         result = execute_run(runner, manifest(root), run_factory=version_runner, popen_factory=popen_for(code, output, captured, events))
         assert result["ok"] is ok
         assert result["result"]["status"] == status
-        assert result["result"]["oracle"]["resolved_version"] == "oracle 0.17.1"
+        assert result["result"]["oracle"]["resolved_version"] == "oracle 0.17.2"
         assert "--file" not in captured["command"]
         assert events == ["popen", "wait"]
         assert Path(result["result"]["artifacts"]["transcript"]).is_file()
@@ -1218,7 +1218,7 @@ def test_historical_0161_recovery_replaces_the_unpinned_stored_command(tmp_path:
     assert recovery["argv"][:3] == ["npx.cmd", "-y", "@steipete/oracle@0.16.1"]
 
 
-@pytest.mark.parametrize("stored_version", ["0.16.1", "0.17.0", "0.17.1"])
+@pytest.mark.parametrize("stored_version", ["0.16.1", "0.17.0", "0.17.1", "0.17.2"])
 def test_recovery_resolves_and_compat_checks_the_exact_stored_version(
     tmp_path: Path,
     stored_version: str,

@@ -30,7 +30,7 @@ def manifest(tmp_path: Path, mission_path: Path | str, **extra) -> Path:
         "mission_path": str(mission_path),
         "app_name": "DevSpace",
         "mode": "browser",
-        "oracle_command": ["npx", "-y", "@steipete/oracle@0.17.1"],
+        "oracle_command": ["npx", "-y", "@steipete/oracle@0.17.2"],
     }
     candidate_mission = Path(str(mission_path))
     if candidate_mission.is_absolute() and candidate_mission.is_file():
@@ -374,7 +374,7 @@ def test_project_url_is_normalized_and_retained_in_state(tmp_path: Path) -> None
     ))
     assert config.chatgpt_project_url == "https://chatgpt.com/g/g-p-example/project"
     layout = state.create_layout(config, run_id="20260725T151414Z-a3aeba967d99")
-    payload = state.state_payload(config, layout, status="prepared", resolved_version="oracle 0.17.1")
+    payload = state.state_payload(config, layout, status="prepared", resolved_version="oracle 0.17.2")
     assert payload["profile"]["chatgpt_project_url"] == config.chatgpt_project_url
 
 
@@ -579,16 +579,16 @@ def test_regular_manifest_requires_exact_devspace_app(tmp_path: Path) -> None:
 def test_oracle_commands_pin_the_active_and_recoverable_versions() -> None:
     state = load_state()
 
-    assert state.ORACLE_ACTIVE_VERSION == "0.17.1"
-    assert state.ORACLE_RECOVERABLE_VERSIONS == ("0.16.1", "0.17.0", "0.17.1")
-    assert state.WAIT_CAPABLE_VERSIONS == {"0.17.0", "0.17.1"}
+    assert state.ORACLE_ACTIVE_VERSION == "0.17.2"
+    assert state.ORACLE_RECOVERABLE_VERSIONS == ("0.16.1", "0.17.0", "0.17.1", "0.17.2")
+    assert state.WAIT_CAPABLE_VERSIONS == {"0.17.0", "0.17.1", "0.17.2"}
     assert state.default_oracle_command(platform_name="nt") == (
-        "npx.cmd", "-y", "@steipete/oracle@0.17.1",
+        "npx.cmd", "-y", "@steipete/oracle@0.17.2",
     )
     assert state.pinned_oracle_command("oracle 0.16.1", platform_name="posix") == (
         "npx", "-y", "@steipete/oracle@0.16.1",
     )
-    assert state.validate_oracle_command(["npx", "--yes", "@steipete/oracle@0.17.1"])
+    assert state.validate_oracle_command(["npx", "--yes", "@steipete/oracle@0.17.2"])
 
     for command in (
         ["oracle"],

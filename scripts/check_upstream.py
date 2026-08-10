@@ -145,7 +145,13 @@ def check(name: str, contract: dict[str, Any], targets: set[str]) -> dict[str, A
         base_tag = str(contract["release_tag_convention"]).format(version=tested)
         compare = fetch(f"https://api.github.com/repos/{repository}/compare/{urllib.parse.quote(base_tag, safe='')}...{urllib.parse.quote(tag, safe='')}")
         changed = [str(item["filename"]) for item in compare.get("files", [])]
-    impacted = sorted(target for target in targets if target in changed or target.removeprefix("dist/") in changed)
+    impacted = sorted(
+        target
+        for target in targets
+        if target in changed
+        or target.removeprefix("dist/") in changed
+        or target.removeprefix("dist/").removesuffix(".js") + ".ts" in changed
+    )
     flags: list[str] = []
     if tested_integrity != contract["integrity"]:
         flags.append("INTEGRITY_DRIFT")
@@ -176,7 +182,7 @@ def report() -> dict[str, Any]:
     manifest = json.loads((ROOT / "install-manifest.json").read_text(encoding="utf-8"))
     external = manifest["external"]
     specs = {
-        "oracle": (external["oracle"], patch_targets(ROOT / "bin/chatgpt_oracle_compat.py", "PATCHES_0171")),
+        "oracle": (external["oracle"], patch_targets(ROOT / "bin/chatgpt_oracle_compat.py", "PATCHES_0172")),
         "devspace": (external["devspace"], patch_targets(ROOT / "bin/chatgpt_devspace_compat.py", "PATCHES")),
     }
     results = []

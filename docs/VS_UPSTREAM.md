@@ -27,24 +27,24 @@ git diff --name-status FETCH_HEAD...HEAD
 
 ## B. Oracle compatibility layer
 
-- npm package: `@steipete/oracle@0.17.1`
-- npm integrity: `sha512-bq4SqMvRtT5Im+R57UPSXTV5p/BFTU24OXgGXqx2ckABWFX9uLDuKeJLoOdfBm7RzllrzjrlSSGgiMsrrvh+9Q==`
-- npm tarball SHA-256: `05ee6f2d7f0d2ca95b5114747fdb44181d8c79cbe68ecaaed947c0a028f3a802`
-- source tag: `v0.17.1` at `a835b0129ccb879b6a15628640b4eebb6aa66294`
-- recovery versions: exact `0.16.1`, `0.17.0`, and `0.17.1`; only `0.17.1` may create a new run.
+- npm package: `@steipete/oracle@0.17.2`
+- npm integrity: `sha512-Y2I/sTML2YPZrmYaw1QbpNd7bt6so9ld1pTjRP/MiEKTWanYjoICkmCpWBplPXq+KzHiVsgyPqUZpwxxOpa2Jg==`
+- npm tarball SHA-256: `983a1546d04bac99409124f12dfae32012b0cfd61b084f349a4d9f7d7c5b1350`
+- source tag: `v0.17.2` at `4bd5989622532a3de4334a16d64a6ad982217f28`
+- recovery versions: exact `0.16.1`, `0.17.0`, `0.17.1`, and `0.17.2`; only `0.17.2` may create a new run.
 
-The exact 0.17.1 npm dist uses these hash-gated patches:
+The exact 0.17.2 npm dist uses these hash-gated patches:
 
 | Dist target | Pristine SHA-256 | Patched SHA-256 |
 |---|---|---|
 | `dist/src/browser/chromeLifecycle.js` | `312b45c44d4cd69a3a057e7bd1584b58182b4b37bc88f6ce6c7d11e216267c81` | `61440e467d51031efb7bfc319aef05de7c9061585e5eec148d0e353938eb2093` |
 | `dist/src/browser/recoverConversation.js` | `d7e39d21acf07e6d227e761944519e11cd8d93930629cc87555d7de75a42d1ca` | `cc2a036f6e2409ae7edceee1f381a5062cd6cc5cd1618af465a1b384081ed69e` |
 | `dist/src/browser/profileCopy.js` | `06c692861f8a4c1a8769f957b9c582426a13bf4972262c47c1f24a87b239064f` | `71459a25b7c46f57bae6f23a5498301f6f6a1d39addf0c1cd4eee1d99b03372c` |
-| `dist/src/cli/browserConfig.js` | `989f14399c8aa51913752306135e11d97e4f1c55b2baf984907f1b54959cc340` | `bd18d11e4770fa5335c889b7856622f2da4199351ec65bc17a5ec1f472e2506f` |
+| `dist/src/cli/browserConfig.js` | `8a355cd8828a5025ea66c401b54140152bd1fe5538254893d577d52bc4a0f852` | `78d022150b959aa4cb26f2e2a743f88277246979f96813d91a4bcc55835dec18` |
 | `dist/src/browser/index.js` | `335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11` | `9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895` |
 | `dist/src/browser/actions/assistantResponse.js` | `0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d` | `18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4` |
 | `dist/src/browser/actions/promptComposer.js` | `db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000` | `3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96` |
-| `dist/src/browser/actions/thinkingTime.js` | `508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca` | `01ad2aca046895140729866ab5da3b0e7cfd92a00618d61f1d4b9b4cf36365eb` |
+| `dist/src/browser/actions/thinkingTime.js` | `303d33ebe915b27407ca22ec0da1d18729464ce50417f405ddb628c31f6fb867` | `91c5d356a597fbf1a8e08cde922fd468a94f8cd3a9e441d7534fb7877a117828` |
 
 The promptComposer row emits the bare `@` through CDP `Input.dispatchKeyEvent`,
 then uses one fixed `delay(250)` settle before inserting the app name. Two live
@@ -62,15 +62,20 @@ legacy levels `a3882c7881...`, `bb85c6f09f23...`, `87911b46026d...`,
 restored to pristine bytes through their exact legacy patches before the new
 patch is applied.
 
-The thinking-time row is the active fork Power-slider patch from `74a316b6`
-(`thinkingTime.strict.patch`). The later parent selector-proof commits
-`51675967` and `d8f8fac1` are self-developed here: visible model-picker
-candidates must prove the CSS-visible Pro model button, simple `5 of 5` slider with Pro,
-and advanced `GPT-5.6 Sol`/`Effort Pro` state twice consecutively. A final
+The thinking-time row preserves Oracle 0.17.2's upstream Advanced Model/Effort
+navigation and self-ports the fork's stronger Power proof. The visible current
+effort pill must name one picker root through `aria-controls`; that same visible
+root must contain both the matching simple `4 of 5` Extra High or `5 of 5` Pro
+slider and the coherent advanced `GPT-5.6 Sol` effort state twice consecutively.
+A final
 diagnostic snapshot can reopen the race fallback only after a separate
 read-only two-observation proof; it cannot authorize submission by itself.
 Proof visibility rejects non-positive computed opacity on the candidate or any
 ancestor, so a visually hidden stale picker subtree cannot authorize selection.
+Oracle 0.17.1 remains exact-recovery-only with canonical patched hash
+`c973d280...`; its deployed `01ad2aca...` proof level is restored through the
+exact `thinkingTime.strict.pre-coherent-picker-proof.patch` reverse asset before
+that recovery contract is applied.
 The prior `fd7e6fcf...` diagnostic-race level and the shipped `5378da62...`
 stable-visible and `2cf9f56a...` primary-CSS levels are restored through their
 exact reverse assets before the stricter patch is applied.
@@ -86,7 +91,7 @@ patch plus the Pro-heavy upgrade (deployed raw CRLF
 recognized by their canonical hashes and restored to pristine bytes before
 the strict patch is applied; unknown bytes always fail closed.
 
-Oracle 0.17.1 now treats GPT-5.6 Sol effort as a visible Power slider.
+Oracle 0.17.2 treats GPT-5.6 Sol effort as a visible Power slider.
 Regular runs are the single supported `extra-high` tier and require the
 visible `Power 4 of 5` proof before send; misleading `Medium` or `High`
 aliases are rejected without silent downgrade.  Pro remains attachment-only
@@ -100,7 +105,7 @@ regressed.
 
 For a new Oracle release, query registry metadata, download the exact npm tarball, verify integrity, calculate every pristine hash, dry-apply each patch, review changed upstream sources, calculate patched hashes, and only then update the version table and manifest. Source tags never substitute for npm dist bytes.
 
-Oracle main was observed at `e6879337ca052f2db2d88e598d525c5824287c50` on 2026-08-10. It remains newer than the latest npm release, which is still `0.17.1`; therefore no unreleased source-main code or pin change is adopted.
+Oracle main was observed at `5941f0839762b00601ab26895162c096dd0ee9d8` on 2026-08-11. It remains newer than the `v0.17.2` release tag; therefore no unreleased source-main code is adopted.
 
 ## C. DevSpace compatibility layer
 

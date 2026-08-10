@@ -15,6 +15,9 @@ PRISTINE_PROMPT_COMPOSER = Path(__file__).parent / "fixtures/oracle-0.17.0/promp
 PRISTINE_THINKING_TIME = (
     Path(__file__).parent / "fixtures/oracle-0.17.1/thinkingTime.pristine.js"
 ).read_bytes()
+PRISTINE_THINKING_TIME_0172 = (
+    Path(__file__).parent / "fixtures/oracle-0.17.2/thinkingTime.pristine.js"
+).read_bytes()
 
 
 def load_compat():
@@ -32,17 +35,30 @@ def digest(value: bytes) -> str:
 
 
 def run_gpt56_pro_diagnostic_recovery_case(
-    tmp_path: Path, *, states: list[bool], hidden_stale: bool = False
+    tmp_path: Path,
+    *,
+    states: list[bool],
+    hidden_stale: bool = False,
+    hidden_ancestor: bool = False,
+    version: str = "0.17.1",
 ) -> tuple[int, str | None, list[str]]:
     compat = load_compat()
     relative = Path("dist/src/browser/actions/thinkingTime.js")
     package = tmp_path / "package"
     target = package / relative
     target.parent.mkdir(parents=True)
-    target.write_bytes(PRISTINE_THINKING_TIME)
-    compat._apply_patch(package, compat.patch_root("0.17.1") / "thinkingTime.strict.patch")
+    target.write_bytes(
+        PRISTINE_THINKING_TIME_0172 if version == "0.17.2" else PRISTINE_THINKING_TIME
+    )
+    compat._apply_patch(package, compat.patch_root(version) / "thinkingTime.strict.patch")
     source = "\n".join(target.read_text(encoding="utf-8").splitlines()[3:])
-    scenario = json.dumps({"states": states, "hiddenStale": hidden_stale})
+    scenario = json.dumps(
+        {
+            "states": states,
+            "hiddenStale": hidden_stale,
+            "hiddenAncestor": hidden_ancestor,
+        }
+    )
     harness = f"""
 const scenario = {scenario};
 const logDomFailure = async () => {{}};
@@ -63,12 +79,29 @@ const node = (kind, text, attrs, stale = false) => ({{
   matches() {{ return false; }},
 }});
 const stale = scenario.hiddenStale;
-const model = node('model', stale ? 'GPT-5.6 Sol' : 'Pro', {{ 'aria-label': stale ? 'GPT-5.6 Sol' : 'Pro' }});
+const page = node('page', '', {{}});
+const picker = node('picker', '', {{ id: 'picker-a' }});
+picker.parentElement = page;
+const model = node('model', stale ? 'GPT-5.6 Sol' : 'Pro', {{
+  'aria-label': stale ? 'GPT-5.6 Sol' : 'Pro',
+  'aria-controls': 'picker-a',
+}});
 const slider = node('slider', stale ? 'Power 4 of 5 Extra High' : 'Power 5 of 5 Pro', {{ 'aria-valuenow': stale ? '4' : '5' }});
 const advanced = node('advanced', stale ? 'Model GPT-5.6 Sol Effort Extra High' : 'Model GPT-5.6 Sol Effort Pro', {{}});
 const staleModel = node('model', 'Pro', {{ 'aria-label': 'Pro' }}, stale);
 const staleSlider = node('slider', 'Power 5 of 5 Pro', {{ 'aria-valuenow': '5' }}, stale);
 const staleAdvanced = node('advanced', 'Model GPT-5.6 Sol Effort Pro', {{}}, stale);
+model.parentElement = page;
+slider.parentElement = picker;
+advanced.parentElement = picker;
+staleModel.parentElement = page;
+staleSlider.parentElement = picker;
+staleAdvanced.parentElement = picker;
+picker.querySelectorAll = (selector) => {{
+  if (selector.includes('slider-simple')) return stale ? [staleSlider, slider] : [slider];
+  if (selector.includes('slider-advanced')) return stale ? [staleAdvanced, advanced] : [advanced];
+  return [];
+}};
 const candidates = (selector) => {{
   if (selector.includes('model-button')) return stale ? [staleModel, model] : [model];
   if (selector.includes('slider-simple')) return stale ? [staleSlider, slider] : [slider];
@@ -78,9 +111,16 @@ const candidates = (selector) => {{
 const document = {{
   querySelectorAll: candidates,
   querySelector: (selector) => candidates(selector)[0] ?? null,
+  getElementById: (id) => id === 'picker-a' ? picker : null,
 }};
 const window = {{
   getComputedStyle(candidate) {{
+    if (candidate === page) {{
+      return {{ display: 'block', visibility: 'visible', opacity: scenario.hiddenAncestor ? '0' : '1' }};
+    }}
+    if (candidate === picker) {{
+      return {{ display: 'block', visibility: 'visible', opacity: '1' }};
+    }}
     if (candidate.kind === 'model' && !candidate.stale) {{
       observation += 1;
       active = scenario.states[Math.min(observation, scenario.states.length - 1)];
@@ -146,6 +186,12 @@ def test_gpt56_pro_diagnostic_recovery_requires_independent_visible_proof(
     assert hidden_calls == 2
     assert "refusing to submit" in str(hidden_error)
 
+    ancestor_calls, ancestor_error, _ = run_gpt56_pro_diagnostic_recovery_case(
+        tmp_path / "hidden-ancestor", states=[True, True], hidden_ancestor=True
+    )
+    assert ancestor_calls == 2
+    assert "refusing to submit" in str(ancestor_error)
+
     stable_calls, stable_error, stable_logs = run_gpt56_pro_diagnostic_recovery_case(
         tmp_path / "stable", states=[True, True]
     )
@@ -154,14 +200,18 @@ def test_gpt56_pro_diagnostic_recovery_requires_independent_visible_proof(
     assert stable_logs == ["[browser] Thinking time: Power 5 of 5 (Pro) (already selected)"]
 
 
-def run_gpt56_primary_css_visibility_cases(tmp_path: Path) -> dict[str, str]:
+def run_gpt56_primary_css_visibility_cases(
+    tmp_path: Path, *, version: str = "0.17.1"
+) -> dict[str, str]:
     compat = load_compat()
     relative = Path("dist/src/browser/actions/thinkingTime.js")
     package = tmp_path / "package"
     target = package / relative
     target.parent.mkdir(parents=True)
-    target.write_bytes(PRISTINE_THINKING_TIME)
-    compat._apply_patch(package, compat.patch_root("0.17.1") / "thinkingTime.strict.patch")
+    target.write_bytes(
+        PRISTINE_THINKING_TIME_0172 if version == "0.17.2" else PRISTINE_THINKING_TIME
+    )
+    compat._apply_patch(package, compat.patch_root(version) / "thinkingTime.strict.patch")
     source = "\n".join(target.read_text(encoding="utf-8").splitlines()[3:])
     scenarios = json.dumps([
         {"label": "visible", "display": "block", "visibility": "visible", "opacity": "1", "ariaHidden": False},
@@ -171,6 +221,7 @@ def run_gpt56_primary_css_visibility_cases(tmp_path: Path) -> dict[str, str]:
         {"label": "opacity-zero", "display": "block", "visibility": "visible", "opacity": "0", "ariaHidden": False},
         {"label": "ancestor-opacity-zero", "display": "block", "visibility": "visible", "opacity": "1", "ancestorOpacity": "0", "ariaHidden": False},
         {"label": "aria-hidden", "display": "block", "visibility": "visible", "opacity": "1", "ariaHidden": True},
+        {"label": "split-picker", "display": "block", "visibility": "visible", "opacity": "1", "ariaHidden": False, "splitPicker": True},
     ])
     harness = """
 const scenarios = SCENARIOS;
@@ -180,7 +231,7 @@ const MENU_CONTAINER_SELECTOR = '[data-testid="model-menu"]';
 const MENU_ITEM_SELECTOR = '[role="menuitem"]';
 const MODEL_BUTTON_SELECTOR = '[data-testid="model-button"]';
 const node = (text, attrs = {}) => ({
-  textContent: text, attrs,
+  textContent: text, attrs, parentElement: null,
   getAttribute(name) { return this.attrs[name] ?? null; },
   querySelector() { return this; },
   querySelectorAll() { return []; },
@@ -192,14 +243,31 @@ const expression = buildThinkingTimeExpressionForTest('heavy', 'gpt-5.6-sol');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const evaluateScenario = async (scenario) => {
   const hiddenAttrs = scenario.ariaHidden ? { 'aria-hidden': 'true' } : {};
-  const ancestor = node('');
-  const model = node('Pro', { ...hiddenAttrs, 'aria-label': 'Pro', 'aria-expanded': 'true' });
+  const page = node('');
+  const pickerA = node('', { id: 'picker-a' });
+  const pickerB = node('', { id: 'picker-b' });
+  pickerA.parentElement = page;
+  pickerB.parentElement = page;
+  const model = node('Pro', {
+    ...hiddenAttrs,
+    'aria-label': 'Pro',
+    'aria-expanded': 'true',
+    'aria-controls': 'picker-a',
+  });
   const slider = node('Power 5 of 5 Pro', { ...hiddenAttrs, 'aria-valuenow': '5' });
   const advanced = node('Model GPT-5.6 Sol Effort Pro', hiddenAttrs);
-  model.parentElement = ancestor;
-  slider.parentElement = ancestor;
-  advanced.parentElement = ancestor;
+  model.parentElement = page;
+  slider.parentElement = pickerA;
+  advanced.parentElement = scenario.splitPicker ? pickerB : pickerA;
+  pickerA.querySelectorAll = (selector) => {
+    if (selector.includes('slider-simple')) return [slider];
+    if (selector.includes('slider-advanced')) return scenario.splitPicker ? [] : [advanced];
+    return [];
+  };
+  pickerB.querySelectorAll = (selector) =>
+    selector.includes('slider-advanced') && scenario.splitPicker ? [advanced] : [];
   const nodes = (selector) => {
+    if (selector.includes('model-menu')) return scenario.splitPicker ? [pickerA, pickerB] : [pickerA];
     if (selector.includes('model-button')) return [model];
     if (selector.includes('slider-simple')) return [slider];
     if (selector.includes('slider-advanced')) return [advanced];
@@ -208,9 +276,10 @@ const evaluateScenario = async (scenario) => {
   const document = {
     querySelectorAll: nodes,
     querySelector: (selector) => nodes(selector)[0] ?? null,
+    getElementById: (id) => id === 'picker-a' ? pickerA : id === 'picker-b' ? pickerB : null,
   };
   const window = {
-    getComputedStyle: (target) => target === ancestor
+    getComputedStyle: (target) => target === page
       ? { ...scenario, opacity: scenario.ancestorOpacity ?? '1' }
       : scenario,
   };
@@ -237,6 +306,192 @@ console.log(JSON.stringify(statuses));
     return {str(label): str(status) for label, status in json.loads(completed.stdout.strip().splitlines()[-1]).items()}
 
 
+def run_gpt56_0172_advanced_owner_cases(tmp_path: Path) -> dict[str, dict[str, int | str]]:
+    compat = load_compat()
+    relative = Path("dist/src/browser/actions/thinkingTime.js")
+    package = tmp_path / "package"
+    target = package / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes(PRISTINE_THINKING_TIME_0172)
+    compat._apply_patch(package, compat.patch_root("0.17.2") / "thinkingTime.strict.patch")
+    source = "\n".join(target.read_text(encoding="utf-8").splitlines()[3:])
+    scenarios = json.dumps([
+        {"label": "pro-stable", "level": "heavy", "power": 5, "observations": [True, True]},
+        {"label": "ancestor-display-none", "level": "heavy", "power": 5, "ancestorDisplay": "none"},
+        {"label": "ancestor-opacity-zero", "level": "heavy", "power": 5, "ancestorOpacity": "0"},
+        {"label": "aria-hidden", "level": "heavy", "power": 5, "ariaHidden": True},
+        {"label": "split-picker", "level": "heavy", "power": 5, "splitPicker": True},
+        {"label": "one-observation-then-lost", "level": "heavy", "power": 5, "observations": [True, False]},
+        {"label": "power4-owned", "level": "extra-high", "power": 4},
+        {"label": "power4-unrelated", "level": "extra-high", "power": 3, "unrelatedPower": 4},
+    ])
+    harness = """
+const scenarios = SCENARIOS;
+const logDomFailure = async () => {};
+const buildClickDispatcher = () => '';
+const MENU_CONTAINER_SELECTOR = '[data-testid="model-menu"]';
+const MENU_ITEM_SELECTOR = '[role="menuitem"]';
+const MODEL_BUTTON_SELECTOR = '[data-testid="model-button"]';
+class FakeNode extends EventTarget {
+  constructor(kind, text = '', attrs = {}) {
+    super();
+    this.kind = kind;
+    this.textContent = text;
+    this.attrs = attrs;
+    this.parentElement = null;
+    this.query = () => [];
+  }
+  getAttribute(name) { return this.attrs[name] ?? null; }
+  getBoundingClientRect() { return { width: 10, height: 10 }; }
+  querySelectorAll(selector) { return this.query(selector); }
+  querySelector(selector) { return this.query(selector)[0] ?? null; }
+  matches(selector) { return this.kind === 'pill' && selector.includes('button.__composer-pill'); }
+  contains(candidate) {
+    for (let node = candidate; node; node = node.parentElement) if (node === this) return true;
+    return false;
+  }
+  closest() { return null; }
+  focus() {}
+}
+globalThis.HTMLElement = FakeNode;
+globalThis.KeyboardEvent = class { constructor(type, init) { this.type = type; this.init = init; } };
+const expressionFor = (level) => buildThinkingTimeExpressionForTest(level, 'gpt-5.6-sol');
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const run = async (scenario) => {
+  const effort = scenario.level === 'heavy' ? 'Pro' : 'Extra High';
+  const page = new FakeNode('page');
+  const owner = new FakeNode('owner', '', { id: 'picker-owner', 'data-testid': 'composer-intelligence-picker-content' });
+  const effortMenu = new FakeNode('menu', '', { id: 'effort-menu' });
+  const splitRoot = new FakeNode('split', '', { id: 'picker-split' });
+  const unrelatedRoot = new FakeNode('unrelated', '', { id: 'picker-unrelated' });
+  owner.parentElement = page;
+  splitRoot.parentElement = page;
+  unrelatedRoot.parentElement = page;
+  effortMenu.parentElement = page;
+  const pill = new FakeNode('pill', effort, {
+    'aria-label': effort,
+    'aria-expanded': 'true',
+    'aria-controls': 'picker-owner',
+    'data-testid': 'model-button',
+  });
+  pill.parentElement = page;
+  const sliderAttrs = { 'aria-valuenow': String(scenario.power) };
+  if (scenario.ariaHidden) sliderAttrs['aria-hidden'] = 'true';
+  const ownerSlider = new FakeNode('slider', `Power ${scenario.power} of 5 ${effort}`, sliderAttrs);
+  ownerSlider.parentElement = owner;
+  const unrelatedSlider = scenario.unrelatedPower
+    ? new FakeNode('slider', `Power ${scenario.unrelatedPower} of 5 Extra High`, { 'aria-valuenow': String(scenario.unrelatedPower) })
+    : null;
+  if (unrelatedSlider) unrelatedSlider.parentElement = unrelatedRoot;
+  const advanced = new FakeNode(
+    'advanced',
+    scenario.splitPicker ? 'Advanced' : `Model GPT-5.6 Sol Effort ${effort}`,
+  );
+  advanced.parentElement = owner;
+  const splitAdvanced = scenario.splitPicker
+    ? new FakeNode('advanced', `Model GPT-5.6 Sol Effort ${effort}`)
+    : null;
+  if (splitAdvanced) splitAdvanced.parentElement = splitRoot;
+  const advancedToggle = new FakeNode('toggle', 'Advanced', { role: 'menuitem', 'aria-expanded': 'true' });
+  advancedToggle.parentElement = owner;
+  const opener = new FakeNode('opener', `Effort ${effort}`, {
+    role: 'menuitem', 'aria-haspopup': 'menu', 'aria-expanded': 'true', 'aria-controls': 'effort-menu',
+  });
+  opener.parentElement = advanced;
+  const high = new FakeNode('option', 'High', { role: 'menuitem', 'aria-checked': 'false' });
+  const extraHigh = new FakeNode('option', 'Extra High', {
+    role: 'menuitem', 'aria-checked': scenario.level === 'extra-high' ? 'true' : 'false',
+  });
+  const pro = new FakeNode('option', 'Pro', {
+    role: 'menuitem', 'aria-checked': scenario.level === 'heavy' ? 'true' : 'false',
+  });
+  for (const option of [high, extraHigh, pro]) option.parentElement = effortMenu;
+  advanced.query = (selector) => selector.includes('aria-haspopup="menu"') ? [opener] : [];
+  owner.query = (selector) => {
+    if (selector.includes('slider-simple')) return [ownerSlider];
+    if (selector.includes('slider-advanced')) return [advanced];
+    if (selector === '[role="menuitem"]') return [advancedToggle];
+    return [];
+  };
+  splitRoot.query = (selector) => selector.includes('slider-advanced') && splitAdvanced ? [splitAdvanced] : [];
+  unrelatedRoot.query = (selector) => selector.includes('slider-simple') && unrelatedSlider ? [unrelatedSlider] : [];
+  effortMenu.query = (selector) => selector === '[role="menuitem"]' ? [high, extraHigh, pro] : [];
+  const ids = { 'picker-owner': owner, 'picker-split': splitRoot, 'picker-unrelated': unrelatedRoot, 'effort-menu': effortMenu };
+  const allSliders = [ownerSlider, ...(unrelatedSlider ? [unrelatedSlider] : [])];
+  const allAdvanced = [advanced, ...(splitAdvanced ? [splitAdvanced] : [])];
+  const document = {
+    body: page,
+    dispatchEvent() {},
+    getElementById: (id) => ids[id] ?? null,
+    querySelectorAll(selector) {
+      if (selector === MODEL_BUTTON_SELECTOR || selector.includes('__composer-pill')) return [pill];
+      if (selector === MENU_CONTAINER_SELECTOR) return [owner, effortMenu, splitRoot, unrelatedRoot];
+      if (selector.includes('slider-simple')) return allSliders;
+      if (selector.includes('slider-advanced')) return allAdvanced;
+      if (selector.includes('composer-intelligence-picker-content')) return [owner];
+      return [];
+    },
+    querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null; },
+  };
+  let proofObservations = 0;
+  const observations = scenario.observations ?? [true, true];
+  const window = {
+    getComputedStyle(node) {
+      let display = node === page ? (scenario.ancestorDisplay ?? 'block') : 'block';
+      if (node === pill) {
+        const visible = observations[Math.min(proofObservations, observations.length - 1)];
+        proofObservations += 1;
+        if (!visible) display = 'none';
+      }
+      return {
+        display,
+        visibility: 'visible',
+        opacity: node === page ? (scenario.ancestorOpacity ?? '1') : '1',
+      };
+    },
+  };
+  let tick = 0;
+  const performance = { now: () => (tick += 100) };
+  const setTimeout = (resolve) => { resolve(); return 0; };
+  const status = (await AsyncFunction(
+    'document', 'window', 'performance', 'setTimeout',
+    `return (${expressionFor(scenario.level)});`,
+  )(document, window, performance, setTimeout)).status;
+  return { status, observations: proofObservations };
+};
+const results = {};
+for (const scenario of scenarios) results[scenario.label] = await run(scenario);
+console.log(JSON.stringify(results));
+""".replace("SCENARIOS", scenarios)
+    completed = subprocess.run(
+        ["node", "--input-type=module"],
+        input=source + harness,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=True,
+    )
+    return json.loads(completed.stdout.strip().splitlines()[-1])
+
+
+def test_oracle_0172_generated_advanced_owner_proof_is_stable_and_bound(
+    tmp_path: Path,
+) -> None:
+    results = run_gpt56_0172_advanced_owner_cases(tmp_path)
+
+    assert results["pro-stable"] == {"status": "already-selected", "observations": 2}
+    assert results["power4-owned"] == {"status": "already-selected", "observations": 2}
+    for label in (
+        "ancestor-display-none",
+        "ancestor-opacity-zero",
+        "aria-hidden",
+        "split-picker",
+        "one-observation-then-lost",
+        "power4-unrelated",
+    ):
+        assert results[label]["status"] == "selection-unverified"
+
+
 def test_gpt56_primary_proof_rejects_css_hidden_stale_candidates(tmp_path: Path) -> None:
     statuses = run_gpt56_primary_css_visibility_cases(tmp_path)
     assert statuses["visible"] == "already-selected"
@@ -247,6 +502,7 @@ def test_gpt56_primary_proof_rejects_css_hidden_stale_candidates(tmp_path: Path)
         "opacity-zero",
         "ancestor-opacity-zero",
         "aria-hidden",
+        "split-picker",
     ):
         assert statuses[label] not in {"already-selected", "switched"}
 
@@ -1024,6 +1280,19 @@ def test_fork_legacy_thinking_time_levels_migrate_to_final_strict_patch(
         "2cf9f56afc8815533403020cde71063c775146acbac1fd5932906f9bf626d6a8"
     )
 
+    prior_coherent_work = tmp_path / "stage-prior-coherent-picker-proof"
+    prior_coherent_target = prior_coherent_work / Path(relative)
+    prior_coherent_target.parent.mkdir(parents=True)
+    prior_coherent_target.write_bytes(pristine.replace(b"\r\n", b"\n"))
+    compat._apply_patch(
+        prior_coherent_work,
+        patches / "thinkingTime.strict.pre-coherent-picker-proof.patch",
+    )
+    prior_coherent_bytes = prior_coherent_target.read_bytes()
+    assert digest(prior_coherent_bytes) == (
+        "01ad2aca046895140729866ab5da3b0e7cfd92a00618d61f1d4b9b4cf36365eb"
+    )
+
     backup = tmp_path / "backup"
     for label, legacy_bytes in (
         ("era-lf", era_bytes),
@@ -1038,6 +1307,8 @@ def test_fork_legacy_thinking_time_levels_migrate_to_final_strict_patch(
         ("prior-primary-css-proof-crlf", prior_primary_css_bytes.replace(b"\n", b"\r\n")),
         ("prior-ancestor-opacity-proof-lf", prior_ancestor_bytes),
         ("prior-ancestor-opacity-proof-crlf", prior_ancestor_bytes.replace(b"\n", b"\r\n")),
+        ("prior-coherent-picker-proof-lf", prior_coherent_bytes),
+        ("prior-coherent-picker-proof-crlf", prior_coherent_bytes.replace(b"\n", b"\r\n")),
     ):
         package = tmp_path / f"package-{label}"
         target = package / Path(relative)
@@ -1049,7 +1320,7 @@ def test_fork_legacy_thinking_time_levels_migrate_to_final_strict_patch(
         )
         assert result["changed"] == [relative]
         assert compat.sha256_file(target) == contract["patched"] == (
-            "01ad2aca046895140729866ab5da3b0e7cfd92a00618d61f1d4b9b4cf36365eb"
+            "c973d2801a75bc1e37526184ba257d47ae3994185776107fca60158f9f2526d8"
         )
         assert compat.sha256_file(backup / Path(relative)) == contract["pristine"]
 
@@ -1671,8 +1942,8 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
     compat = load_compat()
     contracts = compat.VERSION_PATCHES["0.17.1"]
 
-    assert compat.SUPPORTED_VERSION == "0.17.1"
-    assert compat.RECOVERABLE_VERSIONS == ("0.16.1", "0.17.0", "0.17.1")
+    assert compat.SUPPORTED_VERSION == "0.17.2"
+    assert compat.RECOVERABLE_VERSIONS == ("0.16.1", "0.17.0", "0.17.1", "0.17.2")
     assert "dist/src/browser/actions/modelSelection.js" not in contracts
     assert {
         path: (contract["pristine"], contract["patched"])
@@ -1685,7 +1956,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "dist/src/browser/index.js": ("335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11", "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895"),
         "dist/src/browser/actions/assistantResponse.js": ("0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d", "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4"),
         "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96"),
-        "dist/src/browser/actions/thinkingTime.js": ("508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca", "01ad2aca046895140729866ab5da3b0e7cfd92a00618d61f1d4b9b4cf36365eb"),
+        "dist/src/browser/actions/thinkingTime.js": ("508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca", "c973d2801a75bc1e37526184ba257d47ae3994185776107fca60158f9f2526d8"),
     }
 
     patches = {
@@ -1699,7 +1970,8 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
     assert 'composer-model-picker-slider-simple-view' in thinking_patch
     assert 'composer-model-picker-slider-advanced-view' in thinking_patch
     assert "exactGpt56ProProof" in thinking_patch
-    assert "proofCandidates" in thinking_patch
+    assert "aria-controls" in thinking_patch
+    assert "proofTrees" in thinking_patch
     assert "collectGpt56ProProofDiagnostic" in thinking_patch
     assert "waitForStableGpt56ProProof" in thinking_patch
     assert "consecutive >= 2" in thinking_patch
@@ -1714,6 +1986,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
     assert "refusing to submit without confirmed ${requiredEffortLabel}" in thinking_patch
     thinking = contracts["dist/src/browser/actions/thinkingTime.js"]
     assert thinking["legacy_patched"] == [
+        "01ad2aca046895140729866ab5da3b0e7cfd92a00618d61f1d4b9b4cf36365eb",
         # Fork legacy levels (canonical LF hashes; deployed copies carried raw
         # CRLF hashes 21027b691a... and 300e910c1f...).
         "4106ed89a032d06fadcf1c1600e238e26243c02d1c3ef4261ea70169396d464e",
@@ -1737,6 +2010,9 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "2cf9f56afc8815533403020cde71063c775146acbac1fd5932906f9bf626d6a8",
     ]
     assert thinking["legacy_patch"] == "thinkingTime.strict.pre-power.patch"
+    assert thinking["legacy_patches"]["01ad2aca046895140729866ab5da3b0e7cfd92a00618d61f1d4b9b4cf36365eb"] == (
+        "thinkingTime.strict.pre-coherent-picker-proof.patch"
+    )
     assert thinking["legacy_patches"]["4106ed89a032d06fadcf1c1600e238e26243c02d1c3ef4261ea70169396d464e"] == [
         "thinkingTime.extra-high-fail-closed.patch",
     ]
@@ -1829,6 +2105,78 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "promptComposer.pre-observational-census.patch",
     }:
         assert (compat.patch_root("0.17.1") / patch_name).is_file(), patch_name
+
+
+def test_oracle_0172_has_exact_hash_gated_patches_and_preserves_0171_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compat = load_compat()
+    contracts = compat.VERSION_PATCHES["0.17.2"]
+    old = compat.VERSION_PATCHES["0.17.1"]["dist/src/browser/actions/thinkingTime.js"]
+
+    assert {
+        path: (contract["pristine"], contract["patched"])
+        for path, contract in contracts.items()
+    } == {
+        "dist/src/browser/chromeLifecycle.js": ("312b45c44d4cd69a3a057e7bd1584b58182b4b37bc88f6ce6c7d11e216267c81", "61440e467d51031efb7bfc319aef05de7c9061585e5eec148d0e353938eb2093"),
+        "dist/src/browser/recoverConversation.js": ("d7e39d21acf07e6d227e761944519e11cd8d93930629cc87555d7de75a42d1ca", "cc2a036f6e2409ae7edceee1f381a5062cd6cc5cd1618af465a1b384081ed69e"),
+        "dist/src/browser/profileCopy.js": ("06c692861f8a4c1a8769f957b9c582426a13bf4972262c47c1f24a87b239064f", "71459a25b7c46f57bae6f23a5498301f6f6a1d39addf0c1cd4eee1d99b03372c"),
+        "dist/src/cli/browserConfig.js": ("8a355cd8828a5025ea66c401b54140152bd1fe5538254893d577d52bc4a0f852", "78d022150b959aa4cb26f2e2a743f88277246979f96813d91a4bcc55835dec18"),
+        "dist/src/browser/index.js": ("335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11", "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895"),
+        "dist/src/browser/actions/assistantResponse.js": ("0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d", "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4"),
+        "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96"),
+        "dist/src/browser/actions/thinkingTime.js": ("303d33ebe915b27407ca22ec0da1d18729464ce50417f405ddb628c31f6fb867", "91c5d356a597fbf1a8e08cde922fd468a94f8cd3a9e441d7534fb7877a117828"),
+    }
+    assert all((compat.patch_root("0.17.2") / value["patch"]).is_file() for value in contracts.values())
+
+    relative = Path("dist/src/browser/actions/thinkingTime.js")
+    package = tmp_path / "package"
+    target = package / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes(PRISTINE_THINKING_TIME_0172)
+    (package / "package.json").write_text('{"version":"0.17.2"}', encoding="utf-8")
+    monkeypatch.setattr(
+        compat,
+        "VERSION_PATCHES",
+        {"0.17.2": {str(relative).replace("\\", "/"): contracts[str(relative).replace("\\", "/")]}},
+    )
+
+    result = compat.ensure_oracle_compatibility("oracle 0.17.2", package_root=package)
+
+    assert result["changed"] == [str(relative).replace("\\", "/")]
+    assert digest(target.read_bytes()) == contracts[str(relative).replace("\\", "/")]["patched"]
+    compat._apply_patch(
+        package,
+        compat.patch_root("0.17.2") / "thinkingTime.strict.patch",
+        reverse=True,
+    )
+    assert digest(target.read_bytes()) == contracts[str(relative).replace("\\", "/")]["pristine"]
+    compat._apply_patch(package, compat.patch_root("0.17.2") / "thinkingTime.strict.patch")
+    assert digest(target.read_bytes()) == contracts[str(relative).replace("\\", "/")]["patched"]
+    source = target.read_text(encoding="utf-8")
+    assert "selectEffortFromAdvancedSubmenu" in source
+    assert "collectGpt56PowerProofDiagnostic" in source
+    assert "consecutive >= 2" in source
+    assert old["patched"] == "c973d2801a75bc1e37526184ba257d47ae3994185776107fca60158f9f2526d8"
+    assert old["legacy_patches"]["01ad2aca046895140729866ab5da3b0e7cfd92a00618d61f1d4b9b4cf36365eb"] == (
+        "thinkingTime.strict.pre-coherent-picker-proof.patch"
+    )
+
+
+def test_oracle_0172_pro_diagnostic_proof_is_visible_stable_and_same_picker(
+    tmp_path: Path,
+) -> None:
+    hidden_calls, hidden_error, _ = run_gpt56_pro_diagnostic_recovery_case(
+        tmp_path / "hidden", states=[True, True], hidden_ancestor=True, version="0.17.2"
+    )
+    stable_calls, stable_error, stable_logs = run_gpt56_pro_diagnostic_recovery_case(
+        tmp_path / "stable", states=[True, True], version="0.17.2"
+    )
+
+    assert hidden_calls == stable_calls == 2
+    assert "refusing to submit" in str(hidden_error)
+    assert stable_error is None
+    assert stable_logs == ["[browser] Thinking time: Power 5 of 5 (Pro) (already selected)"]
 
 
 def test_copy_profile_recovery_patch_reuses_only_the_persisted_profile_seed() -> None:

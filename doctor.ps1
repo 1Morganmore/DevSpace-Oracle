@@ -93,7 +93,7 @@ if (!$Node -or !$Npx) {
 if (!$GitBash) {
   $Issues += @{code='DEVSPACE_GIT_BASH_MISSING'; detail='Windows DevSpace requires Git Bash'}
 }
-$Commands += 'npx -y @steipete/oracle@0.17.1 --version'
+$Commands += 'npx -y @steipete/oracle@0.17.2 --version'
 $Commands += 'python .\skills\chatgpt-workspace-setup\scripts\devspace_tailscale_setup.py doctor --root C:\project --hostname your-device.your-tailnet.ts.net'
 
 $Python = Get-Command python.exe,python -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -149,7 +149,7 @@ if (!$Python) {
   issues = $Issues
   warnings = $Warnings
   commands = $Commands
-  oracle = @{package='@steipete/oracle@0.17.1';tested_version='0.17.1';resolution='exact npx runtime pin'}
+  oracle = @{package='@steipete/oracle@0.17.2';tested_version='0.17.2';resolution='exact npx runtime pin'}
   devspace = @{package='@waishnav/devspace';tested_version='1.0.6';setup='explicit setup skill only'}
   what_if = [bool]$WhatIf
 } | ConvertTo-Json -Depth 7

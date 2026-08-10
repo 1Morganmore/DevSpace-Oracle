@@ -2,7 +2,7 @@ diff --git a/dist/src/browser/actions/thinkingTime.js b/dist/src/browser/actions
 index 491445b..7f7f118 100644
 --- a/dist/src/browser/actions/thinkingTime.js
 +++ b/dist/src/browser/actions/thinkingTime.js
-@@ -32,6 +32,75 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
+@@ -32,6 +32,61 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
      const targetModelKind = inferThinkingTargetModelKind(desiredModel);
      const observedModelKind = result && "modelKind" in result ? result.modelKind : null;
      const strictProEffort = (targetModelKind === "pro" || observedModelKind === "pro") && level === "extended";
@@ -30,33 +30,19 @@ index 491445b..7f7f118 100644
 +                const marker = 'oracle-gpt56-pro-visible-proof-v1';
 +                const visible = (node) => {
 +                    const rect = node?.getBoundingClientRect?.();
-+                    if (!rect?.width || !rect?.height) return false;
-+                    for (let current = node; current; current = current.parentElement) {
-+                        const style = window.getComputedStyle(current);
-+                        if (style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility) ||
-+                            !(Number(style.opacity ?? '1') > 0) ||
-+                            current.getAttribute?.('aria-hidden') === 'true') return false;
-+                    }
-+                    return true;
++                    const style = window.getComputedStyle(node);
++                    return Boolean(rect?.width && rect?.height) && style.display !== 'none' &&
++                        style.visibility !== 'hidden' && style.opacity !== '0';
 +                };
 +                const text = (node) => String(node?.textContent ?? '') + ' ' +
 +                    String(node?.getAttribute?.('aria-label') ?? '');
-+                const pickerRoots = (button) => String(button.getAttribute?.('aria-controls') ?? '')
-+                    .trim().split(/\\s+/).filter(Boolean)
-+                    .map((id) => document.getElementById(id)).filter(visible);
-+                const sliderPro = (root) => Array.from(root.querySelectorAll(
-+                    '[data-testid="composer-model-picker-slider-simple-view"]',
-+                )).some((node) => visible(node) && /\\bpro\\b/i.test(text(node)) &&
-+                    /\\b5\\s+of\\s+5\\b/i.test(text(node)));
-+                const advancedPro = (root) => Array.from(root.querySelectorAll(
-+                    '[data-testid="composer-model-picker-slider-advanced-view"]',
-+                )).some((node) => visible(node) &&
-+                    /model\\s*gpt-?5[._ -]6\\s*sol/i.test(text(node)) &&
-+                    /effort\\s*pro/i.test(text(node)));
-+                const proof = () => Array.from(document.querySelectorAll(
-+                    ${JSON.stringify(MODEL_BUTTON_SELECTOR)},
-+                )).some((button) => visible(button) && /\\bpro\\b/i.test(text(button)) &&
-+                    pickerRoots(button).some((root) => sliderPro(root) && advancedPro(root)));
++                const proof = () =>
++                    Array.from(document.querySelectorAll(${JSON.stringify(MODEL_BUTTON_SELECTOR)})).some((node) =>
++                        visible(node) && /\\bpro\\b/i.test(text(node))) &&
++                    Array.from(document.querySelectorAll('[data-testid="composer-model-picker-slider-simple-view"]')).some((node) =>
++                        visible(node) && /\\bpro\\b/i.test(text(node)) && /\\b5\\s+of\\s+5\\b/i.test(text(node))) &&
++                    Array.from(document.querySelectorAll('[data-testid="composer-model-picker-slider-advanced-view"]')).some((node) =>
++                        visible(node) && /model\\s*gpt-?5[._ -]6\\s*sol/i.test(text(node)) && /effort\\s*pro/i.test(text(node)));
 +                const deadline = performance.now() + 500;
 +                let consecutive = 0;
 +                while (performance.now() < deadline) {
@@ -100,7 +86,7 @@ index 491445b..7f7f118 100644
              }
              logger(formatBrowserThinkingLog(`unknown outcome selecting ${capitalizedLevel}; continuing with ChatGPT default.`));
              return;
-@@ -365,12 +386,179 @@ function buildThinkingTimeExpression(level, desiredModel) {
+@@ -365,12 +372,177 @@ function buildThinkingTimeExpression(level, desiredModel) {
        // 'intelligen' matches both "Intelligence" and German "Intelligenz".
        return normalize(label?.textContent ?? '').includes('intelligen');
      };
@@ -159,55 +145,53 @@ index 491445b..7f7f118 100644
 +    };
 +    const isProProofVisible = (node) => {
 +      if (!isVisible(node)) return false;
++      const style = window.getComputedStyle?.(node);
++      if (!style || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility)) return false;
 +      for (let current = node; current; current = current.parentElement) {
-+        const style = window.getComputedStyle?.(current);
-+        if (!style || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility) ||
-+            !(Number(style.opacity ?? '1') > 0) ||
-+            current.getAttribute?.('aria-hidden') === 'true') return false;
++        if (!(Number(window.getComputedStyle?.(current)?.opacity ?? '1') > 0)) return false;
 +      }
 +      return true;
 +    };
++    const proofCandidates = (selector) => {
++      const candidates = Array.from(document.querySelectorAll(selector));
++      const firstCandidate = document.querySelector(selector);
++      if (firstCandidate) candidates.push(firstCandidate);
++      for (const menu of Array.from(document.querySelectorAll(MENU_CONTAINER_SELECTOR)).filter(isProProofVisible)) {
++        if (menu.matches?.(selector)) candidates.push(menu);
++        candidates.push(...Array.from(menu.querySelectorAll?.(selector) ?? []));
++      }
++      return Array.from(new Set(candidates));
++    };
 +    const collectGpt56ProProofDiagnostic = () => {
-+      const modelButtons = Array.from(document.querySelectorAll(MODEL_BUTTON_SELECTOR))
-+        .filter(isProProofVisible);
-+      const proofTrees = modelButtons.flatMap((modelButton) => {
++      const modelButtons = proofCandidates(MODEL_BUTTON_SELECTOR).filter(isProProofVisible);
++      const modelPro = modelButtons.some((modelButton) => {
 +        const modelLabel = normalize(
 +          (modelButton?.textContent ?? '') + ' ' +
 +          (modelButton?.getAttribute?.('aria-label') ?? '')
 +        );
-+        if (!hasToken(modelLabel, 'pro')) return [];
-+        return String(modelButton.getAttribute?.('aria-controls') ?? '')
-+          .trim().split(/\s+/).filter(Boolean)
-+          .map((id) => document.getElementById(id))
-+          .filter(isProProofVisible)
-+          .map((root) => {
-+            const sliders = Array.from(root.querySelectorAll(
-+              '[data-testid="composer-model-picker-slider-simple-view"]',
-+            )).filter(isProProofVisible);
-+            const advancedViews = Array.from(root.querySelectorAll(
-+              '[data-testid="composer-model-picker-slider-advanced-view"]',
-+            )).filter(isProProofVisible);
-+            const sliderPro = sliders.some((candidate) =>
-+              readPowerTextValue(candidate) === 5 &&
-+              hasToken(normalize(candidate?.textContent ?? ''), 'pro'));
-+            const advancedPro = advancedViews.some((advanced) => {
-+              const compact = Array.from(String(advanced?.textContent ?? '').toLowerCase())
-+                .filter((character) =>
-+                  (character >= 'a' && character <= 'z') ||
-+                  (character >= '0' && character <= '9'))
-+                .join('');
-+              return compact.includes('modelgpt56sol') && compact.includes('effortpro');
-+            });
-+            return { sliders, advancedViews, sliderPro, advancedPro };
-+          });
++        return hasToken(modelLabel, 'pro');
 +      });
-+      const sliders = proofTrees.flatMap((tree) => tree.sliders);
-+      const advancedViews = proofTrees.flatMap((tree) => tree.advancedViews);
-+      const sliderPro = proofTrees.some((tree) => tree.sliderPro);
-+      const advancedPro = proofTrees.some((tree) => tree.advancedPro);
++      const sliders = proofCandidates('[data-testid="composer-model-picker-slider-simple-view"]');
++      const sliderPro = sliders.some((candidate) => {
++        if (!isProProofVisible(candidate)) return false;
++        const candidateText = normalize(candidate?.textContent ?? '');
++        return readPowerTextValue(candidate) === 5 && hasToken(candidateText, 'pro');
++      });
++      const advancedViews = proofCandidates(
++        '[data-testid="composer-model-picker-slider-advanced-view"]',
++      );
++      const advancedPro = advancedViews.some((advanced) => {
++        if (!isProProofVisible(advanced)) return false;
++        const compact = Array.from(String(advanced?.textContent ?? '').toLowerCase())
++          .filter((character) =>
++            (character >= 'a' && character <= 'z') ||
++            (character >= '0' && character <= '9'))
++          .join('');
++        return compact.includes('modelgpt56sol') && compact.includes('effortpro');
++      });
 +      return {
-+        passed: proofTrees.some((tree) => tree.sliderPro && tree.advancedPro),
-+        modelPro: proofTrees.length > 0,
++        passed: modelPro && sliderPro && advancedPro,
++        modelPro,
 +        sliderPro,
 +        advancedPro,
 +        visibleModelButtons: modelButtons.length,

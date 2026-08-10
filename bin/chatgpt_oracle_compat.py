@@ -9,8 +9,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Sequence
 
-SUPPORTED_VERSION = "0.17.1"
-RECOVERABLE_VERSIONS = ("0.16.1", "0.17.0", SUPPORTED_VERSION)
+SUPPORTED_VERSION = "0.17.2"
+RECOVERABLE_VERSIONS = ("0.16.1", "0.17.0", "0.17.1", SUPPORTED_VERSION)
 CREATE_NO_WINDOW = 0x08000000
 PATCHES_0161 = {
     "dist/src/cli/browserTabs.js": {
@@ -196,8 +196,9 @@ PATCHES_0171 = {
     "dist/src/browser/actions/thinkingTime.js": {
         "patch": "thinkingTime.strict.patch",
         "pristine": "508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca",
-        "patched": "01ad2aca046895140729866ab5da3b0e7cfd92a00618d61f1d4b9b4cf36365eb",
+        "patched": "c973d2801a75bc1e37526184ba257d47ae3994185776107fca60158f9f2526d8",
         "legacy_patched": [
+            "01ad2aca046895140729866ab5da3b0e7cfd92a00618d61f1d4b9b4cf36365eb",
             # Fork levels: canonical LF hashes of the two shipped patch results.
             # Deployed Windows copies carried the raw CRLF hashes
             # 21027b691a... (extra-high fail-closed) and 300e910c1f... (Pro
@@ -227,6 +228,8 @@ PATCHES_0171 = {
         ],
         "legacy_patch": "thinkingTime.strict.pre-power.patch",
         "legacy_patches": {
+            "01ad2aca046895140729866ab5da3b0e7cfd92a00618d61f1d4b9b4cf36365eb":
+                "thinkingTime.strict.pre-coherent-picker-proof.patch",
             # The fork shipped two former levels: `thinkingTime.patch`
             # (extra-high fail-closed, raw CRLF 21027b69...) and that patch
             # plus `thinkingTime.pro-heavy-upgrade.patch` (raw CRLF
@@ -273,7 +276,55 @@ PATCHES_0171 = {
     },
 }
 
-VERSION_PATCHES = {"0.16.1": PATCHES_0161, "0.17.0": PATCHES_0170, "0.17.1": PATCHES_0171}
+PATCHES_0172 = {
+    "dist/src/browser/chromeLifecycle.js": {
+        "patch": "chromeLifecycle.patch",
+        "pristine": "312b45c44d4cd69a3a057e7bd1584b58182b4b37bc88f6ce6c7d11e216267c81",
+        "patched": "61440e467d51031efb7bfc319aef05de7c9061585e5eec148d0e353938eb2093",
+    },
+    "dist/src/browser/recoverConversation.js": {
+        "patch": "recoverConversation.patch",
+        "pristine": "d7e39d21acf07e6d227e761944519e11cd8d93930629cc87555d7de75a42d1ca",
+        "patched": "cc2a036f6e2409ae7edceee1f381a5062cd6cc5cd1618af465a1b384081ed69e",
+    },
+    "dist/src/browser/profileCopy.js": {
+        "patch": "profileCopy.patch",
+        "pristine": "06c692861f8a4c1a8769f957b9c582426a13bf4972262c47c1f24a87b239064f",
+        "patched": "71459a25b7c46f57bae6f23a5498301f6f6a1d39addf0c1cd4eee1d99b03372c",
+    },
+    "dist/src/cli/browserConfig.js": {
+        "patch": "browserConfig.patch",
+        "pristine": "8a355cd8828a5025ea66c401b54140152bd1fe5538254893d577d52bc4a0f852",
+        "patched": "78d022150b959aa4cb26f2e2a743f88277246979f96813d91a4bcc55835dec18",
+    },
+    "dist/src/browser/index.js": {
+        "patch": "browserIndex.patch",
+        "pristine": "335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11",
+        "patched": "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895",
+    },
+    "dist/src/browser/actions/assistantResponse.js": {
+        "patch": "assistantResponse.patch",
+        "pristine": "0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d",
+        "patched": "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4",
+    },
+    "dist/src/browser/actions/promptComposer.js": {
+        "patch": "promptComposer.patch",
+        "pristine": "db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000",
+        "patched": "3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96",
+    },
+    "dist/src/browser/actions/thinkingTime.js": {
+        "patch": "thinkingTime.strict.patch",
+        "pristine": "303d33ebe915b27407ca22ec0da1d18729464ce50417f405ddb628c31f6fb867",
+        "patched": "91c5d356a597fbf1a8e08cde922fd468a94f8cd3a9e441d7534fb7877a117828",
+    },
+}
+
+VERSION_PATCHES = {
+    "0.16.1": PATCHES_0161,
+    "0.17.0": PATCHES_0170,
+    "0.17.1": PATCHES_0171,
+    "0.17.2": PATCHES_0172,
+}
 # Active-version alias retained for existing callers and tests.
 PATCHES = VERSION_PATCHES[SUPPORTED_VERSION]
 

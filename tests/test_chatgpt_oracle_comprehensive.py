@@ -2232,6 +2232,124 @@ def test_running_web_multi_rebinds_only_persisted_parent_result(tmp_path: Path) 
     assert result["records"][0]["parent_id"] == parent_id
 
 
+def test_running_web_multi_resumes_exact_merger_through_persisted_terminal_seal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load()
+    path = manifest(tmp_path)
+    config = module.load_manifest(path)
+    source = _bound_multi_manifest(module, tmp_path, with_receipt=True)
+    source_sha = module.sha(source)
+    multi_config = module.MULTI.load_manifest(
+        source,
+        expected_manifest_sha256=source_sha,
+    )
+    parent_id = "b" * 64
+    result_path = multi_config["output_dir"] / "result.json"
+    receipt_path = multi_config["next_stage_result_path"]
+    module._write(multi_config["output_dir"] / "execution.json", {
+        "status": "merger_ready",
+    })
+    state_path = module._state_path(config, config["workflow_id"])
+    module._write(state_path, {
+        "schema": module.STATE_SCHEMA,
+        "status": "attention_required",
+        "workflow_id": config["workflow_id"],
+        "manifest_sha256": config["manifest_sha256"],
+        "current_stage": "web-multi",
+        "current_mission_path": str(source),
+        "next_index": 0,
+        "records": [],
+        "multi_execution_id": parent_id,
+        "multi_manifest_sha256": source_sha,
+        "multi_result_path": str(result_path),
+        "multi_receipt_path": str(receipt_path),
+    })
+    review = tmp_path / "recovered-review.md"
+    output = tmp_path / "recovered-output.md"
+    calls = {"resume": 0, "multi": 0}
+
+    def resume_once(
+        manifest_path: Path,
+        *,
+        expected_manifest_sha256: str,
+        parent_id: str,
+        parent_lock_held: bool,
+        terminal_seal,
+    ):
+        calls["resume"] += 1
+        assert manifest_path == source
+        assert expected_manifest_sha256 == source_sha
+        assert parent_id == "b" * 64
+        assert parent_lock_held is True
+        output.write_text("recovered", encoding="utf-8")
+        review.write_text("review recovered merger", encoding="utf-8")
+        receipt_path.write_text(json.dumps({
+            "schema": module.RECEIPT_SCHEMA,
+            "workflow_id": config["workflow_id"],
+            "stage": "web-multi",
+            "attempt_id": parent_id,
+            "input_mission_sha256": source_sha,
+            "status": "PASS",
+            "output_path": str(output),
+            "output_sha256": module.sha(output),
+            "next_stage": "review",
+            "next_mission_path": str(review),
+            "next_mission_sha256": module.sha(review),
+            "ready_for_next": True,
+            "blocker": "",
+        }), encoding="utf-8")
+        terminal = {
+            "schema": module.MULTI.RESULT_SCHEMA,
+            "status": "complete",
+            "parent_id": parent_id,
+            "manifest_sha256": source_sha,
+            "lanes": [],
+            "next_stage_result_path": str(receipt_path),
+        }
+        raw = (json.dumps(terminal, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        terminal_seal(result_path, raw)
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_bytes(raw)
+        raise RuntimeError("simulated crash after recovered merger seal")
+
+    def never_multi(*args, **kwargs):
+        calls["multi"] += 1
+        raise AssertionError("comprehensive recovery must not submit solvers")
+
+    monkeypatch.setattr(module.MULTI, "resume_recovered_merger", resume_once)
+    with pytest.raises(RuntimeError, match="simulated crash after recovered merger seal"):
+        run_workflow(module, path, multi_execute=never_multi)
+
+    sealed = module._json(state_path)
+    assert calls == {"resume": 1, "multi": 0}
+    assert sealed["multi_terminal_status"] == "complete"
+    assert sealed["multi_result_sha256"] == module.sha(result_path)
+    assert sealed["multi_receipt_sha256"] == module.sha(receipt_path)
+
+    def no_replacement_resume(*args, **kwargs):
+        raise AssertionError("persisted terminal seal must prevent replacement merger")
+
+    def review_only(oracle_manifest: Path, *, dry_run: bool, **kwargs):
+        return {
+            "ok": False,
+            "run_dir": str(_oracle_running_state(module, oracle_manifest)),
+        }
+
+    monkeypatch.setattr(module.MULTI, "resume_recovered_merger", no_replacement_resume)
+    recovered = run_workflow(
+        module,
+        path,
+        oracle_execute=review_only,
+        multi_execute=never_multi,
+    )
+
+    assert recovered["status"] == "attention_required"
+    assert recovered["current_stage"] == "review"
+    assert calls == {"resume": 1, "multi": 0}
+
+
 def test_running_web_multi_preserves_producer_sealed_failure(tmp_path: Path) -> None:
     module = load()
     path = manifest(tmp_path)

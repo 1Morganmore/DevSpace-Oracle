@@ -1654,6 +1654,88 @@ def _recover_oracle_under_workflow_mutex(
     return RUNNER.recover_run(directory, action=action, dry_run=dry_run)
 
 
+def _multi_terminal_seal(
+    config: dict[str, Any],
+    state_path: Path,
+) -> Callable[[Path, bytes], None]:
+    def seal_terminal_result(result_path: Path, result_bytes: bytes) -> None:
+        stored = _json(state_path)
+        workflow_id = config["workflow_id"]
+        multi_execution_id = str(stored.get("multi_execution_id") or "")
+        multi_manifest_sha = str(stored.get("multi_manifest_sha256") or "")
+        multi_receipt_path = Path(
+            str(stored.get("multi_receipt_path") or "")
+        ).expanduser()
+        try:
+            terminal = json.loads(result_bytes.decode("utf-8", errors="strict"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise WorkflowError("web-multi terminal result must be strict UTF-8 JSON") from exc
+        if not isinstance(terminal, dict):
+            raise WorkflowError("web-multi terminal result must be a JSON object")
+        terminal_status = str(terminal.get("status") or "")
+        terminal_sha = hashlib.sha256(result_bytes).hexdigest()
+        if any((
+            stored.get("status") not in {"running", "attention_required"},
+            stored.get("current_stage") != "web-multi",
+            stored.get("workflow_id") != workflow_id,
+            stored.get("manifest_sha256") != config["manifest_sha256"],
+            not multi_execution_id,
+            not multi_manifest_sha,
+            not result_path.is_absolute(),
+            Path(str(stored.get("multi_result_path") or "")).resolve() != result_path.resolve(),
+            terminal.get("schema") != MULTI.RESULT_SCHEMA,
+            terminal_status not in {"complete", "partial", "failed"},
+            str(terminal.get("parent_id") or "") != multi_execution_id,
+            str(terminal.get("manifest_sha256") or "") != multi_manifest_sha,
+        )):
+            raise WorkflowError("web-multi terminal seal identity mismatch")
+        terminal_receipt_sha = ""
+        if terminal_status == "complete":
+            declared_receipt = Path(
+                str(terminal.get("next_stage_result_path") or "")
+            ).expanduser()
+            if not declared_receipt.is_absolute() or declared_receipt != multi_receipt_path:
+                raise WorkflowError("web-multi complete receipt identity mismatch")
+            receipt_path = _inside(config["project_root"], declared_receipt)
+            if not receipt_path.is_file():
+                raise WorkflowError("web-multi complete receipt identity mismatch")
+            receipt_bytes = receipt_path.read_bytes()
+            terminal_receipt_sha = hashlib.sha256(receipt_bytes).hexdigest()
+            _validate_receipt(
+                config,
+                receipt_path,
+                workflow_id,
+                "web-multi",
+                multi_execution_id,
+                multi_manifest_sha,
+                expected_receipt_sha256=terminal_receipt_sha,
+                receipt_bytes=receipt_bytes,
+            )
+        existing_status = str(stored.get("multi_terminal_status") or "")
+        existing_sha = str(stored.get("multi_result_sha256") or "")
+        existing_receipt_sha = str(stored.get("multi_receipt_sha256") or "")
+        if existing_status or existing_sha:
+            if (
+                existing_status == terminal_status
+                and existing_sha == terminal_sha
+                and existing_receipt_sha == terminal_receipt_sha
+            ):
+                return
+            raise WorkflowError("web-multi terminal seal is immutable")
+        _write_workflow_state(state_path, config, {
+            **stored,
+            "multi_terminal_status": terminal_status,
+            "multi_result_sha256": terminal_sha,
+            **(
+                {"multi_receipt_sha256": terminal_receipt_sha}
+                if terminal_receipt_sha
+                else {}
+            ),
+        })
+
+    return seal_terminal_result
+
+
 def _recover_exact_multi_stage(stored: dict[str, Any]) -> dict[str, Any]:
     """Read a persisted Multi result only; absent identity is never a retry signal."""
     result_path = Path(str(stored.get("multi_result_path") or "")).expanduser()
@@ -1841,6 +1923,23 @@ def _run_workflow_locked(
             })
         elif stored.get("status") in {"running", "attention_required"} and stored.get("current_stage") == "web-multi":
             recovered = _recover_exact_multi_stage(stored)
+            if recovered.get("error") == "MULTI_TERMINAL_SEAL_MISSING":
+                multi_manifest = Path(str(stored.get("current_mission_path") or "")).expanduser()
+                multi_manifest_sha = str(stored.get("multi_manifest_sha256") or "")
+                multi_config = MULTI.load_manifest(
+                    multi_manifest,
+                    expected_manifest_sha256=multi_manifest_sha,
+                )
+                execution_path = multi_config["output_dir"] / "execution.json"
+                if execution_path.is_file() and _json(execution_path).get("status") == "merger_ready":
+                    MULTI.resume_recovered_merger(
+                        multi_manifest,
+                        expected_manifest_sha256=multi_manifest_sha,
+                        parent_id=str(stored.get("multi_execution_id") or ""),
+                        parent_lock_held=True,
+                        terminal_seal=_multi_terminal_seal(config, state_path),
+                    )
+                    recovered = _recover_exact_multi_stage(_json(state_path))
             records = list(stored.get("records") or [])
             if not recovered.get("ok"):
                 blocked = {
@@ -2049,74 +2148,7 @@ def _run_workflow_locked(
                 "multi_receipt_path": str(multi_receipt_path) if multi_receipt_path else None,
             })
 
-            def seal_terminal_result(result_path: Path, result_bytes: bytes) -> None:
-                stored = _json(state_path)
-                try:
-                    terminal = json.loads(result_bytes.decode("utf-8", errors="strict"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                    raise WorkflowError("web-multi terminal result must be strict UTF-8 JSON") from exc
-                if not isinstance(terminal, dict):
-                    raise WorkflowError("web-multi terminal result must be a JSON object")
-                terminal_status = str(terminal.get("status") or "")
-                terminal_sha = hashlib.sha256(result_bytes).hexdigest()
-                if any((
-                    stored.get("status") != "running",
-                    stored.get("current_stage") != "web-multi",
-                    stored.get("workflow_id") != workflow_id,
-                    stored.get("manifest_sha256") != config["manifest_sha256"],
-                    stored.get("multi_execution_id") != multi_execution_id,
-                    stored.get("multi_manifest_sha256") != multi_manifest_sha,
-                    not result_path.is_absolute(),
-                    Path(str(stored.get("multi_result_path") or "")).resolve() != result_path.resolve(),
-                    terminal.get("schema") != MULTI.RESULT_SCHEMA,
-                    terminal_status not in {"complete", "partial", "failed"},
-                    str(terminal.get("parent_id") or "") != multi_execution_id,
-                    str(terminal.get("manifest_sha256") or "") != multi_manifest_sha,
-                )):
-                    raise WorkflowError("web-multi terminal seal identity mismatch")
-                terminal_receipt_sha = ""
-                if terminal_status == "complete":
-                    declared_receipt = Path(
-                        str(terminal.get("next_stage_result_path") or "")
-                    ).expanduser()
-                    if not declared_receipt.is_absolute() or declared_receipt != multi_receipt_path:
-                        raise WorkflowError("web-multi complete receipt identity mismatch")
-                    receipt_path = _inside(config["project_root"], declared_receipt)
-                    if not receipt_path.is_file():
-                        raise WorkflowError("web-multi complete receipt identity mismatch")
-                    receipt_bytes = receipt_path.read_bytes()
-                    terminal_receipt_sha = hashlib.sha256(receipt_bytes).hexdigest()
-                    _validate_receipt(
-                        config,
-                        receipt_path,
-                        workflow_id,
-                        "web-multi",
-                        multi_execution_id,
-                        multi_manifest_sha,
-                        expected_receipt_sha256=terminal_receipt_sha,
-                        receipt_bytes=receipt_bytes,
-                    )
-                existing_status = str(stored.get("multi_terminal_status") or "")
-                existing_sha = str(stored.get("multi_result_sha256") or "")
-                existing_receipt_sha = str(stored.get("multi_receipt_sha256") or "")
-                if existing_status or existing_sha:
-                    if (
-                        existing_status == terminal_status
-                        and existing_sha == terminal_sha
-                        and existing_receipt_sha == terminal_receipt_sha
-                    ):
-                        return
-                    raise WorkflowError("web-multi terminal seal is immutable")
-                _write_workflow_state(state_path, config, {
-                    **stored,
-                    "multi_terminal_status": terminal_status,
-                    "multi_result_sha256": terminal_sha,
-                    **(
-                        {"multi_receipt_sha256": terminal_receipt_sha}
-                        if terminal_receipt_sha
-                        else {}
-                    ),
-                })
+            seal_terminal_result = _multi_terminal_seal(config, state_path)
 
             multi_execute(
                 source, expected_manifest_sha256=multi_manifest_sha, parent_id=multi_execution_id,
