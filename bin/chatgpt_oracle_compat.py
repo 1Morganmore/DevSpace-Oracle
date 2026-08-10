@@ -196,7 +196,7 @@ PATCHES_0171 = {
     "dist/src/browser/actions/thinkingTime.js": {
         "patch": "thinkingTime.strict.patch",
         "pristine": "508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca",
-        "patched": "5378da62f4374fcbf0d89fad17fba576c58859ebc5e072540d2222537c835225",
+        "patched": "2cf9f56afc8815533403020cde71063c775146acbac1fd5932906f9bf626d6a8",
         "legacy_patched": [
             # Fork levels: canonical LF hashes of the two shipped patch results.
             # Deployed Windows copies carried the raw CRLF hashes
@@ -222,6 +222,7 @@ PATCHES_0171 = {
             # diagnostic when the in-page proof raced UI rendering.
             "3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3",
             "fd7e6fcf2f38e0367b50501e7546244f0e3e2cdb95e8905c388798c5fed5a4f5",
+            "5378da62f4374fcbf0d89fad17fba576c58859ebc5e072540d2222537c835225",
         ],
         "legacy_patch": "thinkingTime.strict.pre-power.patch",
         "legacy_patches": {
@@ -263,6 +264,8 @@ PATCHES_0171 = {
                 "thinkingTime.strict.pre-diagnostic-proof.patch",
             "fd7e6fcf2f38e0367b50501e7546244f0e3e2cdb95e8905c388798c5fed5a4f5":
                 "thinkingTime.strict.pre-stable-visible-proof.patch",
+            "5378da62f4374fcbf0d89fad17fba576c58859ebc5e072540d2222537c835225":
+                "thinkingTime.strict.pre-primary-css-proof.patch",
         },
     },
 }

@@ -44,7 +44,7 @@ The exact 0.17.1 npm dist uses these hash-gated patches:
 | `dist/src/browser/index.js` | `335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11` | `9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895` |
 | `dist/src/browser/actions/assistantResponse.js` | `0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d` | `18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4` |
 | `dist/src/browser/actions/promptComposer.js` | `db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000` | `3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96` |
-| `dist/src/browser/actions/thinkingTime.js` | `508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca` | `5378da62f4374fcbf0d89fad17fba576c58859ebc5e072540d2222537c835225` |
+| `dist/src/browser/actions/thinkingTime.js` | `508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca` | `2cf9f56afc8815533403020cde71063c775146acbac1fd5932906f9bf626d6a8` |
 
 The promptComposer row emits the bare `@` through CDP `Input.dispatchKeyEvent`,
 then uses one fixed `delay(250)` settle before inserting the app name. Two live
@@ -65,12 +65,13 @@ patch is applied.
 The thinking-time row is the active fork Power-slider patch from `74a316b6`
 (`thinkingTime.strict.patch`). The later parent selector-proof commits
 `51675967` and `d8f8fac1` are self-developed here: visible model-picker
-candidates must prove the Pro model button, simple `5 of 5` slider with Pro,
+candidates must prove the CSS-visible Pro model button, simple `5 of 5` slider with Pro,
 and advanced `GPT-5.6 Sol`/`Effort Pro` state twice consecutively. A final
 diagnostic snapshot can reopen the race fallback only after a separate
 read-only two-observation proof; it cannot authorize submission by itself.
-The prior `fd7e6fcf...` diagnostic-race level is restored through its exact
-reverse asset before the stricter patch is applied.
+The prior `fd7e6fcf...` diagnostic-race level and the shipped `5378da62...`
+stable-visible level are restored through their exact reverse assets before the
+stricter patch is applied.
 All package hashes are computed over canonical LF bytes: a fresh npx install keeps LF dist bytes
 while an older Windows deployment can carry CRLF bytes for the same patched
 result, so canonical hashing makes one contract hash bind both flavors

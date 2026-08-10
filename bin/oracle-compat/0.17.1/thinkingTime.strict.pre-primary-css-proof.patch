@@ -86,7 +86,7 @@ index 491445b..7f7f118 100644
              }
              logger(formatBrowserThinkingLog(`unknown outcome selecting ${capitalizedLevel}; continuing with ChatGPT default.`));
              return;
-@@ -365,12 +372,177 @@ function buildThinkingTimeExpression(level, desiredModel) {
+@@ -365,12 +372,167 @@ function buildThinkingTimeExpression(level, desiredModel) {
        // 'intelligen' matches both "Intelligence" and German "Intelligenz".
        return normalize(label?.textContent ?? '').includes('intelligen');
      };
@@ -143,27 +143,17 @@ index 491445b..7f7f118 100644
 +      if (Number.isInteger(ariaValue) && ariaValue >= 1 && ariaValue <= 5) return ariaValue;
 +      return readPowerTextValue(view);
 +    };
-+    const isProProofVisible = (node) => {
-+      if (!isVisible(node)) return false;
-+      const style = window.getComputedStyle?.(node);
-+      return Boolean(
-+        style && style.display !== 'none' &&
-+        style.visibility !== 'hidden' && style.visibility !== 'collapse' &&
-+        style.opacity !== '0',
-+      );
-+    };
 +    const proofCandidates = (selector) => {
 +      const candidates = Array.from(document.querySelectorAll(selector));
 +      const firstCandidate = document.querySelector(selector);
 +      if (firstCandidate) candidates.push(firstCandidate);
-+      for (const menu of Array.from(document.querySelectorAll(MENU_CONTAINER_SELECTOR)).filter(isProProofVisible)) {
++      for (const menu of Array.from(document.querySelectorAll(MENU_CONTAINER_SELECTOR)).filter(isVisible)) {
 +        if (menu.matches?.(selector)) candidates.push(menu);
 +        candidates.push(...Array.from(menu.querySelectorAll?.(selector) ?? []));
-+      }
 +      return Array.from(new Set(candidates));
 +    };
 +    const collectGpt56ProProofDiagnostic = () => {
-+      const modelButtons = proofCandidates(MODEL_BUTTON_SELECTOR).filter(isProProofVisible);
++      const modelButtons = proofCandidates(MODEL_BUTTON_SELECTOR).filter(isVisible);
 +      const modelPro = modelButtons.some((modelButton) => {
 +        const modelLabel = normalize(
 +          (modelButton?.textContent ?? '') + ' ' +
@@ -173,7 +163,7 @@ index 491445b..7f7f118 100644
 +      });
 +      const sliders = proofCandidates('[data-testid="composer-model-picker-slider-simple-view"]');
 +      const sliderPro = sliders.some((candidate) => {
-+        if (!isProProofVisible(candidate)) return false;
++        if (!isVisible(candidate)) return false;
 +        const candidateText = normalize(candidate?.textContent ?? '');
 +        return readPowerTextValue(candidate) === 5 && hasToken(candidateText, 'pro');
 +      });
@@ -181,7 +171,7 @@ index 491445b..7f7f118 100644
 +        '[data-testid="composer-model-picker-slider-advanced-view"]',
 +      );
 +      const advancedPro = advancedViews.some((advanced) => {
-+        if (!isProProofVisible(advanced)) return false;
++        if (!isVisible(advanced)) return false;
 +        const compact = Array.from(String(advanced?.textContent ?? '').toLowerCase())
 +          .filter((character) =>
 +            (character >= 'a' && character <= 'z') ||
@@ -198,7 +188,7 @@ index 491445b..7f7f118 100644
 +        sliderCandidates: sliders.length,
 +        advancedCandidates: advancedViews.length,
 +        sliderSignals: sliders.slice(0, 6).map((candidate) => ({
-+          visible: isProProofVisible(candidate),
++          visible: isVisible(candidate),
 +          ariaValue: powerSliderControl(candidate)?.getAttribute?.('aria-valuenow') ?? null,
 +          textPower: readPowerTextValue(candidate),
 +          resolvedPower: readPowerValue(candidate),
