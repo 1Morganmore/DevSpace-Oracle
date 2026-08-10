@@ -46,6 +46,7 @@
     "bin/oracle-compat/0.17.1/thinkingTime.strict.null-model-menu-closed.patch",
     "bin/oracle-compat/0.17.1/thinkingTime.strict.patch",
     "bin/oracle-compat/0.17.1/thinkingTime.strict.pre-diagnostic-proof.patch",
+    "bin/oracle-compat/0.17.1/thinkingTime.strict.pre-stable-visible-proof.patch",
     "bin/oracle-compat/0.17.1/thinkingTime.strict.pre-advanced-view-sibling.patch",
     "bin/oracle-compat/0.17.1/thinkingTime.strict.pre-outer-model-proof.patch",
     "bin/oracle-compat/0.17.1/thinkingTime.strict.pre-power.patch",

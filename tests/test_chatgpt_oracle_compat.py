@@ -31,6 +31,129 @@ def digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def run_gpt56_pro_diagnostic_recovery_case(
+    tmp_path: Path, *, states: list[bool], hidden_stale: bool = False
+) -> tuple[int, str | None, list[str]]:
+    compat = load_compat()
+    relative = Path("dist/src/browser/actions/thinkingTime.js")
+    package = tmp_path / "package"
+    target = package / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes(PRISTINE_THINKING_TIME)
+    compat._apply_patch(package, compat.patch_root("0.17.1") / "thinkingTime.strict.patch")
+    source = "\n".join(target.read_text(encoding="utf-8").splitlines()[3:])
+    scenario = json.dumps({"states": states, "hiddenStale": hidden_stale})
+    harness = f"""
+const scenario = {scenario};
+const logDomFailure = async () => {{}};
+const buildClickDispatcher = () => '';
+const MENU_CONTAINER_SELECTOR = '[data-testid="model-menu"]';
+const MENU_ITEM_SELECTOR = '[role="menuitem"]';
+const MODEL_BUTTON_SELECTOR = '[data-testid="model-button"]';
+let observation = -1;
+let active = scenario.states[0];
+const node = (kind, text, attrs, stale = false) => ({{
+  kind, textContent: text, attrs, stale,
+  getAttribute(name) {{ return this.attrs[name] ?? null; }},
+  querySelector(selector) {{
+    return selector.includes('slider') || selector.includes('range') ? this : null;
+  }},
+  querySelectorAll() {{ return []; }},
+  getBoundingClientRect() {{ return {{ width: 10, height: 10 }}; }},
+  matches() {{ return false; }},
+}});
+const stale = scenario.hiddenStale;
+const model = node('model', stale ? 'GPT-5.6 Sol' : 'Pro', {{ 'aria-label': stale ? 'GPT-5.6 Sol' : 'Pro' }});
+const slider = node('slider', stale ? 'Power 4 of 5 Extra High' : 'Power 5 of 5 Pro', {{ 'aria-valuenow': stale ? '4' : '5' }});
+const advanced = node('advanced', stale ? 'Model GPT-5.6 Sol Effort Extra High' : 'Model GPT-5.6 Sol Effort Pro', {{}});
+const staleModel = node('model', 'Pro', {{ 'aria-label': 'Pro' }}, stale);
+const staleSlider = node('slider', 'Power 5 of 5 Pro', {{ 'aria-valuenow': '5' }}, stale);
+const staleAdvanced = node('advanced', 'Model GPT-5.6 Sol Effort Pro', {{}}, stale);
+const candidates = (selector) => {{
+  if (selector.includes('model-button')) return stale ? [staleModel, model] : [model];
+  if (selector.includes('slider-simple')) return stale ? [staleSlider, slider] : [slider];
+  if (selector.includes('slider-advanced')) return stale ? [staleAdvanced, advanced] : [advanced];
+  return [];
+}};
+const document = {{
+  querySelectorAll: candidates,
+  querySelector: (selector) => candidates(selector)[0] ?? null,
+}};
+const window = {{
+  getComputedStyle(candidate) {{
+    if (candidate.kind === 'model' && !candidate.stale) {{
+      observation += 1;
+      active = scenario.states[Math.min(observation, scenario.states.length - 1)];
+    }}
+    const visible = !candidate.stale && active;
+    return {{ display: visible ? 'block' : 'none', visibility: 'visible', opacity: '1', pointerEvents: 'auto' }};
+  }},
+}};
+let tick = 0;
+const fakePerformance = {{ now: () => (tick += 100) }};
+const fakeSetTimeout = (resolve) => {{ resolve(); return 0; }};
+const execute = (expression) => Function('document', 'window', 'performance', 'setTimeout', `return (${{expression}});`)(
+  document, window, fakePerformance, fakeSetTimeout,
+);
+const diagnostic = {{
+  modelButton: {{ text: 'Pro' }},
+  menus: [{{ items: [
+    {{ testid: 'composer-model-picker-slider-simple-view', text: 'Power 5 of 5 Pro' }},
+    {{ testid: 'composer-model-picker-slider-advanced-view', text: 'Model GPT-5.6 Sol Effort Pro' }},
+  ] }}],
+}};
+let calls = 0;
+const Runtime = {{
+  async evaluate({{ expression }}) {{
+    calls += 1;
+    if (calls === 1) return {{ result: {{ value: {{ status: 'selection-unverified', diagnostic }} }} }};
+    return {{ result: {{ value: await execute(expression) }} }};
+  }},
+}};
+const logs = [];
+let error = null;
+try {{
+  await ensureThinkingTime(Runtime, 'heavy', (message) => logs.push(message), 'gpt-5.6-sol');
+}} catch (caught) {{
+  error = caught.message;
+}}
+console.log(JSON.stringify({{ calls, error, logs }}));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module"],
+        input=source + harness,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=True,
+    )
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    return int(result["calls"]), result["error"], list(result["logs"])
+
+
+def test_gpt56_pro_diagnostic_recovery_requires_independent_visible_proof(
+    tmp_path: Path,
+) -> None:
+    one_calls, one_error, _ = run_gpt56_pro_diagnostic_recovery_case(
+        tmp_path / "one-observation", states=[True, False]
+    )
+    assert one_calls == 2
+    assert "refusing to submit" in str(one_error)
+
+    hidden_calls, hidden_error, _ = run_gpt56_pro_diagnostic_recovery_case(
+        tmp_path / "hidden-stale", states=[True, True], hidden_stale=True
+    )
+    assert hidden_calls == 2
+    assert "refusing to submit" in str(hidden_error)
+
+    stable_calls, stable_error, stable_logs = run_gpt56_pro_diagnostic_recovery_case(
+        tmp_path / "stable", states=[True, True]
+    )
+    assert stable_calls == 2
+    assert stable_error is None
+    assert stable_logs == ["[browser] Thinking time: Power 5 of 5 (Pro) (already selected)"]
+
+
 def run_prompt_route_case(
     tmp_path: Path,
     *,
@@ -727,7 +850,7 @@ def test_fork_legacy_thinking_time_levels_migrate_to_final_strict_patch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The two shipped fork levels (raw deployed CRLF hashes 21027b691a... and
-    # 300e910c1f...) must migrate to the final upstream strict result under
+    # 300e910c1f...) must migrate to the final strict result under
     # canonical hashing, from both LF and CRLF deployments, while unknown
     # bytes fail closed.
     compat = load_compat()
@@ -769,6 +892,16 @@ def test_fork_legacy_thinking_time_levels_migrate_to_final_strict_patch(
     prior_bytes = prior_target.read_bytes()
     assert digest(prior_bytes) == "3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3"
 
+    prior_visible_work = tmp_path / "stage-prior-visible-proof"
+    prior_visible_target = prior_visible_work / Path(relative)
+    prior_visible_target.parent.mkdir(parents=True)
+    prior_visible_target.write_bytes(pristine.replace(b"\r\n", b"\n"))
+    compat._apply_patch(
+        prior_visible_work, patches / "thinkingTime.strict.pre-stable-visible-proof.patch"
+    )
+    prior_visible_bytes = prior_visible_target.read_bytes()
+    assert digest(prior_visible_bytes) == "fd7e6fcf2f38e0367b50501e7546244f0e3e2cdb95e8905c388798c5fed5a4f5"
+
     backup = tmp_path / "backup"
     for label, legacy_bytes in (
         ("era-lf", era_bytes),
@@ -777,6 +910,8 @@ def test_fork_legacy_thinking_time_levels_migrate_to_final_strict_patch(
         ("upgraded-crlf", upgraded.replace(b"\n", b"\r\n")),
         ("prior-strict-lf", prior_bytes),
         ("prior-strict-crlf", prior_bytes.replace(b"\n", b"\r\n")),
+        ("prior-visible-proof-lf", prior_visible_bytes),
+        ("prior-visible-proof-crlf", prior_visible_bytes.replace(b"\n", b"\r\n")),
     ):
         package = tmp_path / f"package-{label}"
         target = package / Path(relative)
@@ -788,7 +923,7 @@ def test_fork_legacy_thinking_time_levels_migrate_to_final_strict_patch(
         )
         assert result["changed"] == [relative]
         assert compat.sha256_file(target) == contract["patched"] == (
-            "fd7e6fcf2f38e0367b50501e7546244f0e3e2cdb95e8905c388798c5fed5a4f5"
+            "5378da62f4374fcbf0d89fad17fba576c58859ebc5e072540d2222537c835225"
         )
         assert compat.sha256_file(backup / Path(relative)) == contract["pristine"]
 
@@ -1424,7 +1559,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "dist/src/browser/index.js": ("335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11", "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895"),
         "dist/src/browser/actions/assistantResponse.js": ("0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d", "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4"),
         "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96"),
-        "dist/src/browser/actions/thinkingTime.js": ("508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca", "fd7e6fcf2f38e0367b50501e7546244f0e3e2cdb95e8905c388798c5fed5a4f5"),
+        "dist/src/browser/actions/thinkingTime.js": ("508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca", "5378da62f4374fcbf0d89fad17fba576c58859ebc5e072540d2222537c835225"),
     }
 
     patches = {
@@ -1438,6 +1573,14 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
     assert 'composer-model-picker-slider-simple-view' in thinking_patch
     assert 'composer-model-picker-slider-advanced-view' in thinking_patch
     assert "exactGpt56ProProof" in thinking_patch
+    assert "proofCandidates" in thinking_patch
+    assert "collectGpt56ProProofDiagnostic" in thinking_patch
+    assert "waitForStableGpt56ProProof" in thinking_patch
+    assert "consecutive >= 2" in thinking_patch
+    assert thinking_patch.count("waitForStableGpt56ProProof") >= 6
+    assert thinking_patch.count(
+        "TARGET_LEVEL !== 'heavy' || await waitForStableGpt56ProProof()"
+    ) == 2
     assert "diagnosticProProof" in thinking_patch
     assert "const POWER_TARGET" in thinking_patch
     assert "strictGpt56Effort" in thinking_patch
@@ -1463,6 +1606,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "0cb7bf4774e5507fb97682cf4e350fea03998c2a44548065bf8e9eb57fe16707",
         "b55897a9d90627b226e39e77339819e446927ffc66f78181f5c2851cbcfe5f97",
         "3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3",
+        "fd7e6fcf2f38e0367b50501e7546244f0e3e2cdb95e8905c388798c5fed5a4f5",
     ]
     assert thinking["legacy_patch"] == "thinkingTime.strict.pre-power.patch"
     assert thinking["legacy_patches"]["4106ed89a032d06fadcf1c1600e238e26243c02d1c3ef4261ea70169396d464e"] == [
@@ -1477,6 +1621,9 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
     )
     assert thinking["legacy_patches"]["3f969712b184588d1f34ef4f55b439c86256d112bb0fa1688bb473b61fd3dcc3"] == (
         "thinkingTime.strict.pre-diagnostic-proof.patch"
+    )
+    assert thinking["legacy_patches"]["fd7e6fcf2f38e0367b50501e7546244f0e3e2cdb95e8905c388798c5fed5a4f5"] == (
+        "thinkingTime.strict.pre-stable-visible-proof.patch"
     )
     assert "536571fccc3f8137bfbf0ea96dfd827f1eabdaf92f93fe7cff92af242ef01d53" not in thinking["legacy_patches"]
     composer = contracts["dist/src/browser/actions/promptComposer.js"]
@@ -1537,6 +1684,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         "thinkingTime.strict.pre-visible-advanced-proof.patch",
         "thinkingTime.strict.pre-advanced-view-sibling.patch",
         "thinkingTime.strict.pre-diagnostic-proof.patch",
+        "thinkingTime.strict.pre-stable-visible-proof.patch",
         "thinkingTime.extra-high-fail-closed.patch",
         "thinkingTime.pro-heavy-upgrade.patch",
         "promptComposer.pre-key-event-trigger.patch",

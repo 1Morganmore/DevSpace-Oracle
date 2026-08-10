@@ -8,12 +8,12 @@ This file binds package compatibility to exact public artifacts. The local fork 
 - Parent main observed and audited on 2026-08-10: `ventianima-lab/codexpro-automation@075b3719e768ad0874697abfdad9258d59ef9be1`.
 - Last integrated donor: `9542abeef6aa544f4ee6af03bab61cef3474f9e4`.
 - Merge-base before this release commit: `250b839a559cb61442feeb64bff6d49dfa185169`.
-- Observed ancestry: 26 commits ahead, 27 behind.
+- Observed ancestry immediately before this release commit: 27 commits ahead, 27 behind.
 - The exact release tree difference is reported externally after commit because a commit cannot contain its own final hash.
 
 The fork keeps Oracle-only browser submission, DevSpace workspace transport, exact-slug recovery, per-project locks, receipt-owned installation, Windows process/profile isolation, and bounded Web Multi sessions. Parent sync must preserve monotonic terminal authority, exact package/hash gating, host-only state, mutex/schema/receipt identities, and the absence of automatic Web Multi or alternate-backend fallback.
 
-The six commits after `9542abee` were reviewed individually. The selector-proof changes in `51675967` and `d8f8fac1` are deferred: the active fork change `74a316b6` preserves its existing fail-closed Pro Power contract, but does not claim the later stable, menu-scoped proof implementation without representative UI evidence. The recovered-lane and merger-resume changes in `39f750f4` and `916aeffb` are deferred because they require adaptation to this fork's manifest hashes, parent lock, terminal seal, and monotonic exact-session authority. Only the persisted `allowedRoots` doctor readback from `69ad58c2` is selected. The final `075b3719` change is intentionally rejected: making read-only DevSpace the default Pro route violates this fork's Pro contract, which is Oracle attachment-only with no app.
+The six commits after `9542abee` were reviewed individually. The selector-proof changes in `51675967` and `d8f8fac1` are self-developed on the active fork Power patch: only visible picker candidates count, all three independent Pro signals are required, and two consecutive observations are required before an already-selected result. The existing final diagnostic-race fallback remains intact. The recovered-lane and merger-resume changes in `39f750f4` and `916aeffb` are deferred because they require adaptation to this fork's manifest hashes, parent lock, terminal seal, and monotonic exact-session authority. Only the persisted `allowedRoots` doctor readback from `69ad58c2` is selected. The final `075b3719` change is intentionally rejected: making read-only DevSpace the default Pro route violates this fork's Pro contract, which is Oracle attachment-only with no app.
 
 ```powershell
 git fetch https://github.com/ventianima-lab/codexpro-automation main
@@ -44,7 +44,7 @@ The exact 0.17.1 npm dist uses these hash-gated patches:
 | `dist/src/browser/index.js` | `335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11` | `9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895` |
 | `dist/src/browser/actions/assistantResponse.js` | `0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d` | `18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4` |
 | `dist/src/browser/actions/promptComposer.js` | `db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000` | `3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96` |
-| `dist/src/browser/actions/thinkingTime.js` | `508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca` | `fd7e6fcf2f38e0367b50501e7546244f0e3e2cdb95e8905c388798c5fed5a4f5` |
+| `dist/src/browser/actions/thinkingTime.js` | `508f1fbc175b82e6bfd4c978da6199306800615f432e28d7721c155c402795ca` | `5378da62f4374fcbf0d89fad17fba576c58859ebc5e072540d2222537c835225` |
 
 The promptComposer row emits the bare `@` through CDP `Input.dispatchKeyEvent`,
 then uses one fixed `delay(250)` settle before inserting the app name. Two live
@@ -64,9 +64,13 @@ patch is applied.
 
 The thinking-time row is the active fork Power-slider patch from `74a316b6`
 (`thinkingTime.strict.patch`). The later parent selector-proof commits
-`51675967` and `d8f8fac1` were reviewed and deferred. This patch remains the
-current fail-closed fork contract; it is not evidence that the later stable,
-menu-scoped implementation was adopted.
+`51675967` and `d8f8fac1` are self-developed here: visible model-picker
+candidates must prove the Pro model button, simple `5 of 5` slider with Pro,
+and advanced `GPT-5.6 Sol`/`Effort Pro` state twice consecutively. A final
+diagnostic snapshot can reopen the race fallback only after a separate
+read-only two-observation proof; it cannot authorize submission by itself.
+The prior `fd7e6fcf...` diagnostic-race level is restored through its exact
+reverse asset before the stricter patch is applied.
 All package hashes are computed over canonical LF bytes: a fresh npx install keeps LF dist bytes
 while an older Windows deployment can carry CRLF bytes for the same patched
 result, so canonical hashing makes one contract hash bind both flavors
