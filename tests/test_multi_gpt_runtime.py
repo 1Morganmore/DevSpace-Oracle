@@ -18,7 +18,11 @@ MCP_PROCESS_TIMEOUT_SECONDS = 30
 
 @pytest.fixture
 def project_tmp_path() -> Iterator[Path]:
-    with TemporaryDirectory(prefix='.pytest-multi-gpt-', dir=ROOT) as directory:
+    public = os.environ.get("PUBLIC") if os.name == "nt" else None
+    if os.name == "nt" and (not public or not Path(public).is_dir()):
+        pytest.fail("Windows project-root tests require an existing PUBLIC directory")
+    root = Path(public) if public else None
+    with TemporaryDirectory(prefix="mg-", dir=root) as directory:
         yield Path(directory)
 
 
@@ -905,13 +909,24 @@ def test_windows_job_dies_with_an_abrupt_mcp_parent(tmp_path: Path) -> None:
     while not ready.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert ready.exists(), 'Job-contained child readiness was not reached'
+    ready_at = time.monotonic()
     parent.kill()
     parent.wait(timeout=5)
-    time.sleep(1.0)
+    stable_observations = 0
     heartbeat_after_cleanup = heartbeat.read_bytes() if heartbeat.exists() else b''
-    time.sleep(0.5)
-    assert (heartbeat.read_bytes() if heartbeat.exists() else b'') == heartbeat_after_cleanup
-    time.sleep(2.0)
+    cleanup_deadline = time.monotonic() + 3
+    while stable_observations < 5 and time.monotonic() < cleanup_deadline:
+        time.sleep(0.02)
+        current = heartbeat.read_bytes() if heartbeat.exists() else b''
+        if current == heartbeat_after_cleanup:
+            stable_observations += 1
+        else:
+            heartbeat_after_cleanup = current
+            stable_observations = 0
+    assert stable_observations == 5
+    survival_deadline = ready_at + 3.5
+    while not marker.exists() and time.monotonic() < survival_deadline:
+        time.sleep(0.02)
     assert not marker.exists()
 
 
