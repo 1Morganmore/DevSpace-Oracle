@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # Exact observed/audited parent HEAD and the last integrated donor are
 # intentionally different (see docs/VS_UPSTREAM.md).
-PARENT_AUDITED_HEAD = "ae3b3caf22644930d46fd2d46ada5d8fe5523b21"
+PARENT_AUDITED_HEAD = "77bb79afcde2e5b95b18f5cc0490d1592f8fb954"
 PARENT_LAST_INTEGRATED_DONOR = "9542abeef6aa544f4ee6af03bab61cef3474f9e4"
 PARENT_REPOSITORY = "ventianima-lab/codexpro-automation"
 PARENT_VENDOR_REF = "vendor/codexpro-main"
