@@ -57,7 +57,9 @@ Never open ChatGPT settings, register/delete an app, change permissions, inspect
 
 ## Diagnosis
 
-This is read-only and checks only local DevSpace, then Funnel status, then the public `/mcp` endpoint:
+This is read-only and checks local DevSpace, confirms every requested root is
+still authorized by the persisted `allowedRoots`, then checks Funnel status and
+the public `/mcp` endpoint:
 
 ```powershell
 python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py doctor --root C:\projects\one --hostname your-device.your-tailnet.ts.net

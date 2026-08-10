@@ -239,7 +239,11 @@ def assess_submission_readiness(
                     devspace_public_port,
                 )
                 doctor = devspace_doctor or (
-                    lambda value: DEVSPACE_SETUP.doctor(value, runner=run_factory)
+                    lambda value: DEVSPACE_SETUP.doctor(
+                        value,
+                        runner=run_factory,
+                        config_path=DEVSPACE_SETUP.devspace_config_path(),
+                    )
                 )
                 result = doctor(setup_config)
                 return {**result, "ok": result.get("next_action") == "READY"}

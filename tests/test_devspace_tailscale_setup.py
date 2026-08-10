@@ -113,6 +113,8 @@ def test_setup_plan_has_no_secrets_and_is_explicit_only(tmp_path: Path, monkeypa
 def test_doctor_orders_local_funnel_public_and_manual_failure_branch(tmp_path: Path) -> None:
     module, current = config(tmp_path)
     seen: list[str] = []
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"allowedRoots": [str(tmp_path)]}), encoding="utf-8")
 
     class Response:
         def __init__(self, status: int = 200):
@@ -136,10 +138,22 @@ def test_doctor_orders_local_funnel_public_and_manual_failure_branch(tmp_path: P
             stderr="",
         )
 
-    report = module.doctor(current, opener=opener, runner=runner, chatgpt_call_failed=True)
+    report = module.doctor(
+        current,
+        opener=opener,
+        runner=runner,
+        chatgpt_call_failed=True,
+        config_path=config_path,
+    )
     assert seen == [current.local_health_url, current.public_health_url]
     assert report["next_action"] == "MANUAL_CHATGPT_REGISTRATION_CHECK"
     assert report["registration_url"] == current.registration_url
+    assert report["config"] == {
+        "ok": True,
+        "path": str(config_path.resolve()),
+        "configured_roots": [str(tmp_path.resolve())],
+        "missing_roots": [],
+    }
 
 
 def test_doctor_returns_local_failure_before_funnel_or_public(tmp_path: Path) -> None:
@@ -153,6 +167,57 @@ def test_doctor_returns_local_failure_before_funnel_or_public(tmp_path: Path) ->
 
     report = module.doctor(current, opener=opener, runner=runner)
     assert report["next_action"] == "CHECK_DEVSPACE_LOCAL_SERVICE"
+
+
+def test_doctor_reports_invalid_persisted_config(tmp_path: Path) -> None:
+    module, current = config(tmp_path)
+    config_path = tmp_path / "config.json"
+    config_path.write_text("not-json", encoding="utf-8")
+
+    class Response:
+        status = 200
+        def read(self, limit):
+            return json.dumps({"ok": True, "name": "devspace"}).encode("utf-8")
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+
+    report = module.doctor(current, opener=lambda *args, **kwargs: Response(), config_path=config_path)
+
+    assert report["next_action"] == "CHECK_DEVSPACE_CONFIG"
+    assert report["config"] == {
+        "ok": False,
+        "error": "DEVSPACE_CONFIG_INVALID",
+        "path": str(config_path),
+    }
+
+
+def test_doctor_reports_missing_requested_root(tmp_path: Path) -> None:
+    module, current = config(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"allowedRoots": [str(other)]}), encoding="utf-8")
+
+    class Response:
+        status = 200
+        def read(self, limit):
+            return json.dumps({"ok": True, "name": "devspace"}).encode("utf-8")
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+
+    report = module.doctor(current, opener=lambda *args, **kwargs: Response(), config_path=config_path)
+
+    assert report["next_action"] == "CHECK_DEVSPACE_ALLOWED_ROOTS"
+    assert report["config"] == {
+        "ok": False,
+        "path": str(config_path.resolve()),
+        "configured_roots": [str(other.resolve())],
+        "missing_roots": [str(current.roots[0])],
+    }
 
 
 def test_module_has_no_chatgpt_ui_or_browser_automation() -> None:

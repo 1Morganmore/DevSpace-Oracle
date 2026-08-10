@@ -14,8 +14,10 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Exact latest audited parent-project donor commit (see docs/VS_UPSTREAM.md).
-PARENT_DONOR = "9542abeef6aa544f4ee6af03bab61cef3474f9e4"
+# Exact observed/audited parent HEAD and the last integrated donor are
+# intentionally different (see docs/VS_UPSTREAM.md).
+PARENT_AUDITED_HEAD = "075b3719e768ad0874697abfdad9258d59ef9be1"
+PARENT_LAST_INTEGRATED_DONOR = "9542abeef6aa544f4ee6af03bab61cef3474f9e4"
 PARENT_REPOSITORY = "ventianima-lab/codexpro-automation"
 PARENT_VENDOR_REF = "vendor/codexpro-main"
 
@@ -82,7 +84,7 @@ def check_parent() -> dict[str, Any]:
     counts = run_git("rev-list", "--left-right", "--count", "HEAD...%s" % PARENT_VENDOR_REF) if vendored else None
     ahead: int | None = None
     behind: int | None = None
-    if counts and " " in counts:
+    if counts:
         parts = counts.split()
         try:
             ahead, behind = int(parts[0]), int(parts[1])
@@ -94,23 +96,31 @@ def check_parent() -> dict[str, Any]:
         live_head = default_branch_head(PARENT_REPOSITORY)
     except Exception as exc:  # advisory checker must keep the rest of the report
         flags.append(f"PARENT_HEAD_UNREACHABLE: {type(exc).__name__}")
+    if live_head and live_head != PARENT_AUDITED_HEAD:
+        flags.append("PARENT_HEAD_UNAUDITED")
     if vendored is None:
         flags.append("PARENT_VENDOR_REF_ABSENT")
-    elif live_head and vendored != live_head:
-        flags.append("PARENT_VENDOR_REF_STALE")
+    else:
+        if live_head and vendored != live_head:
+            flags.append("PARENT_VENDOR_REF_STALE")
+        if vendored != PARENT_AUDITED_HEAD:
+            flags.append("PARENT_AUDITED_HEAD_MISMATCH")
     if merge_base is None:
         flags.append("PARENT_MERGE_BASE_UNAVAILABLE")
     return {
         "name": "parent",
         "repository": PARENT_REPOSITORY,
-        "audited_donor": PARENT_DONOR,
+        "audited_parent_head": PARENT_AUDITED_HEAD,
+        "audited_donor": PARENT_AUDITED_HEAD,
+        "last_integrated_donor": PARENT_LAST_INTEGRATED_DONOR,
         "live_parent_head": live_head,
         "vendored_parent_ref": PARENT_VENDOR_REF,
         "vendored_parent_head": vendored,
         "merge_base": merge_base,
         "ahead": ahead,
         "behind": behind,
-        "donor_audited": bool(vendored and PARENT_DONOR.startswith(vendored[:12])),
+        "vendored_head_audited": vendored == PARENT_AUDITED_HEAD,
+        "donor_audited": vendored == PARENT_AUDITED_HEAD,
         "status": flags[-1] if flags else "CURRENT",
         "flags": flags or ["CURRENT"],
         "manual_validation": ["re-audit the donor chain before adopting any new parent commit"] if flags else [],
@@ -194,7 +204,11 @@ def main() -> int:
                 print("  impacted: " + ", ".join(item["impacted_patch_targets"]))
             if item.get("name") == "parent":
                 print(
-                    "  parent HEAD: " + str(item.get("vendored_parent_head") or "absent")
+                    "  parent live/vendored: " + str(item.get("live_parent_head") or "unavailable")
+                    + "/" + str(item.get("vendored_parent_head") or "absent")
+                    + " audited: " + str(item.get("audited_parent_head"))
+                    + " match: " + str(item.get("vendored_head_audited"))
+                    + " last-integrated: " + str(item.get("last_integrated_donor"))
                     + " merge-base: " + str(item.get("merge_base") or "unavailable")
                     + f" ahead/behind: {item.get('ahead')}/{item.get('behind')}"
                 )

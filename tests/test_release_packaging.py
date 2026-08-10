@@ -124,6 +124,31 @@ def test_upstream_drift_workflow_is_separate_read_only_and_non_required() -> Non
     assert "check_upstream.py" not in release
 
 
+def test_parent_upstream_report_parses_tab_counts_and_flags_unaudited_head(monkeypatch) -> None:
+    module = runpy.run_path(str(ROOT / "scripts/check_upstream.py"))
+    check_parent = module["check_parent"]
+    observed = "f" * 40
+
+    def fake_git(*args: str) -> str:
+        if args[0] == "rev-parse":
+            return observed
+        if args[0] == "merge-base":
+            return "b" * 40
+        if args[0] == "rev-list":
+            return "26\t27"
+        raise AssertionError(args)
+
+    monkeypatch.setitem(check_parent.__globals__, "run_git", fake_git)
+    monkeypatch.setitem(check_parent.__globals__, "default_branch_head", lambda _repository: observed)
+    result = check_parent()
+
+    assert (result["ahead"], result["behind"]) == (26, 27)
+    assert result["audited_parent_head"] == "075b3719e768ad0874697abfdad9258d59ef9be1"
+    assert result["last_integrated_donor"] == "9542abeef6aa544f4ee6af03bab61cef3474f9e4"
+    assert result["vendored_head_audited"] is False
+    assert {"PARENT_HEAD_UNAUDITED", "PARENT_AUDITED_HEAD_MISMATCH"} <= set(result["flags"])
+
+
 def test_public_notices_and_no_vendoring() -> None:
     notice = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
     assert "@steipete/oracle" in notice and "@waishnav/devspace" in notice

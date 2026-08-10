@@ -193,6 +193,35 @@ def test_preflight_reports_missing_profile_and_devspace_without_browser(
     )
 
 
+def test_default_devspace_readiness_binds_the_persisted_config_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_runner()
+    job = manifest(tmp_path)
+    config_path = tmp_path / "devspace-config.json"
+    calls = []
+    monkeypatch.setattr(runner.DEVSPACE_SETUP, "devspace_config_path", lambda: config_path)
+    monkeypatch.setattr(
+        runner.DEVSPACE_SETUP,
+        "doctor",
+        lambda config, **kwargs: calls.append((config, kwargs)) or {"next_action": "READY"},
+    )
+
+    result = runner.assess_submission_readiness(
+        runner.STATE.load_manifest(job),
+        mode="inspect",
+        checks=["devspace_endpoint"],
+        devspace_hostname="device.tailnet.ts.net",
+        run_factory=version_runner,
+    )
+
+    assert result["ready"] is True
+    assert len(calls) == 1
+    assert calls[0][1]["config_path"] == config_path
+
+
+
 def test_windows_live_submission_requires_profile_seed_before_run_layout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
