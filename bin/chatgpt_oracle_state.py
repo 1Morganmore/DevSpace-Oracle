@@ -26,6 +26,7 @@ REGULAR_THINKING_TIME = "extra-high"
 ORACLE_ACTIVE_VERSION = "0.17.2"
 ORACLE_RECOVERABLE_VERSIONS = ("0.16.1", "0.17.0", "0.17.1", ORACLE_ACTIVE_VERSION)
 WAIT_CAPABLE_VERSIONS = {"0.17.0", "0.17.1", ORACLE_ACTIVE_VERSION}
+ORACLE_UI_FAILURE_SETTLEMENT_VERSIONS = {"0.17.1", "0.17.2"}
 ORACLE_PACKAGE = "@steipete/oracle"
 STATE_SCHEMA = "codex.chatgpt.oracle-run-state/v1"
 STATUSES = {"prepared", "running", "complete", "failed", "attention_required", "abandoned"}
@@ -1754,10 +1755,11 @@ def proven_pre_submit_ui_failure(state_path: Path) -> dict[str, Any] | None:
 
     This binds the markers emitted by the two previously shipped local
     thinking-time patch levels (extra-high fail-closed and Pro-heavy
-    upgrade).  In-flight runs launched before the final strict patch may
-    still carry their legacy profile model ``gpt-5.5-pro``, so both legacy
-    and current Pro model values are accepted here; the current
-    strict-patch markers are proven by ``proven_pre_submit_thinking_time_failure``.
+    upgrade).  Runs launched on Oracle 0.17.1 before the final strict patch
+    may still carry their legacy profile model ``gpt-5.5-pro`` and settle
+    after an upgrade; both legacy and current Pro model values are therefore
+    accepted.  Current strict-patch markers are proven by
+    ``proven_pre_submit_thinking_time_failure``.
     """
     state = load_state(state_path)
     oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
@@ -1780,7 +1782,8 @@ def proven_pre_submit_ui_failure(state_path: Path) -> dict[str, Any] | None:
         or _state_has_conversation_url(state)
         or str(state.get("mode") or "").casefold() != "browser"
         or not (regular_contract or pro_contract)
-        or normalize_oracle_version(oracle.get("resolved_version")) != ORACLE_ACTIVE_VERSION
+        or normalize_oracle_version(oracle.get("resolved_version"))
+        not in ORACLE_UI_FAILURE_SETTLEMENT_VERSIONS
         or _settlement_logs_have_conversation_url(state_path)
     ):
         return None
