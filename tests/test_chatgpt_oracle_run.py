@@ -1732,6 +1732,71 @@ def test_recovery_settles_legacy_0171_ui_failure_and_releases_project(
 
 
 @pytest.mark.parametrize(
+    "inexact_evidence",
+    ["conversation-url", "durable-output", "unsupported-version"],
+)
+def test_recovery_keeps_lock_when_legacy_ui_failure_evidence_is_not_exact(
+    tmp_path: Path,
+    inexact_evidence: str,
+) -> None:
+    runner = load_runner()
+    manifest_path = manifest(tmp_path)
+    initial = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=popen_for(4, None, {}, []),
+    )
+    run_dir = Path(initial["run_dir"])
+    state_path = run_dir / "state.json"
+    state = runner.STATE.load_state(state_path)
+    state["oracle"]["resolved_version"] = (
+        "oracle 0.17.0"
+        if inexact_evidence == "unsupported-version"
+        else "oracle 0.17.1"
+    )
+    if inexact_evidence == "conversation-url":
+        state["oracle"]["conversation_url"] = (
+            "https://chatgpt.com/c/exact-submitted-session"
+        )
+    state.pop("pre_submit_failure", None)
+    runner.STATE.write_json_atomic(state_path, state)
+    locator = state["oracle"]["slug"]
+    marker = (
+        "Thinking time: option not found (requested Extra-high); "
+        "refusing to submit without confirmed Extra High."
+    )
+    (run_dir / "stdout.log").write_text(
+        f"Session: {locator}\n"
+        f"ERROR: {marker}\n"
+        f"User error (browser-automation): {marker}\n",
+        encoding="utf-8",
+    )
+    (run_dir / "stderr.log").write_text("", encoding="utf-8")
+    (run_dir / "transcript.md").write_text("", encoding="utf-8")
+    if inexact_evidence == "durable-output":
+        (run_dir / "output.md").write_text("durable answer\n", encoding="utf-8")
+
+    recovered = recover_run(
+        runner,
+        run_dir,
+        action="harvest",
+        dry_run=True,
+    )
+    recovered_state = runner.STATE.load_state(state_path)
+
+    assert recovered["status"] == "dry-run"
+    assert recovered_state["session_authority"] == "submitted_unknown"
+    assert "pre_submit_failure" not in recovered_state
+    assert len(
+        runner.STATE.unresolved_project_sessions(
+            runner.STATE.load_manifest(manifest_path).run_root,
+            tmp_path,
+        )
+    ) == 1
+
+
+@pytest.mark.parametrize(
     ("pro_mode", "status"),
     [
         (pro_mode, status)
