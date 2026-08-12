@@ -9,9 +9,13 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
 
 - 지원 Node.js 범위를 `>=24 <27`로 올리고 프로젝트 릴리스를 1.8.0으로
   갱신했습니다.
-- 신규 실행은 해시 검증한 Oracle `0.17.2`와 DevSpace `1.0.6`을 사용합니다.
-  Oracle `0.16.1`, `0.17.0`, `0.17.1`은 이미 저장된 해당 버전 실행의 정확한
-  복구에만 남깁니다.
+- 신규 실행은 해시 검증한 Oracle `0.17.2`와 DevSpace `1.0.7`을 사용합니다.
+  DevSpace 승격은 workspace 재사용 안내와 unknown-workspace 오류 문구를
+  수용하며, 기존 OAuth discovery와 bounded traversal 패치를 새 npm dist
+  바이트에 다시 해시 결합합니다. 자동시작과 명시적 재시작은 호환 패치 전에
+  정확한 1.0.7 패키지를 npm 캐시에 준비하므로 버전 승격 직후에도 fail-closed
+  패치 검증이 새 패키지를 찾을 수 있습니다. Oracle `0.16.1`, `0.17.0`,
+  `0.17.1`은 이미 저장된 해당 버전 실행의 정확한 복구에만 남깁니다.
 - 일반 작업은 `GPT-5.6 Sol` + 보이는 `Extra High`(`Power 4 of 5`)만 지원하고
   `Medium`/`High` 별칭은 거부하며, Pro는 첨부 전용 `gpt-5.6-sol` +
   `heavy`(보이는 `Power 5 of 5`/`Pro` 증명)를 유지합니다. Web Multi는 명시적으로

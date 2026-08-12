@@ -26,7 +26,7 @@ DEFAULT_PORT = 7676
 APP_NAME = "DevSpace"
 AUTOSTART_NAME = "DevSpace MCP Server"
 AUTOSTART_REG_KEY = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
-DEVSPACE_PACKAGE = "@waishnav/devspace@1.0.6"
+DEVSPACE_PACKAGE = "@waishnav/devspace@1.0.7"
 DEVSPACE_OAUTH_SCOPES = "devspace,offline_access"
 SECRET_PATTERN = re.compile(r"(?i)(password|token|secret|authorization)\s*([:=])\s*[^\s,;]+")
 HOSTNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.-]*\.ts\.net$", re.IGNORECASE)
@@ -177,6 +177,7 @@ def configure_roots(
     result["readback"] = after
     if restart:
         local_port = int(readback.get("port", DEFAULT_PORT))
+        run_checked(devspace_prepare_argv(), runner=runner)
         run_checked(devspace_compat_argv(stop_exact_service=True, local_port=local_port), runner=runner)
         launch_hidden(devspace_serve_argv(), popen_factory=popen_factory)
         run_checked(devspace_compat_argv(confirm_restarted=True, local_port=local_port), runner=runner)
@@ -204,6 +205,10 @@ def windows_subprocess_kwargs(platform_name: str | None = None) -> dict[str, Any
 
 def bash_argv(command: Sequence[str]) -> list[str]:
     return [str(git_bash_path()), "-lc", "exec " + " ".join(shlex.quote(part) for part in command)]
+
+
+def devspace_prepare_argv() -> list[str]:
+    return bash_argv(["npx", "--yes", DEVSPACE_PACKAGE, "--help"])
 
 
 def devspace_serve_argv() -> list[str]:
@@ -297,6 +302,7 @@ def autostart_argv() -> list[str]:
 
 
 def serve_foreground(*, runner: Callable[..., Any] = subprocess.run) -> None:
+    run_checked(devspace_prepare_argv(), runner=runner)
     run_checked(devspace_compat_argv(), runner=runner)
     run_checked(devspace_serve_argv(), runner=runner)
 

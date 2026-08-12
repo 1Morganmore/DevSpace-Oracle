@@ -4,8 +4,8 @@
   "include": [
     "bin/chatgpt_oracle_run.py",
     "bin/chatgpt_devspace_compat.py",
-    "bin/devspace-compat/1.0.6/server.patch",
-    "bin/devspace-compat/1.0.6/workspaces.patch",
+    "bin/devspace-compat/1.0.7/server.patch",
+    "bin/devspace-compat/1.0.7/workspaces.patch",
     "bin/chatgpt_oracle_compat.py",
     "bin/oracle-compat/0.16.1/assistantResponse.patch",
     "bin/oracle-compat/0.16.1/browserTabs.patch",
@@ -124,9 +124,9 @@
     },
     "devspace": {
       "package": "@waishnav/devspace",
-      "tested_version": "1.0.6",
+      "tested_version": "1.0.7",
       "license": "MIT",
-      "integrity": "sha512-lLwUip5Wv1mwpEmAbpms7bourW5g0a0US1PDHCD2CITgCK6DnMTh5++6z8ODIEY+T30oxoTQlxdH4T+VkWlbNA==",
+      "integrity": "sha512-kP+Wk52qiMRwdqAP+nV4OZ4HU8feivZQ0k6u4ZUkvqxu8j0Rp/AU8H0K4T43G+zmu9WJKlYLTet7vIUeZHU72A==",
       "installation": "resolved by the explicit setup skill; exact server.js and workspaces.js hashes are compatibility-patched",
       "repository": "waishnav/devspace",
       "release_tag_convention": "v{version}"

@@ -105,22 +105,22 @@ regressed.
 
 For a new Oracle release, query registry metadata, download the exact npm tarball, verify integrity, calculate every pristine hash, dry-apply each patch, review changed upstream sources, calculate patched hashes, and only then update the version table and manifest. Source tags never substitute for npm dist bytes.
 
-Oracle main was observed at `5941f0839762b00601ab26895162c096dd0ee9d8` on 2026-08-11. It remains newer than the `v0.17.2` release tag; therefore no unreleased source-main code is adopted.
+Oracle main was observed at `f5b9c8106cf6b826b3d48fc5a0fb19de26ee584b` on 2026-08-12. It remains newer than the `v0.17.2` release tag. The only runtime-source delta since the prior audit is upstream Japanese Intelligence effort-label recognition; it is not adopted because the local compatibility proof uses different Power-selector authority and must be ported and verified independently. No unreleased source-main code is adopted.
 
 ## C. DevSpace compatibility layer
 
-- npm package: `@waishnav/devspace@1.0.6`
-- npm integrity: `sha512-lLwUip5Wv1mwpEmAbpms7bourW5g0a0US1PDHCD2CITgCK6DnMTh5++6z8ODIEY+T30oxoTQlxdH4T+VkWlbNA==`
-- npm tarball SHA-256: `1148a45afd70668ead498671eb47e080bad9cf36cf37ee2382add01612163b4a`
-- source tag: `v1.0.6`; tag object `074292acf19a7fe3407bdf6c7565ffd28c17656c`, peeled commit `3bd0378b128c048add810dff00efeff4e7326eb9`
+- npm package: `@waishnav/devspace@1.0.7`
+- npm integrity: `sha512-kP+Wk52qiMRwdqAP+nV4OZ4HU8feivZQ0k6u4ZUkvqxu8j0Rp/AU8H0K4T43G+zmu9WJKlYLTet7vIUeZHU72A==`
+- npm tarball SHA-256: `fa0966d32b1182fe4a0150f1ce1515a2e687c5227bfaec7a064c362841b3ab28`
+- source tag: `v1.0.7`; tag object `a625b290c141b826ae704620a09fced3f56f2010`, peeled commit `b5b4ab62a8718e1186aef815538741d9402f92ba`
 
 | Dist target | Pristine SHA-256 | Patched SHA-256 | Meaning |
 |---|---|---|---|
-| `dist/server.js` | `84cd96ad4a021abd29dc028c0fb74acce17ab92a4a653d033d5dd830630c2096` | `fbe241bc6ef1c91e9aa4866637d9b3890de20adef30fd4d5d0920bf5306e5f1b` | expose the MCP-path OAuth authorization-server discovery route without weakening listener/public URL authority |
-| `dist/workspaces.js` | `0da528d01555ab3cda0ddc71b749ff30db74497165fffb78e36ca84c97c38d8f` | `6f2610f22bb678ab768dde9ab4558296f65bf8cbcc247aa9a9d03b4133fab21d` | skip transient trees and traverse in bounded concurrent batches while preserving filesystem boundaries |
+| `dist/server.js` | `42d340924421182eea7f2580f96c8d1d5aae459061a6a90804e6900905ef2d72` | `5bd899c33e5db3afd1f41eb220c6346ee27d29421fb58c47db498ae3b691a8f7` | expose the MCP-path OAuth authorization-server discovery route without weakening listener/public URL authority |
+| `dist/workspaces.js` | `e11517f291cac33e37a66e84aeb80e1664a5abd0b6eb1e9bdb933d84c186efad` | `68a4c61ae0f509bd40d2a682e0b9bbbac72cb00dc96693f7646e6a535cc872ed` | skip transient trees and traverse in bounded concurrent batches while preserving filesystem boundaries |
 
 Conversation reuse metadata is a ChatGPT host boundary. The local Oracle runner does not create or inject `_meta["openai/session"]`. If the host supplies it, DevSpace may reuse the conversation binding; otherwise explicit existing `workspaceId` reuse is the supported fallback. Live reuse/reconnect/restart observations require separate submission approval.
 
 For a new DevSpace release, verify exact registry/tarball identity, regenerate both patches against the dist bytes, inspect router/middleware and traversal changes, test OAuth/listener/restart/root behavior, then update the pin and manifest. The read-only `scripts/check_upstream.py` reports drift but never promotes compatibility.
 
-DevSpace main was observed at `1def8ce8bdc547c12c739b05f319ed41b6dec3b4` on 2026-08-10. It remains newer than the latest npm release, which is still `1.0.6`; therefore no unreleased source-main code or pin change is adopted.
+DevSpace main and release `v1.0.7` were observed at `b5b4ab62a8718e1186aef815538741d9402f92ba` on 2026-08-12. The release changes workspace-reuse guidance and the unknown-workspace error only; allowed roots, OAuth/healthz routing, and workspace traversal semantics are unchanged. Both local patches apply cleanly to the exact npm dist bytes, so the tested pin is promoted to `1.0.7`.
