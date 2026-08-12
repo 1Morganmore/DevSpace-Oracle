@@ -1664,6 +1664,118 @@ def test_unconfirmed_pro_heavy_is_proven_pre_submit_and_releases_project(
     ) == []
 
 
+@pytest.mark.parametrize(
+    ("pro_mode", "status"),
+    [
+        (pro_mode, status)
+        for pro_mode in (False, True)
+        for status in (
+            "chip not found",
+            "menu not found",
+            "option not found",
+            "selection unverified",
+            "model kind not found",
+            "unknown outcome selecting",
+        )
+    ],
+)
+def test_strict_power_failure_is_proven_pre_submit_and_releases_project(
+    tmp_path: Path,
+    pro_mode: bool,
+    status: str,
+) -> None:
+    runner = load_runner()
+    manifest_path = pro_manifest(tmp_path) if pro_mode else manifest(tmp_path)
+    requested = "Heavy" if pro_mode else "Extra-high"
+    required = "Power 5 of 5 (Pro)" if pro_mode else "Power 4 of 5 (Extra High)"
+    if status == "unknown outcome selecting":
+        marker = f"Thinking time: {status} {requested}; refusing to submit without confirmed {required}."
+    else:
+        marker = f"Thinking time: {status} (requested {requested}); refusing to submit without confirmed {required}."
+
+
+    def power_failure(command, **kwargs):
+        slug = command[command.index("--slug") + 1]
+        kwargs["stdout"].write(
+            (
+                f"Session: {slug}\n"
+                f"ERROR: {marker}\n"
+                f"User error (browser-automation): {marker}\n"
+            ).encode()
+        )
+        kwargs["stdout"].flush()
+        return Process(1, [])
+
+    result = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=power_failure,
+    )
+    run_dir = Path(result["run_dir"])
+    state = runner.STATE.load_state(run_dir / "state.json")
+
+    assert result["status"] == "pre_submit_failed"
+    assert result["safe_for_fresh_run"] is True
+    assert state["session_authority"] == "pre_submit"
+    assert state["task_outcome"] == "not_executed"
+    assert state["pre_submit_failure"]["code"] == (
+        "ORACLE_THINKING_TIME_PRE_SUBMIT_FAILED"
+    )
+    assert runner.STATE.unresolved_project_sessions(
+        runner.STATE.load_manifest(manifest_path).run_root,
+        tmp_path,
+    ) == []
+
+
+
+@pytest.mark.parametrize(
+    ("pro_mode", "marker"),
+    [
+        (
+            False,
+            "Thinking time: selection unverified (requested Extra-high); "
+            "refusing to submit without confirmed Power 5 of 5 (Pro).",
+        ),
+        (
+            True,
+            "Thinking time: selection unverified (requested Heavy); "
+            "refusing to submit without confirmed Power 4 of 5 (Extra High).",
+        ),
+    ],
+)
+def test_strict_power_failure_with_wrong_tier_keeps_exact_session_locked(
+    tmp_path: Path,
+    pro_mode: bool,
+    marker: str,
+) -> None:
+    runner = load_runner()
+    manifest_path = pro_manifest(tmp_path) if pro_mode else manifest(tmp_path)
+
+    def mismatched_power_tier(command, **kwargs):
+        slug = command[command.index("--slug") + 1]
+        kwargs["stdout"].write(f"Session: {slug}\nERROR: {marker}\n".encode())
+        kwargs["stdout"].flush()
+        return Process(1, [])
+
+    result = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=mismatched_power_tier,
+    )
+    state = runner.STATE.load_state(Path(result["run_dir"]) / "state.json")
+
+    assert result["ok"] is False
+    assert state["session_authority"] == "submitted_unknown"
+    assert "pre_submit_failure" not in state
+    assert len(
+        runner.STATE.unresolved_project_sessions(
+            runner.STATE.load_manifest(manifest_path).run_root,
+            tmp_path,
+        )
+    ) == 1
+
 def test_model_switcher_failure_is_proven_pre_submit_not_executed_and_releases_project(
     tmp_path: Path,
 ) -> None:

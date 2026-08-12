@@ -106,12 +106,14 @@ ORACLE_PRO_HEAVY_UNCONFIRMED_RE = re.compile(
     r"selection unverified|model kind not found) for pro \(requested Heavy\)|"
     r"unknown outcome selecting Heavy); refusing to submit without confirmed Pro Heavy\."
 )
-# The adopted final upstream thinking-time patch (thinkingTime.strict.patch)
-# proves the Power-slider effort and refuses pre-send only when the requested
-# and required effort labels agree; anything else remains fail-closed.
+# The active thinking-time patch names the configured Oracle effort in
+# `requested` and its exact visible Power tier in `required`. Anything else
+# remains fail-closed.
 ORACLE_THINKING_TIME_PRE_SUBMIT_RE = re.compile(
-    r"Thinking time: (?:selection unverified \(requested |unknown outcome selecting )"
-    r"(?P<requested>[^);]+)\)?; refusing to submit without confirmed (?P<required>[^.]+)\.",
+    r"Thinking time: (?:(?:chip not found|menu not found|option not found|"
+    r"selection unverified|model kind not found)(?: for [^()]+)? \(requested |"
+    r"unknown outcome selecting )(?P<requested>[^);]+)\)?; "
+    r"refusing to submit without confirmed (?P<required>[^.]+)\.",
     re.IGNORECASE,
 )
 ORACLE_MODEL_SWITCHER_PRE_SUBMIT_RE = re.compile(
@@ -2020,10 +2022,11 @@ def proven_pre_submit_thinking_time_failure(state_path: Path) -> dict[str, Any] 
     """Prove the final strict Power-slider selector refused before send.
 
     Accepts only Oracle's exact selection-unverified/unknown-outcome
-    diagnostics from the adopted upstream thinking-time patch, with the
-    requested and required effort labels agreeing, and only while the exact
-    conversation URL and any durable output are absent.  Anything else keeps
-    submitted-unknown ownership and therefore the project lock fail-closed.
+    diagnostics from the active thinking-time patch, with the configured
+    Oracle effort mapped to its exact visible Power tier, and only while the
+    exact conversation URL and any durable output are absent. Anything else
+    keeps submitted-unknown ownership and therefore the project lock
+    fail-closed.
     """
     state = load_state(state_path)
     if str(state.get("session_authority") or "") not in {"pre_submit", "submitted_unknown"}:
@@ -2057,7 +2060,13 @@ def proven_pre_submit_thinking_time_failure(state_path: Path) -> dict[str, Any] 
     if CHATGPT_CONVERSATION_URL_RE.search(combined):
         return None
     match = ORACLE_THINKING_TIME_PRE_SUBMIT_RE.search(combined)
-    if match is None or match.group("requested").casefold() != match.group("required").casefold():
+    expected_requested = "heavy" if pro_contract else "extra-high"
+    expected_required = "power 5 of 5 (pro)" if pro_contract else "power 4 of 5 (extra high)"
+    if (
+        match is None
+        or match.group("requested").casefold() != expected_requested
+        or match.group("required").casefold() != expected_required
+    ):
         return None
     oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
     locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
