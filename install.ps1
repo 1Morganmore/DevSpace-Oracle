@@ -21,6 +21,13 @@ function Get-Hash([string]$Path){
     if($stream){$stream.Dispose()}
   }
 }
+function Get-InstallMutexName([string]$Root){
+  $canonical=[IO.Path]::GetFullPath($Root);$pathRoot=[IO.Path]::GetPathRoot($canonical)
+  if(!$canonical.Equals($pathRoot,[StringComparison]::OrdinalIgnoreCase)){$canonical=$canonical.TrimEnd([char[]]@([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar))}
+  $sha256=[Security.Cryptography.SHA256]::Create()
+  try{$digest=$sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical.ToUpperInvariant()))}finally{$sha256.Dispose()}
+  "Local\codexpro-automation-install-$((([BitConverter]::ToString($digest)) -replace '-','').ToLowerInvariant())"
+}
 function Copy-FileDurable([string]$Source,[string]$Destination){
   $directory=Split-Path -Parent $Destination;New-Item -ItemType Directory -Force -Path $directory|Out-Null
   $temporary=Join-Path $directory ".codexpro-$([guid]::NewGuid().ToString('N')).tmp";$input=$null;$output=$null
@@ -286,11 +293,15 @@ function Resume-PendingInstallTransactions([string]$Root){
 }
 $Files=@(Get-ManifestFiles $RepoRoot $Manifest)
 if($WhatIfPreference){$previous=Get-PreviousReceipt $HomeRoot;$removals=@(Get-RemovalPlans $HomeRoot $previous $Files);$Files|ForEach-Object{"Would stage and install $_"};$removals|ForEach-Object{"Would remove receipt-owned unchanged file $($_.path)"};exit 0}
-$records=@();$receipt=$null;$journal=$null;$journalPath=$null
-Resume-PendingInstallTransactions $HomeRoot
-$previous=Get-PreviousReceipt $HomeRoot;$removalPlans=@(Get-RemovalPlans $HomeRoot $previous $Files)
-if($removalPlans.Count){$legacyRuns=@(Get-ActiveOrUncertainLegacyRuns $HomeRoot);if($legacyRuns.Count){throw ('INSTALL_UPGRADE_ACTIVE_LEGACY_RUN: '+($legacyRuns|ConvertTo-Json -Depth 5 -Compress))}}
+$records=@();$receipt=$null;$journal=$null;$journalPath=$null;$installMutex=$null;$installMutexAcquired=$false;$installError=$null
 try{
+ $installMutex=[Threading.Mutex]::new($false,(Get-InstallMutexName $HomeRoot));$abandonedInstallMutex=$false
+ try{$installMutexAcquired=$installMutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$installMutexAcquired=$true;$abandonedInstallMutex=$true}
+ if(!$installMutexAcquired){throw "INSTALL_ALREADY_RUNNING: another installer owns CODEX_HOME $HomeRoot"}
+ if($abandonedInstallMutex){"Recovered abandoned install lock for CODEX_HOME: $HomeRoot"}
+ Resume-PendingInstallTransactions $HomeRoot
+ $previous=Get-PreviousReceipt $HomeRoot;$removalPlans=@(Get-RemovalPlans $HomeRoot $previous $Files)
+ if($removalPlans.Count){$legacyRuns=@(Get-ActiveOrUncertainLegacyRuns $HomeRoot);if($legacyRuns.Count){throw ('INSTALL_UPGRADE_ACTIVE_LEGACY_RUN: '+($legacyRuns|ConvertTo-Json -Depth 5 -Compress))}}
  foreach($relative in $Files){$source=Get-SafeChild $RepoRoot $relative;$stage=Get-SafeChild $StageRoot $relative;New-Item -ItemType Directory -Force -Path (Split-Path -Parent $stage)|Out-Null;Copy-FileDurable $source $stage;if((Get-Hash $source)-ne(Get-Hash $stage)){throw "staging hash verification failed: $relative"}}
  New-Item -ItemType Directory -Force -Path $ReceiptRoot|Out-Null;$receipt=Get-SafeChild $ReceiptRoot "codexpro-automation-$Stamp-$Nonce.json"
  $journalPath=Join-Path $BackupRoot 'install.wal.json';$journal=[ordered]@{schema='codexpro.install-wal/v3';transaction_id=$TransactionId;manifest_version=$Manifest.version;status='ACTIVE';backup=$BackupRoot;receipt=$receipt;wal_path=$journalPath;created_at=[DateTime]::UtcNow.ToString('o');files=@()};Write-WalDurable $HomeRoot $journalPath $journal;$stepIndex=0
@@ -329,5 +340,13 @@ try{
   elseif($receipt -and (Test-Path -LiteralPath $receipt)){Remove-Item -LiteralPath $receipt -Force}
   throw $installError
 } finally {
-  if(Test-Path -LiteralPath $StageRoot){Remove-Item -LiteralPath $StageRoot -Recurse -Force}
+  $mutexCleanupError=$null
+  try{if($installMutexAcquired){$installMutex.ReleaseMutex()}}catch{$mutexCleanupError=$_.Exception}finally{if($installMutex){$installMutex.Dispose()}}
+  $stageCleanupError=$null
+  try{
+    if($env:CODEXPRO_INSTALL_CLEANUP_FAULT_POINT -eq 'BEFORE_STAGE_CLEANUP'){throw 'INSTALL_CLEANUP_FAULT_INJECTED: BEFORE_STAGE_CLEANUP'}
+    if(Test-Path -LiteralPath $StageRoot){Remove-Item -LiteralPath $StageRoot -Recurse -Force}
+  }catch{$stageCleanupError=$_.Exception}
+  if($mutexCleanupError -and !$installError){throw $mutexCleanupError}
+  if($stageCleanupError -and !$installError){throw $stageCleanupError}
 }
