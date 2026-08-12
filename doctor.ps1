@@ -150,7 +150,7 @@ if (!$Python) {
   warnings = $Warnings
   commands = $Commands
   oracle = @{package='@steipete/oracle@0.17.2';tested_version='0.17.2';resolution='exact npx runtime pin'}
-  devspace = @{package='@waishnav/devspace';tested_version='1.0.6';setup='explicit setup skill only'}
+  devspace = @{package='@waishnav/devspace';tested_version='1.0.7';setup='explicit setup skill only'}
   what_if = [bool]$WhatIf
 } | ConvertTo-Json -Depth 7
 if ($Issues) { exit 1 }

@@ -87,6 +87,7 @@ def test_roots_restart_reuses_exact_service_controls(tmp_path: Path, monkeypatch
     )
 
     assert calls == [
+        module.devspace_prepare_argv(),
         module.devspace_compat_argv(stop_exact_service=True, local_port=8765),
         module.devspace_compat_argv(confirm_restarted=True, local_port=8765),
     ]
@@ -107,7 +108,7 @@ def test_setup_plan_has_no_secrets_and_is_explicit_only(tmp_path: Path, monkeypa
     assert plan["recommended_app_name"] == "DevSpace"
     assert plan["devspace_init"][1:3] == [
         "-lc",
-        "exec npx --yes @waishnav/devspace@1.0.6 init",
+        "exec npx --yes @waishnav/devspace@1.0.7 init",
     ]
 
 
@@ -120,11 +121,15 @@ def test_managed_devspace_serve_advertises_offline_access(
     bash.write_text("", encoding="utf-8")
     monkeypatch.setenv("DEVSPACE_GIT_BASH", str(bash))
 
+    assert module.devspace_prepare_argv()[1:3] == [
+        "-lc",
+        "exec npx --yes @waishnav/devspace@1.0.7 --help",
+    ]
     assert module.devspace_serve_argv()[1:3] == [
         "-lc",
         (
             "exec env DEVSPACE_OAUTH_SCOPES=devspace,offline_access "
-            "npx --yes @waishnav/devspace@1.0.6 serve"
+            "npx --yes @waishnav/devspace@1.0.7 serve"
         ),
     ]
 
@@ -527,7 +532,7 @@ def test_setup_applies_hash_validated_devspace_compat_before_service_start(
 
     assert calls[1][1:3] == [
         "-lc",
-        "exec npx --yes @waishnav/devspace@1.0.6 init",
+        "exec npx --yes @waishnav/devspace@1.0.7 init",
     ]
     assert "creationflags" not in call_kwargs[1]
     assert call_kwargs[2]["creationflags"] == 123
@@ -571,6 +576,7 @@ def test_setup_registers_login_autostart_and_serve_reapplies_compat(
     calls.clear()
     module.serve_foreground(runner=runner)
     assert calls == [
+        module.devspace_prepare_argv(),
         module.devspace_compat_argv(),
         module.devspace_serve_argv(),
     ]

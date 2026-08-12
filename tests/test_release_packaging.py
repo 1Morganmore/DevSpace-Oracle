@@ -53,8 +53,8 @@ def test_exact_external_versions_integrities_and_source_authority() -> None:
         "repository": "steipete/oracle",
         "release_tag_convention": "v{version}",
     }
-    assert external["devspace"]["tested_version"] == "1.0.6"
-    assert external["devspace"]["integrity"] == "sha512-lLwUip5Wv1mwpEmAbpms7bourW5g0a0US1PDHCD2CITgCK6DnMTh5++6z8ODIEY+T30oxoTQlxdH4T+VkWlbNA=="
+    assert external["devspace"]["tested_version"] == "1.0.7"
+    assert external["devspace"]["integrity"] == "sha512-kP+Wk52qiMRwdqAP+nV4OZ4HU8feivZQ0k6u4ZUkvqxu8j0Rp/AU8H0K4T43G+zmu9WJKlYLTet7vIUeZHU72A=="
     assert external["devspace"]["repository"] == "waishnav/devspace"
 
 

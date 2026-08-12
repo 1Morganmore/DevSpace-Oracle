@@ -707,7 +707,7 @@ def test_doctor_accepts_current_v3_install_receipt_schema() -> None:
         report = json.loads(result.stdout)
         assert report['status'] == 'PASS'
         assert report['oracle']['package'] == '@steipete/oracle@0.17.2'
-        assert report['devspace']['tested_version'] == '1.0.6'
+        assert report['devspace']['tested_version'] == '1.0.7'
         assert 'npx -y @steipete/oracle@0.17.2 --version' in report['commands']
         assert 'RECEIPT_INVALID' not in result.stdout
         assert 'unsupported install receipt schema' not in result.stdout
@@ -776,7 +776,7 @@ def test_temp_codex_home_install_and_rollback_is_exact_inverse() -> None:
         installed_pro_skill = codex_home / 'skills' / 'chatgpt-pro-browser' / 'SKILL.md'
         installed_pro_metadata = codex_home / 'skills' / 'chatgpt-pro-browser' / 'agents' / 'openai.yaml'
         installed_oracle_patch = codex_home / 'bin' / 'oracle-compat' / '0.17.1' / 'assistantResponse.patch'
-        installed_devspace_patch = codex_home / 'bin' / 'devspace-compat' / '1.0.6' / 'workspaces.patch'
+        installed_devspace_patch = codex_home / 'bin' / 'devspace-compat' / '1.0.7' / 'workspaces.patch'
         assert overwritten.read_bytes() != original
         assert created.is_file()
         assert installed_pro_skill.read_bytes() == (
