@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 
 import pytest
 
@@ -20,6 +21,49 @@ def run_powershell(*args: str, env: dict[str, str] | None = None) -> subprocess.
         capture_output=True,
         env=env,
     )
+
+
+def install_mutex_name(home: Path) -> str:
+    canonical = str(home.resolve()).rstrip("\\/").upper()
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return rf"Local\codexpro-automation-install-{digest}"
+
+
+def start_mutex_holder(
+    home: Path,
+    ready: Path,
+    *,
+    acquire: bool = True,
+) -> subprocess.Popen[str]:
+    env = os.environ.copy()
+    env["CODEXPRO_TEST_INSTALL_MUTEX"] = install_mutex_name(home)
+    env["CODEXPRO_TEST_MUTEX_READY"] = str(ready)
+    acquire_mutex = "if(!$mutex.WaitOne(0)){exit 2};" if acquire else ""
+    script = (
+        "$mutex=[Threading.Mutex]::new($false,$env:CODEXPRO_TEST_INSTALL_MUTEX);"
+        f"{acquire_mutex}"
+        "[IO.File]::WriteAllText($env:CODEXPRO_TEST_MUTEX_READY,'ready');"
+        "Start-Sleep -Seconds 120"
+    )
+    holder = subprocess.Popen(
+        ["powershell", "-NoProfile", "-Command", script],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not ready.exists() and holder.poll() is None:
+        time.sleep(0.05)
+    if not ready.exists():
+        stdout, stderr = holder.communicate(timeout=5)
+        raise AssertionError(
+            f"mutex holder did not become ready: exit={holder.returncode} "
+            f"stdout={stdout!r} stderr={stderr!r}"
+        )
+    return holder
 
 
 def make_removal_upgrade_fixture(tmp_path: Path) -> tuple[Path, Path, Path, bytes]:
@@ -564,6 +608,22 @@ def test_current_process_fault_rolls_back_the_active_wal_entry(fault_point: str)
         }
 
 
+def test_stage_cleanup_failure_does_not_mask_install_error() -> None:
+    with tempfile.TemporaryDirectory() as home:
+        env = os.environ.copy()
+        env['CODEXPRO_INSTALL_FAULT_POINT'] = 'AFTER_MUTATION'
+        env['CODEXPRO_INSTALL_CLEANUP_FAULT_POINT'] = 'BEFORE_STAGE_CLEANUP'
+
+        failed = run_powershell(
+            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home,
+            '-SkipDependencyInstall', env=env,
+        )
+
+        assert failed.returncode != 0
+        assert 'INSTALL_FAULT_INJECTED: AFTER_MUTATION' in failed.stderr
+        assert 'INSTALL_CLEANUP_FAULT_INJECTED' not in failed.stderr
+
+
 def test_current_process_fault_removes_a_just_created_destination() -> None:
     with tempfile.TemporaryDirectory() as home:
         codex_home = Path(home)
@@ -681,7 +741,7 @@ def test_wal_v2_missing_overwritten_destination_is_a_conflict() -> None:
         )
 
         assert recovered.returncode != 0
-        assert 'missing_overwritten_destination' in recovered.stderr
+        assert 'missing_overwritten_destination' in ''.join(recovered.stderr.split())
         assert not (codex_home / relative).exists()
         assert json.loads(wal.read_text(encoding='utf-8'))['status'] == 'ACTIVE'
 
@@ -854,3 +914,58 @@ def test_receipt_sibling_prefix_and_external_backup_are_rejected() -> None:
             '-File', str(ROOT / 'rollback.ps1'), '-CodexHome', home, '-Receipt', str(receipt)
         )
         assert backup_result.returncode != 0
+
+
+def test_install_refuses_second_writer_before_mutation(tmp_path: Path) -> None:
+    repo, home, legacy, legacy_bytes = make_removal_upgrade_fixture(tmp_path)
+    wal_path = next((home / "backups").glob("*/install.wal.json"))
+    interrupted = json.loads(wal_path.read_text(encoding="utf-8"))
+    interrupted["status"] = "ACTIVE"
+    wal_path.write_text(json.dumps(interrupted), encoding="utf-8")
+    holder = start_mutex_holder(home, tmp_path / "holder-ready")
+    try:
+        installed = run_fixture_install(repo, home)
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+
+    assert installed.returncode != 0
+    assert "INSTALL_ALREADY_RUNNING" in installed.stderr
+    assert legacy.read_bytes() == legacy_bytes
+    assert not (home / "bin" / "active.py").exists()
+    assert len(list((home / "backups").glob("*/install.wal.json"))) == 1
+    assert len(list((home / "receipts").glob("*.json"))) == 1
+    assert json.loads(wal_path.read_text(encoding="utf-8"))["status"] == "ACTIVE"
+
+
+def test_install_recovers_abandoned_writer_mutex(tmp_path: Path) -> None:
+    repo, home, legacy, _ = make_removal_upgrade_fixture(tmp_path)
+    holder = start_mutex_holder(home, tmp_path / "abandoned-owner-ready")
+    keeper = start_mutex_holder(home, tmp_path / "abandoned-keeper-ready", acquire=False)
+    holder.kill()
+    holder.wait(timeout=10)
+    try:
+        installed = run_fixture_install(repo, home)
+    finally:
+        keeper.terminate()
+        keeper.wait(timeout=10)
+
+    assert installed.returncode == 0, installed.stderr
+    assert "Recovered abandoned install lock" in installed.stdout
+    assert not legacy.exists()
+    assert (home / "bin" / "active.py").read_text(encoding="utf-8") == "active\n"
+
+
+def test_install_releases_writer_mutex_after_success(tmp_path: Path) -> None:
+    repo, home, _, _ = make_removal_upgrade_fixture(tmp_path)
+    keeper = start_mutex_holder(home, tmp_path / "release-keeper-ready", acquire=False)
+    try:
+        first = run_fixture_install(repo, home)
+        second = run_fixture_install(repo, home)
+    finally:
+        keeper.terminate()
+        keeper.wait(timeout=10)
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert "Recovered abandoned install lock" not in second.stdout
