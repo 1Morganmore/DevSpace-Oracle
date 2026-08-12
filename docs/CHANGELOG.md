@@ -20,6 +20,9 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
   `Medium`/`High` 별칭은 거부하며, Pro는 첨부 전용 `gpt-5.6-sol` +
   `heavy`(보이는 `Power 5 of 5`/`Pro` 증명)를 유지합니다. Web Multi는 명시적으로
   선택한 경우에만 실행하며 자동 fallback으로 사용하지 않습니다.
+- Oracle `0.17.2`가 보고하는 `Power 4 of 5 (Extra High)`와
+  `Power 5 of 5 (Pro)` 사전제출 거부를 정확한 실행 프로필에 결합해
+  `not_executed`로 정산합니다. 다른 Power 등급은 exact-session 잠금을 유지합니다.
 
 ## 이전 릴리스
 
