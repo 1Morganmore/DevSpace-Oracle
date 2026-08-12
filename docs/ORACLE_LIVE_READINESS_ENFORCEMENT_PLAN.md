@@ -1,24 +1,22 @@
-# Oracle Live Readiness Enforcement Plan
+# Oracle Live Readiness Enforcement Record
 
 ## Status
 
-- Planning only; implementation has not started.
+- Implemented on public `main`; this file now records the accepted design and
+  verification contract rather than pending work.
 - Repository: `https://github.com/1Morganmore/DevSpace-Oracle`
 - Planning baseline: `002a3dd4656860eb289e117f4392f949311c682a`
 - Baseline CI: `release-portability` run `31074487726`, successful.
-- Recommended branch name: `feature/oracle-live-readiness-gate`
+- Preflight and triage implementation:
+  `cce29340fdb23764a9f9112504c6ba5c54ae29aa`.
+- Authoritative live submission enforcement:
+  `e8bac19946c9a170093c73b663e45a7739147466`.
 
-Start the implementation branch from the current public `origin/main` and confirm
-that it contains the planning baseline:
-
-```powershell
-git fetch origin main
-git merge-base --is-ancestor 002a3dd4656860eb289e117f4392f949311c682a origin/main
-git switch -c feature/oracle-live-readiness-gate origin/main
-```
-
-If the ancestry check fails, stop and resolve the repository identity mismatch.
-Do not implement this plan on an older base.
+The implementation is present in `bin/chatgpt_oracle_run.py`. Current operator
+behavior is documented in `README.md` and
+`skills/chatgpt-oracle-runtime/SKILL.md`. The remaining sections preserve the
+design constraints used to review future changes; they are not an instruction
+to create another implementation branch.
 
 ## Outcome
 
@@ -38,9 +36,9 @@ dispatch --dry-run -> preflight -> run -> Oracle hidden browser -> DevSpace -> o
 only submission entry point and records a proven pre-submit failure when a live
 readiness condition fails after the run layout has been prepared.
 
-## Problem
+## Resolved problem
 
-`preflight_run()` currently checks:
+Before `e8bac19946c9a170093c73b663e45a7739147466`, `preflight_run()` checked:
 
 - signed-in profile seed;
 - unresolved project ownership;
@@ -50,14 +48,15 @@ readiness condition fails after the run layout has been prepared.
 - Funnel mapping and strict local/public `{ "ok": true, "name": "devspace" }`
   `/healthz` responses.
 
-`execute_run()` independently enforces the profile seed, exact Oracle version,
-compatibility preparation, project ownership, and bound input hashes. It does not
-currently run the DevSpace hostname/Funnel/`healthz` checks immediately before
-`Popen`. A user may therefore skip preflight, or DevSpace may become unavailable
-between preflight and submission.
+At that baseline, `execute_run()` did not repeat the volatile DevSpace
+hostname, Funnel, and `/healthz` checks immediately before `Popen`. The shipped
+implementation now performs the live readiness assessment inside the existing
+project submit mutex after final owner and bound-input validation. A failed
+check records structured `SUBMISSION_NOT_READY` evidence and exits without
+starting Oracle.
 
-The existing exact-session authority, recovery, settlement, and frozen legacy
-paths are not defective and must not be redesigned as part of this work.
+Exact-session authority, recovery, settlement, and frozen legacy paths remain
+unchanged by this feature.
 
 ## Authority and invariants
 

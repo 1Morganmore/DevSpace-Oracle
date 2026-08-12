@@ -7,8 +7,8 @@ description: "Current Oracle runtime path for new ChatGPT work: regular modes us
 
 This is the only active browser path for all GPT work. Regular modes use DevSpace;
 Pro uses Oracle attachment transport without any app. New runs pin Oracle
-`0.17.1`; Oracle `0.16.1` and `0.17.0` are accepted only when recovering an exact run already
-persisted with that version.
+`0.17.2`; Oracle `0.16.1`, `0.17.0`, and `0.17.1` are accepted only when
+recovering an exact run already persisted with that version.
 
 `chatgpt_oracle_dispatch.py` supports exactly `direct`, `plan`, `review`, `edit`,
 `orchestrator`, `deep-research`, `manual`, and `pro`. `manual` is a supported
