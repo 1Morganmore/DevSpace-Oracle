@@ -23,6 +23,9 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
 - Oracle `0.17.2`가 보고하는 `Power 4 of 5 (Extra High)`와
   `Power 5 of 5 (Pro)` 사전제출 거부를 정확한 실행 프로필에 결합해
   `not_executed`로 정산합니다. 다른 Power 등급은 exact-session 잠금을 유지합니다.
+  업그레이드 전에 시작된 Oracle `0.17.1` 실행도 해당 버전의 레거시
+  Extra High/Pro Heavy 거부 증거가 완전하면 같은 `not_executed` 정산 경로로
+  복구해 잘못 유지된 프로젝트 잠금을 해제합니다.
 
 ## 이전 릴리스
 
