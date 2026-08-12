@@ -582,6 +582,7 @@ def test_oracle_commands_pin_the_active_and_recoverable_versions() -> None:
     assert state.ORACLE_ACTIVE_VERSION == "0.17.2"
     assert state.ORACLE_RECOVERABLE_VERSIONS == ("0.16.1", "0.17.0", "0.17.1", "0.17.2")
     assert state.WAIT_CAPABLE_VERSIONS == {"0.17.0", "0.17.1", "0.17.2"}
+    assert state.ORACLE_UI_FAILURE_SETTLEMENT_VERSIONS == {"0.17.1", "0.17.2"}
     assert state.default_oracle_command(platform_name="nt") == (
         "npx.cmd", "-y", "@steipete/oracle@0.17.2",
     )
