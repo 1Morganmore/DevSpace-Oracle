@@ -2,7 +2,7 @@
 index fcf3ae6..f77138a 100644
 --- a/dist/src/browser/actions/thinkingTime.js
 +++ b/dist/src/browser/actions/thinkingTime.js
-@@ -36,6 +36,81 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
+@@ -36,6 +36,75 @@ export async function ensureThinkingTime(Runtime, level, logger, desiredModel) {
      // own, independently of the legacy Pro-model + "extended" combination.
      const strictProEffort = level === "pro" ||
          ((targetModelKind === "pro" || observedModelKind === "pro") && level === "extended");
@@ -44,11 +44,6 @@ index fcf3ae6..f77138a 100644
 +                const pickerRoots = (button) => String(button.getAttribute?.('aria-controls') ?? '')
 +                    .trim().split(/\\s+/).filter(Boolean)
 +                    .map((id) => document.getElementById(id)).filter(visible);
-+                const boundProofScope = (root) => {
-+                    const menu = root?.matches?.('[role="menu"]') ? root :
-+                        root?.closest?.('[role="menu"]');
-+                    return menu && visible(menu) ? menu : root;
-+                };
 +                const sliderPro = (root) => Array.from(root.querySelectorAll(
 +                    '[data-testid="composer-model-picker-slider-simple-view"]',
 +                )).some((node) => visible(node) && /\\bpro\\b/i.test(text(node)) &&
@@ -61,8 +56,7 @@ index fcf3ae6..f77138a 100644
 +                const proof = () => Array.from(document.querySelectorAll(
 +                    ${JSON.stringify(MODEL_BUTTON_SELECTOR)},
 +                )).some((button) => visible(button) && /\\bpro\\b/i.test(text(button)) &&
-+                    pickerRoots(button).map(boundProofScope)
-+                        .some((root) => sliderPro(root) && advancedPro(root)));
++                    pickerRoots(button).some((root) => sliderPro(root) && advancedPro(root)));
 +                const deadline = performance.now() + 500;
 +                let consecutive = 0;
 +                while (performance.now() < deadline) {
@@ -108,7 +102,7 @@ index fcf3ae6..f77138a 100644
              }
              logger(formatBrowserThinkingLog(`unknown outcome selecting ${capitalizedLevel}; continuing with ChatGPT default.`));
              return;
-@@ -380,12 +447,125 @@ function buildThinkingTimeExpression(level, desiredModel) {
+@@ -380,12 +447,119 @@ function buildThinkingTimeExpression(level, desiredModel) {
        // 'intelligen' matches both "Intelligence" and German "Intelligenz".
        return normalize(label?.textContent ?? '').includes('intelligen');
      };
@@ -157,13 +151,8 @@ index fcf3ae6..f77138a 100644
 +    ).filter((character) =>
 +      (character >= 'a' && character <= 'z') ||
 +      (character >= '0' && character <= '9')).join('');
-+    const boundPowerProofScope = (root) => {
-+      const menu = root?.matches?.('[role="menu"]') ? root :
-+        root?.closest?.('[role="menu"]');
-+      return menu && isPowerProofVisible(menu) ? menu : root;
-+    };
 +    // Power proof belongs to one visible effort pill and its controlled picker.
-+    // A controlled subtree may use sibling proof only inside its same visible menu.
++    // The same picker must contain the slider and matching Advanced summary.
 +    const collectGpt56PowerProofDiagnostic = () => {
 +      if (POWER_TARGET === null || !TARGET_IS_GPT56_MODEL) return { passed: false };
 +      const targetEffort = POWER_TARGET === 5 ? 'pro' : 'extrahigh';
@@ -175,8 +164,7 @@ index fcf3ae6..f77138a 100644
 +          .trim().split(/\s+/).filter(Boolean)
 +          .map((id) => document.getElementById(id))
 +          .filter(isPowerProofVisible)
-+          .map((controlledRoot) => {
-+            const root = boundPowerProofScope(controlledRoot);
++          .map((root) => {
 +            const sliders = Array.from(root.querySelectorAll(
 +              '[data-testid="composer-model-picker-slider-simple-view"]',
 +            )).filter(isPowerProofVisible);

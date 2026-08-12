@@ -26,6 +26,11 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
   업그레이드 전에 시작된 Oracle `0.17.1` 실행도 해당 버전의 레거시
   Extra High/Pro Heavy 거부 증거가 완전하면 같은 `not_executed` 정산 경로로
   복구해 잘못 유지된 프로젝트 잠금을 해제합니다.
+- ChatGPT의 현재 Advanced picker가 `aria-controls` 대상 subtree 밖이지만 같은
+  visible menu 안에 Power slider를 배치하는 구조를 수용합니다. 증명 범위는
+  bound picker의 가장 가까운 visible menu까지만 확장하며, 다른 menu의 slider,
+  숨은 조상, 불일치 모델·Effort는 계속 거부합니다. 이전 1.8.0 패치 해시는
+  exact reverse patch로 pristine에 복원한 뒤 새 해시 결합 패치로 승격합니다.
 - 같은 정규화 `CODEX_HOME`을 대상으로 한 설치는 Windows named mutex로
   단일 writer만 허용합니다. 경쟁 설치는 파일 변경 전에 거부하고, 비정상 종료로
   버려진 mutex 소유권은 기존 WAL crash recovery를 계속 수행할 수 있게 인수합니다.

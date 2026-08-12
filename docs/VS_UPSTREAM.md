@@ -44,7 +44,7 @@ The exact 0.17.2 npm dist uses these hash-gated patches:
 | `dist/src/browser/index.js` | `335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11` | `9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895` |
 | `dist/src/browser/actions/assistantResponse.js` | `0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d` | `18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4` |
 | `dist/src/browser/actions/promptComposer.js` | `db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000` | `3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96` |
-| `dist/src/browser/actions/thinkingTime.js` | `303d33ebe915b27407ca22ec0da1d18729464ce50417f405ddb628c31f6fb867` | `91c5d356a597fbf1a8e08cde922fd468a94f8cd3a9e441d7534fb7877a117828` |
+| `dist/src/browser/actions/thinkingTime.js` | `303d33ebe915b27407ca22ec0da1d18729464ce50417f405ddb628c31f6fb867` | `9583e9b4f56661e1bfe87def1ffb44f08058eba356b87525ccb099b175e90d06` |
 
 The promptComposer row emits the bare `@` through CDP `Input.dispatchKeyEvent`,
 then uses one fixed `delay(250)` settle before inserting the app name. Two live
@@ -64,14 +64,19 @@ patch is applied.
 
 The thinking-time row preserves Oracle 0.17.2's upstream Advanced Model/Effort
 navigation and self-ports the fork's stronger Power proof. The visible current
-effort pill must name one picker root through `aria-controls`; that same visible
-root must contain both the matching simple `4 of 5` Extra High or `5 of 5` Pro
-slider and the coherent advanced `GPT-5.6 Sol` effort state twice consecutively.
+effort pill must name a visible picker root through `aria-controls`. When that
+root is an Advanced subtree, proof may expand only to its closest visible menu;
+that bound menu must contain both the matching simple `4 of 5` Extra High or
+`5 of 5` Pro slider and the coherent advanced `GPT-5.6 Sol` effort state twice
+consecutively.
 A final
 diagnostic snapshot can reopen the race fallback only after a separate
 read-only two-observation proof; it cannot authorize submission by itself.
 Proof visibility rejects non-positive computed opacity on the candidate or any
 ancestor, so a visually hidden stale picker subtree cannot authorize selection.
+The prior deployed 0.17.2 hash `91c5d356...` is restored through
+`thinkingTime.strict.pre-picker-menu-scope.patch` before applying the current
+hash-gated patch.
 Oracle 0.17.1 remains exact-recovery-only with canonical patched hash
 `c973d280...`; its deployed `01ad2aca...` proof level is restored through the
 exact `thinkingTime.strict.pre-coherent-picker-proof.patch` reverse asset before
