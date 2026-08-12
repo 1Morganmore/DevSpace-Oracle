@@ -13,13 +13,16 @@ ROOT = Path(__file__).parents[1]
 
 
 def run_powershell(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    completed = subprocess.run(
         ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', *args],
-        text=True,
-        encoding='utf-8',
-        errors='replace',
         capture_output=True,
         env=env,
+    )
+    return subprocess.CompletedProcess(
+        completed.args,
+        completed.returncode,
+        completed.stdout.decode('utf-8', errors='replace'),
+        completed.stderr.decode('utf-8', errors='replace'),
     )
 
 
@@ -47,22 +50,16 @@ def start_mutex_holder(
     )
     holder = subprocess.Popen(
         ["powershell", "-NoProfile", "-Command", script],
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         env=env,
     )
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline and not ready.exists() and holder.poll() is None:
         time.sleep(0.05)
     if not ready.exists():
-        stdout, stderr = holder.communicate(timeout=5)
-        raise AssertionError(
-            f"mutex holder did not become ready: exit={holder.returncode} "
-            f"stdout={stdout!r} stderr={stderr!r}"
-        )
+        holder.wait(timeout=5)
+        raise AssertionError(f"mutex holder did not become ready: exit={holder.returncode}")
     return holder
 
 
@@ -179,14 +176,14 @@ def test_removal_upgrade_preserves_changed_or_symlink_destination(
             (target_bin / 'legacy.py').write_text('user-target\n', encoding='utf-8')
             linked = subprocess.run(
                 ['cmd', '/c', 'mklink', '/J', str(home / 'bin'), str(target_bin)],
-                text=True, capture_output=True,
+                capture_output=True,
             )
-            assert linked.returncode == 0, linked.stderr
+            assert linked.returncode == 0, linked.stderr.decode(errors='replace')
 
     installed = run_fixture_install(repo, home)
 
     assert installed.returncode != 0
-    assert expected in installed.stderr
+    assert expected in ''.join(installed.stderr.split())
     assert legacy.exists()
     assert not (home / 'bin' / 'active.py').exists()
 
