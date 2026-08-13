@@ -396,6 +396,8 @@ def funnel_status(
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="strict",
             **windows_subprocess_kwargs(),
         )
     except OSError as error:
