@@ -27,6 +27,9 @@ Use this routing in the Codex global `AGENTS.md` after installing the package.
 - Genuine Web Multi-GPT uses distinct Oracle sessions. Windows lanes use
   independent throwaway copies of the signed-in Oracle profile, run in waves
   of at most five, and hand compact files to one merger.
+- Local Multi-GPT is a self-installed, PC-local read-only lane. It runs
+  parallel-reasoning jobs on this machine through the local `multi_gpt` MCP
+  tools and is not a web submission or an Oracle/DevSpace route.
 
 ## Standalone Pro versus comprehensive
 
