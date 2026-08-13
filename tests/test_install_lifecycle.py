@@ -132,6 +132,40 @@ def write_v3_receipt(
 def run_fixture_install(repo: Path, home: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return run_powershell('-File', str(repo / 'install.ps1'), '-CodexHome', str(home), env=env)
 
+@pytest.mark.skipif(os.name != 'nt', reason='Windows MAX_PATH regression')
+def test_install_overwrites_deep_skill_from_orca_length_codex_home(tmp_path: Path) -> None:
+    repo = tmp_path / 'repo'
+    relative = Path('skills/chatgpt-deep-research-browser/agents/openai.yaml')
+    source = repo / relative
+    source.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / 'install.ps1', repo / 'install.ps1')
+    source.write_text('new\n', encoding='utf-8')
+    (repo / 'install-manifest.json').write_text(json.dumps({
+        'schema': 'codexpro.install-manifest/v1',
+        'version': '1.9.0',
+        'include': [relative.as_posix()],
+        'external': {},
+    }), encoding='utf-8')
+    home_base = tmp_path / 'home'
+    padding = max(1, 100 - len(str(home_base)) - 1)
+    home = home_base / ('h' * padding)
+    destination = home / relative
+    destination.parent.mkdir(parents=True)
+    destination.write_text('old\n', encoding='utf-8')
+
+    installed = run_powershell(
+        '-File', str(repo / 'install.ps1'), '-CodexHome', str(home),
+        '-SkipDependencyInstall',
+    )
+
+    assert installed.returncode == 0, installed.stderr
+    assert destination.read_text(encoding='utf-8') == 'new\n'
+    receipt_path = next((home / 'receipts').glob('*.json'))
+    receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
+    record = next(item for item in receipt['files'] if item['path'] == relative.as_posix())
+    assert record['action'] == 'overwritten'
+    assert Path(receipt['backup'], relative).read_text(encoding='utf-8') == 'old\n'
+
 
 def test_removal_upgrade_writes_wal_v3_receipt_v4_and_rolls_back_exactly(tmp_path: Path) -> None:
     repo, home, legacy, legacy_bytes = make_removal_upgrade_fixture(tmp_path)

@@ -59,6 +59,10 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
 - 같은 정규화 `CODEX_HOME`을 대상으로 한 설치는 Windows named mutex로
   단일 writer만 허용합니다. 경쟁 설치는 파일 변경 전에 거부하고, 비정상 종료로
   버려진 mutex 소유권은 기존 WAL crash recovery를 계속 수행할 수 있게 인수합니다.
+- 설치의 원자적 임시 파일은 대상 디렉터리 안에서 짧은 무작위 이름을 사용합니다.
+  Orca 계정처럼 `CODEX_HOME`이 길어도 깊은 skill 파일의 백업 경로가 Windows
+  `MAX_PATH`를 임시 이름 때문에 넘지 않으며, `CreateNew`와 durable flush,
+  동일 디렉터리 replace/move 의미는 유지합니다.
 - 업그레이드 영수증 선택은 각 유효 chain head에서 현재 파일을 소유하는 가장
   가까운 ancestor를 제거 기준으로 사용하되, 새 `previous_receipt`는 그 branch의
   실제 head를 가리킵니다. rollback 뒤 재설치도 선형 이력을 유지하고, fork,

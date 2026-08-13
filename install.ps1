@@ -30,7 +30,7 @@ function Get-InstallMutexName([string]$Root){
 }
 function Copy-FileDurable([string]$Source,[string]$Destination){
   $directory=Split-Path -Parent $Destination;New-Item -ItemType Directory -Force -Path $directory|Out-Null
-  $temporary=Join-Path $directory ".codexpro-$([guid]::NewGuid().ToString('N')).tmp";$input=$null;$output=$null
+  $temporary=Join-Path $directory ([IO.Path]::GetRandomFileName());$input=$null;$output=$null
   try{
     $input=[IO.File]::Open($Source,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
     $output=[IO.File]::Open($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
@@ -44,7 +44,7 @@ function Copy-FileDurable([string]$Source,[string]$Destination){
   }
 }
 function Write-JsonDurable([string]$Path,$Value){
-  $directory=Split-Path -Parent $Path;New-Item -ItemType Directory -Force -Path $directory|Out-Null;$temporary=Join-Path $directory ".codexpro-$([guid]::NewGuid().ToString('N')).tmp"
+  $directory=Split-Path -Parent $Path;New-Item -ItemType Directory -Force -Path $directory|Out-Null;$temporary=Join-Path $directory ([IO.Path]::GetRandomFileName())
   try{[IO.File]::WriteAllText($temporary,($Value|ConvertTo-Json -Depth 12),[Text.UTF8Encoding]::new($false));$stream=[IO.File]::Open($temporary,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);try{$stream.Flush($true)}finally{$stream.Dispose()};Copy-FileDurable $temporary $Path}finally{if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force}}
 }
 function Test-PathEqual([string]$Left,[string]$Right){if([string]::IsNullOrWhiteSpace($Left)-or[string]::IsNullOrWhiteSpace($Right)){return $false};([IO.Path]::GetFullPath($Left)).Equals([IO.Path]::GetFullPath($Right),[StringComparison]::OrdinalIgnoreCase)}
