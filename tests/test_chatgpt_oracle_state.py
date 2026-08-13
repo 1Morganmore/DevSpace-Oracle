@@ -10,6 +10,9 @@ from pathlib import Path
 import pytest
 
 STATE_PATH = Path(__file__).resolve().parents[1] / "bin" / "chatgpt_oracle_state.py"
+REFERENCE_FOOTER_FIXTURE = (
+    Path(__file__).resolve().parent / "fixtures" / "oracle-task-outcome-reference-footer.md"
+)
 
 
 def load_state():
@@ -20,6 +23,76 @@ def load_state():
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_v1_task_outcome_accepts_exact_provider_reference_footer(tmp_path: Path) -> None:
+    state = load_state()
+    output = tmp_path / "output.md"
+    output.write_bytes(REFERENCE_FOOTER_FIXTURE.read_bytes())
+
+    assert state.classify_task_outcome(
+        output,
+        contract="v1",
+        transport="devspace",
+    ) == "executed"
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "Actually no files were changed.\n",
+        "[note]: this is ordinary prose, not a URL\n",
+        "TASK_OUTCOME: BLOCKED\n",
+    ],
+)
+def test_v1_task_outcome_reference_footer_stays_fail_closed(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    state = load_state()
+    output = tmp_path / "output.md"
+    fixture = REFERENCE_FOOTER_FIXTURE.read_text(encoding="utf-8")
+    output.write_text(f"{fixture}{suffix}", encoding="utf-8")
+
+    assert state.classify_task_outcome(
+        output,
+        contract="v1",
+        transport="devspace",
+    ) == "unknown"
+
+
+def test_v1_task_outcome_rejects_multiline_http_definition_after_marker(
+    tmp_path: Path,
+) -> None:
+    state = load_state()
+    output = tmp_path / "output.md"
+    output.write_text(
+        "TASK_OUTCOME: NOT_EXECUTED\n"
+        "[1]: https://example.com/a\n"
+        "    continued definition line\n",
+        encoding="utf-8",
+    )
+
+    assert state.classify_task_outcome(
+        output,
+        contract="v1",
+        transport="devspace",
+    ) == "unknown"
+
+
+def test_pro_attachment_output_is_never_marker_classified(tmp_path: Path) -> None:
+    state = load_state()
+    output = tmp_path / "output.md"
+    output.write_text(
+        "TASK_OUTCOME: EXECUTED\n",
+        encoding="utf-8",
+    )
+
+    assert state.classify_task_outcome(
+        output,
+        contract="legacy",
+        transport="pro-attachment-only",
+    ) == "not_applicable"
 
 
 def manifest(tmp_path: Path, mission_path: Path | str, **extra) -> Path:
