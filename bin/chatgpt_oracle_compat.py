@@ -315,12 +315,22 @@ PATCHES_0172 = {
     "dist/src/browser/actions/thinkingTime.js": {
         "patch": "thinkingTime.strict.patch",
         "pristine": "303d33ebe915b27407ca22ec0da1d18729464ce50417f405ddb628c31f6fb867",
-        "patched": "9583e9b4f56661e1bfe87def1ffb44f08058eba356b87525ccb099b175e90d06",
+        "patched": "ba5cf86ec7136a0e1da824b7efa2155c76c32cb16bc838b8dc1e70134b25e872",
         "legacy_patched": [
-            # Deployed 1.8.0 level before ChatGPT moved the visible Power
+            # Deployed 1.8.0 levels before ChatGPT moved the visible Power
             # slider beside the Advanced subtree within the same picker menu.
             "91c5d356a597fbf1a8e08cde922fd468a94f8cd3a9e441d7534fb7877a117828",
+            "9583e9b4f56661e1bfe87def1ffb44f08058eba356b87525ccb099b175e90d06",
+            "fac4926083c107d1ed02781ade102995d8003a842a4c92a170c8d5ee01375331",
         ],
+        "legacy_patches": {
+            "91c5d356a597fbf1a8e08cde922fd468a94f8cd3a9e441d7534fb7877a117828":
+                "thinkingTime.strict.pre-picker-menu-scope.patch",
+            "9583e9b4f56661e1bfe87def1ffb44f08058eba356b87525ccb099b175e90d06":
+                "thinkingTime.strict.pre-picker-button-menu-scope.patch",
+            "fac4926083c107d1ed02781ade102995d8003a842a4c92a170c8d5ee01375331":
+                "thinkingTime.strict.pre-picker-containment-proof.patch",
+        },
         "legacy_patch": "thinkingTime.strict.pre-picker-menu-scope.patch",
     },
 }

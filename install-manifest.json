@@ -64,6 +64,8 @@
     "bin/oracle-compat/0.17.2/profileCopy.patch",
     "bin/oracle-compat/0.17.2/promptComposer.patch",
     "bin/oracle-compat/0.17.2/recoverConversation.patch",
+    "bin/oracle-compat/0.17.2/thinkingTime.strict.pre-picker-button-menu-scope.patch",
+    "bin/oracle-compat/0.17.2/thinkingTime.strict.pre-picker-containment-proof.patch",
     "bin/oracle-compat/0.17.2/thinkingTime.strict.pre-picker-menu-scope.patch",
     "bin/oracle-compat/0.17.2/thinkingTime.strict.patch",
     "bin/chatgpt_oracle_state.py",

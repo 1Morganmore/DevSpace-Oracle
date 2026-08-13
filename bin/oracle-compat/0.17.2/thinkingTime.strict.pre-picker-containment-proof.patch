@@ -1,6 +1,6 @@
 --- a/dist/src/browser/actions/thinkingTime.js
 +++ b/dist/src/browser/actions/thinkingTime.js
-@@ -36,6 +36,90 @@
+@@ -36,6 +36,86 @@
      // own, independently of the legacy Pro-model + "extended" combination.
      const strictProEffort = level === "pro" ||
          ((targetModelKind === "pro" || observedModelKind === "pro") && level === "extended");
@@ -45,11 +45,7 @@
 +                const boundProofScopes = (button) => {
 +                    const controlled = pickerRoots(button);
 +                    const buttonMenu = button?.closest?.('[role="menu"]');
-+                    const ownedControlled = controlled.filter((root) =>
-+                        buttonMenu?.contains?.(root));
-+                    if (buttonMenu && ownedControlled.length && visible(buttonMenu)) {
-+                        return [buttonMenu];
-+                    }
++                    if (controlled.length && buttonMenu && visible(buttonMenu)) return [buttonMenu];
 +                    return controlled.map((root) => {
 +                        const menu = root?.matches?.('[role="menu"]') ? root :
 +                            root?.closest?.('[role="menu"]');
@@ -91,7 +87,7 @@
      switch (result?.status) {
          case "already-selected":
              logger(formatBrowserThinkingLog(`${result.label ?? capitalizedLevel} (already selected)`));
-@@ -56,9 +140,8 @@
+@@ -56,9 +136,8 @@
                      ? ` for ${targetModelKind}`
                      : "";
              const message = `Thinking time: ${result.status.replaceAll("-", " ")}${kindHint} (requested ${capitalizedLevel})`;
@@ -103,7 +99,7 @@
              }
              // "selection-unverified" is the one status here that already dispatched a
              // click, so the effort may or may not have moved. Every other status left
-@@ -72,9 +155,8 @@
+@@ -72,9 +151,8 @@
          default: {
              await logDomFailure(Runtime, logger, "thinking-time-unknown");
              logPickerDiagnostic(result, logger);
@@ -115,7 +111,7 @@
              }
              logger(formatBrowserThinkingLog(`unknown outcome selecting ${capitalizedLevel}; continuing with ChatGPT default.`));
              return;
-@@ -380,12 +462,134 @@
+@@ -380,12 +458,131 @@
        // 'intelligen' matches both "Intelligence" and German "Intelligenz".
        return normalize(label?.textContent ?? '').includes('intelligen');
      };
@@ -170,10 +166,7 @@
 +        .map((id) => document.getElementById(id))
 +        .filter(isPowerProofVisible);
 +      const buttonMenu = modelButton?.closest?.('[role="menu"]');
-+      const ownedControlledRoots = controlledRoots.filter((root) =>
-+        buttonMenu?.contains?.(root));
-+      if (buttonMenu && ownedControlledRoots.length &&
-+          isPowerProofVisible(buttonMenu)) {
++      if (controlledRoots.length && buttonMenu && isPowerProofVisible(buttonMenu)) {
 +        return [buttonMenu];
 +      }
 +      return controlledRoots.map((root) => {
@@ -256,7 +249,7 @@
      const findOptionInMenu = (menu, modelKindOverride = null) => {
        // Container controls reveal other controls; they are not tiers you can pick.
        // Two shapes exist and both can collide with a tier label: a submenu opener
-@@ -402,6 +606,14 @@
+@@ -402,6 +599,14 @@
          (item) => !isContainerControl(item),
        );
        const modelKind = modelKindOverride || effectiveTargetModelKind();
@@ -271,7 +264,7 @@
        if (modelKind === 'pro') {
          // GPT-5.6's unified Intelligence picker exposes Pro as the highest
          // effort radio directly. It no longer has a nested "Pro Extended"
-@@ -605,27 +817,31 @@
+@@ -605,27 +810,31 @@
            hasToken(pillLabel, 'pro') ||
            currentEffortPillMatchesTarget(trigger, triggerModelKind)
          ) {
@@ -311,7 +304,7 @@
        }
  
        const reopenTrigger = freshComposerTrigger(trigger) || trigger;
-@@ -637,12 +853,14 @@
+@@ -637,12 +846,14 @@
        while (performance.now() < deadline) {
          const selected = findOption();
          if (selected && optionIsSelected(selected)) {

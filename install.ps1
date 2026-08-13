@@ -44,7 +44,7 @@ function Copy-FileDurable([string]$Source,[string]$Destination){
   }
 }
 function Write-JsonDurable([string]$Path,$Value){
-  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path)|Out-Null;$temporary="$Path.$([guid]::NewGuid().ToString('N')).tmp"
+  $directory=Split-Path -Parent $Path;New-Item -ItemType Directory -Force -Path $directory|Out-Null;$temporary=Join-Path $directory ".codexpro-$([guid]::NewGuid().ToString('N')).tmp"
   try{[IO.File]::WriteAllText($temporary,($Value|ConvertTo-Json -Depth 12),[Text.UTF8Encoding]::new($false));$stream=[IO.File]::Open($temporary,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);try{$stream.Flush($true)}finally{$stream.Dispose()};Copy-FileDurable $temporary $Path}finally{if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force}}
 }
 function Test-PathEqual([string]$Left,[string]$Right){if([string]::IsNullOrWhiteSpace($Left)-or[string]::IsNullOrWhiteSpace($Right)){return $false};([IO.Path]::GetFullPath($Left)).Equals([IO.Path]::GetFullPath($Right),[StringComparison]::OrdinalIgnoreCase)}
@@ -167,7 +167,7 @@ function Get-ActiveOrUncertainLegacyRuns([string]$Root){
 }
 function Get-PreviousReceipt([string]$Root){
   $receiptRoot=Join-Path $Root 'receipts';if(!(Test-Path -LiteralPath $receiptRoot)){return $null}
-  $valid=@();$candidates=@()
+  $valid=@();$candidates=@();$nodes=@{};$candidateKeys=@{}
   foreach($file in @(Get-ChildItem -LiteralPath $receiptRoot -Filter 'codexpro-automation-*.json' -File -Force|Sort-Object FullName)){
     try{
       if($file.LinkType){continue};$value=Get-Content -LiteralPath $file.FullName -Raw|ConvertFrom-Json
@@ -178,20 +178,40 @@ function Get-PreviousReceipt([string]$Root){
         $wal=Get-Content -LiteralPath ([string]$value.wal) -Raw|ConvertFrom-Json;Assert-InstallWal $Root $wal ([string]$value.wal)
         if($wal.status -ne 'COMPLETE' -or !(Test-PathEqual ([string]$wal.receipt) $file.FullName)){continue}
       }
-      $candidate=@{path=$file.FullName;value=$value};$valid+=@($candidate);$owns=$true
+      $key=([IO.Path]::GetFullPath($file.FullName)).ToLowerInvariant();$previousKey=$null
+      if($value.PSObject.Properties.Name -contains 'previous_receipt'){
+        $previousPath=[string]$value.previous_receipt
+        if(![string]::IsNullOrWhiteSpace($previousPath)){$previousKey=([IO.Path]::GetFullPath($previousPath)).ToLowerInvariant()}
+      }
+      $candidate=@{path=$file.FullName;value=$value;key=$key;previous_key=$previousKey};$valid+=@($candidate);$nodes[$key]=$candidate;$owns=$true
       foreach($record in @($value.files)){
         try{$destination=Get-SafeChild $Root ([string]$record.path)}catch{$owns=$false;break}
         if($record.action -eq 'removed'){if(Test-Path -LiteralPath $destination){$owns=$false;break};continue}
         if(@('created','overwritten') -notcontains [string]$record.action -or !(Test-Path -LiteralPath $destination -PathType Leaf) -or (Get-Item -LiteralPath $destination -Force).LinkType -or (Get-Hash $destination)-ne [string]$record.installed_sha256){$owns=$false;break}
       }
-      if($owns){$candidates+=@($candidate)}
+      if($owns){$candidates+=@($candidate);$candidateKeys[$key]=$true}
     }catch{continue}
   }
-  if($candidates.Count -gt 1){throw ('INSTALL_UPGRADE_AMBIGUOUS_RECEIPT: '+(@($candidates.path)|ConvertTo-Json -Compress))}
-  if($candidates.Count -eq 1){return $candidates[0]}
-  if($valid.Count -gt 1){throw ('INSTALL_UPGRADE_AMBIGUOUS_RECEIPT: '+(@($valid.path)|ConvertTo-Json -Compress))}
-  if($valid.Count -eq 1){return $valid[0]}
-  $null
+  if(!$valid.Count){return $null}
+  $referenced=@{}
+  foreach($node in $valid){if($node.previous_key -and $nodes.ContainsKey($node.previous_key)){$referenced[$node.previous_key]=$true}}
+  $heads=@($valid|Where-Object{!$referenced.ContainsKey($_.key)})
+  $visited=@{};$owningBranches=@()
+  foreach($head in $heads){
+    $seen=@{};$node=$head;$owner=$null
+    while($node){
+      if($seen.ContainsKey($node.key) -or $visited.ContainsKey($node.key)){throw ('INSTALL_UPGRADE_AMBIGUOUS_RECEIPT: '+(@($head.path,$node.path)|ConvertTo-Json -Compress))}
+      $seen[$node.key]=$true;$visited[$node.key]=$true
+      if(!$owner -and $candidateKeys.ContainsKey($node.key)){$owner=$node}
+      $node=if($node.previous_key -and $nodes.ContainsKey($node.previous_key)){$nodes[$node.previous_key]}else{$null}
+    }
+    if($owner){$owningBranches+=@(@{owner=$owner;head=$head})}
+  }
+  if($visited.Count -ne $valid.Count){$unvisited=@($valid|Where-Object{!$visited.ContainsKey($_.key)}|ForEach-Object{$_.path});throw ('INSTALL_UPGRADE_AMBIGUOUS_RECEIPT: '+($unvisited|ConvertTo-Json -Compress))}
+  if($owningBranches.Count -eq 1){$branch=$owningBranches[0];return @{path=$branch.owner.path;value=$branch.owner.value;chain_head_path=$branch.head.path}}
+  if($owningBranches.Count -gt 1){throw ('INSTALL_UPGRADE_AMBIGUOUS_RECEIPT: '+(@($owningBranches|ForEach-Object{$_.head.path})|ConvertTo-Json -Compress))}
+  if($valid.Count -eq 1){return @{path=$valid[0].path;value=$valid[0].value;chain_head_path=$valid[0].path}}
+  throw ('INSTALL_UPGRADE_AMBIGUOUS_RECEIPT: '+(@($heads.path)|ConvertTo-Json -Compress))
 }
 function Get-RemovalPlans([string]$Root,$Previous,[string[]]$CurrentFiles){
   if(!$Previous){return @()};$current=@{};foreach($path in $CurrentFiles){$current[$path]=$true}
@@ -300,7 +320,7 @@ try{
  if(!$installMutexAcquired){throw "INSTALL_ALREADY_RUNNING: another installer owns CODEX_HOME $HomeRoot"}
  if($abandonedInstallMutex){"Recovered abandoned install lock for CODEX_HOME: $HomeRoot"}
  Resume-PendingInstallTransactions $HomeRoot
- $previous=Get-PreviousReceipt $HomeRoot;$removalPlans=@(Get-RemovalPlans $HomeRoot $previous $Files)
+ $previous=Get-PreviousReceipt $HomeRoot;$previousReceiptPath=if($previous){$previous.chain_head_path}else{$null};$removalPlans=@(Get-RemovalPlans $HomeRoot $previous $Files)
  if($removalPlans.Count){$legacyRuns=@(Get-ActiveOrUncertainLegacyRuns $HomeRoot);if($legacyRuns.Count){throw ('INSTALL_UPGRADE_ACTIVE_LEGACY_RUN: '+($legacyRuns|ConvertTo-Json -Depth 5 -Compress))}}
  foreach($relative in $Files){$source=Get-SafeChild $RepoRoot $relative;$stage=Get-SafeChild $StageRoot $relative;New-Item -ItemType Directory -Force -Path (Split-Path -Parent $stage)|Out-Null;Copy-FileDurable $source $stage;if((Get-Hash $source)-ne(Get-Hash $stage)){throw "staging hash verification failed: $relative"}}
  New-Item -ItemType Directory -Force -Path $ReceiptRoot|Out-Null;$receipt=Get-SafeChild $ReceiptRoot "codexpro-automation-$Stamp-$Nonce.json"
@@ -327,7 +347,7 @@ try{
   Write-JsonDurable $replacementPath ([ordered]@{schema='codexpro.install-replacement/v1';path=$relative;action=$action;installed_sha256=$record.installed_sha256;backup_sha256=$backupHash;mutated_at=[DateTime]::UtcNow.ToString('o')});$record.phase='REPLACEMENT_RECEIPT_DURABLE';$record.transitions+=@('REPLACEMENT_RECEIPT_DURABLE');Write-WalDurable $HomeRoot $journalPath $journal;Invoke-InstallFault 'AFTER_REPLACEMENT_RECEIPT'
   $record.phase='COMPLETE';$record.transitions+=@('COMPLETE');Write-WalDurable $HomeRoot $journalPath $journal;$receiptRecord=[ordered]@{path=$relative;action=$action;installed_sha256=$record.installed_sha256;backup_sha256=$backupHash};$records+=$receiptRecord;$stepIndex++
  }
- Write-JsonDurable $receipt ([ordered]@{schema='codexpro.install-receipt/v4';transaction_id=$TransactionId;installed_at=[DateTime]::UtcNow.ToString('o');manifest_version=$Manifest.version;backup=$BackupRoot;files=$records;previous_receipt=$(if($previous){$previous.path}else{$null});wal=$journalPath})
+ Write-JsonDurable $receipt ([ordered]@{schema='codexpro.install-receipt/v4';transaction_id=$TransactionId;installed_at=[DateTime]::UtcNow.ToString('o');manifest_version=$Manifest.version;backup=$BackupRoot;files=$records;previous_receipt=$previousReceiptPath;wal=$journalPath})
  $receiptReadback=Get-Content -LiteralPath $receipt -Raw|ConvertFrom-Json
  Assert-ReceiptBinding $HomeRoot $journal $receiptReadback
  Invoke-InstallFault 'AFTER_INSTALL_RECEIPT'

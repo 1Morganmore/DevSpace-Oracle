@@ -344,6 +344,8 @@ def run_gpt56_0172_advanced_owner_cases(tmp_path: Path) -> dict[str, dict[str, i
         {"label": "power4-unrelated", "level": "extra-high", "power": 3, "unrelatedPower": 4},
         {"label": "live-sibling-slider", "level": "heavy", "power": 5, "controlledSubtree": True},
         {"label": "extra-high-sibling-slider", "level": "extra-high", "power": 4, "controlledSubtree": True},
+        {"label": "cross-menu-controlled-root", "level": "heavy", "power": 5, "crossMenuControl": True},
+        {"label": "nested-controlled-menu", "level": "heavy", "power": 5, "nestedControlledMenu": True},
     ])
     harness = """
 const scenarios = SCENARIOS;
@@ -392,22 +394,31 @@ const run = async (scenario) => {
   });
   const effortMenu = new FakeNode('menu', '', { id: 'effort-menu' });
   const splitRoot = new FakeNode('split', '', { id: 'picker-split' });
-  const controlledRoot = scenario.controlledSubtree
-    ? new FakeNode('controlled', '', { id: 'picker-controlled' })
-    : owner;
+  const controlledRoot = scenario.controlledSubtree || scenario.nestedControlledMenu
+    ? new FakeNode('controlled', '', {
+        id: 'picker-controlled',
+        role: scenario.nestedControlledMenu ? 'menu' : null,
+      })
+    : scenario.crossMenuControl ? splitRoot : owner;
   const unrelatedRoot = new FakeNode('unrelated', '', { id: 'picker-unrelated' });
   owner.parentElement = page;
   splitRoot.parentElement = page;
   unrelatedRoot.parentElement = page;
-  if (controlledRoot !== owner) controlledRoot.parentElement = owner;
+  if (controlledRoot !== owner && controlledRoot !== splitRoot) {
+    controlledRoot.parentElement = owner;
+  }
   effortMenu.parentElement = page;
   const pill = new FakeNode('pill', effort, {
     'aria-label': effort,
     'aria-expanded': 'true',
-    'aria-controls': scenario.controlledSubtree ? 'picker-controlled' : 'picker-owner',
+    'aria-controls': scenario.controlledSubtree || scenario.nestedControlledMenu
+      ? 'picker-controlled'
+      : scenario.crossMenuControl ? 'picker-split' : 'picker-owner',
     'data-testid': 'model-button',
   });
-  pill.parentElement = page;
+  pill.parentElement = scenario.crossMenuControl || scenario.nestedControlledMenu
+    ? owner
+    : page;
   const sliderAttrs = { 'aria-valuenow': String(scenario.power) };
   if (scenario.ariaHidden) sliderAttrs['aria-hidden'] = 'true';
   const ownerSlider = new FakeNode('slider', `Power ${scenario.power} of 5 ${effort}`, sliderAttrs);
@@ -529,6 +540,7 @@ def test_oracle_0172_generated_advanced_owner_proof_is_stable_and_bound(
     assert results["power4-owned"] == {"status": "already-selected", "observations": 2}
     assert results["live-sibling-slider"] == {"status": "already-selected", "observations": 2}
     assert results["extra-high-sibling-slider"] == {"status": "already-selected", "observations": 2}
+    assert results["nested-controlled-menu"] == {"status": "already-selected", "observations": 2}
     for label in (
         "ancestor-display-none",
         "ancestor-opacity-zero",
@@ -536,6 +548,7 @@ def test_oracle_0172_generated_advanced_owner_proof_is_stable_and_bound(
         "split-picker",
         "one-observation-then-lost",
         "power4-unrelated",
+        "cross-menu-controlled-root",
     ):
         assert results[label]["status"] == "selection-unverified"
 
@@ -2173,13 +2186,27 @@ def test_oracle_0172_has_exact_hash_gated_patches_and_preserves_0171_recovery(
         "dist/src/browser/index.js": ("335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11", "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895"),
         "dist/src/browser/actions/assistantResponse.js": ("0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d", "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4"),
         "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96"),
-        "dist/src/browser/actions/thinkingTime.js": ("303d33ebe915b27407ca22ec0da1d18729464ce50417f405ddb628c31f6fb867", "9583e9b4f56661e1bfe87def1ffb44f08058eba356b87525ccb099b175e90d06"),
+        "dist/src/browser/actions/thinkingTime.js": ("303d33ebe915b27407ca22ec0da1d18729464ce50417f405ddb628c31f6fb867", "ba5cf86ec7136a0e1da824b7efa2155c76c32cb16bc838b8dc1e70134b25e872"),
     }
     assert all((compat.patch_root("0.17.2") / value["patch"]).is_file() for value in contracts.values())
     thinking_contract = contracts["dist/src/browser/actions/thinkingTime.js"]
     assert thinking_contract["legacy_patched"] == [
-        "91c5d356a597fbf1a8e08cde922fd468a94f8cd3a9e441d7534fb7877a117828"
+        "91c5d356a597fbf1a8e08cde922fd468a94f8cd3a9e441d7534fb7877a117828",
+        "9583e9b4f56661e1bfe87def1ffb44f08058eba356b87525ccb099b175e90d06",
+        "fac4926083c107d1ed02781ade102995d8003a842a4c92a170c8d5ee01375331",
     ]
+    assert thinking_contract["legacy_patches"] == {
+        "91c5d356a597fbf1a8e08cde922fd468a94f8cd3a9e441d7534fb7877a117828":
+            "thinkingTime.strict.pre-picker-menu-scope.patch",
+        "9583e9b4f56661e1bfe87def1ffb44f08058eba356b87525ccb099b175e90d06":
+            "thinkingTime.strict.pre-picker-button-menu-scope.patch",
+        "fac4926083c107d1ed02781ade102995d8003a842a4c92a170c8d5ee01375331":
+            "thinkingTime.strict.pre-picker-containment-proof.patch",
+    }
+    assert all(
+        (compat.patch_root("0.17.2") / patch_name).is_file()
+        for patch_name in thinking_contract["legacy_patches"].values()
+    )
     assert thinking_contract["legacy_patch"] == "thinkingTime.strict.pre-picker-menu-scope.patch"
     assert (compat.patch_root("0.17.2") / thinking_contract["legacy_patch"]).is_file()
 
@@ -2211,25 +2238,30 @@ def test_oracle_0172_has_exact_hash_gated_patches_and_preserves_0171_recovery(
     assert "selectEffortFromAdvancedSubmenu" in source
     assert "collectGpt56PowerProofDiagnostic" in source
     assert "consecutive >= 2" in source
-    legacy_package = tmp_path / "legacy-package"
-    legacy_target = legacy_package / relative
-    legacy_target.parent.mkdir(parents=True)
-    legacy_target.write_bytes(PRISTINE_THINKING_TIME_0172)
-    (legacy_package / "package.json").write_text('{"version":"0.17.2"}', encoding="utf-8")
-    compat._apply_patch(
-        legacy_package,
-        compat.patch_root("0.17.2") / thinking_contract["legacy_patch"],
-    )
-    assert digest(legacy_target.read_bytes()) == thinking_contract["legacy_patched"][0]
+    for index, (legacy_hash, legacy_patch) in enumerate(
+        thinking_contract["legacy_patches"].items()
+    ):
+        legacy_package = tmp_path / f"legacy-package-{index}"
+        legacy_target = legacy_package / relative
+        legacy_target.parent.mkdir(parents=True)
+        legacy_target.write_bytes(PRISTINE_THINKING_TIME_0172)
+        (legacy_package / "package.json").write_text(
+            '{"version":"0.17.2"}', encoding="utf-8"
+        )
+        compat._apply_patch(
+            legacy_package,
+            compat.patch_root("0.17.2") / legacy_patch,
+        )
+        assert digest(legacy_target.read_bytes()) == legacy_hash
 
-    migrated = compat.ensure_oracle_compatibility(
-        "oracle 0.17.2",
-        package_root=legacy_package,
-        backup_root=tmp_path / "legacy-backup",
-    )
+        migrated = compat.ensure_oracle_compatibility(
+            "oracle 0.17.2",
+            package_root=legacy_package,
+            backup_root=tmp_path / f"legacy-backup-{index}",
+        )
 
-    assert migrated["changed"] == [str(relative).replace("\\", "/")]
-    assert digest(legacy_target.read_bytes()) == thinking_contract["patched"]
+        assert migrated["changed"] == [str(relative).replace("\\", "/")]
+        assert digest(legacy_target.read_bytes()) == thinking_contract["patched"]
     assert old["patched"] == "c973d2801a75bc1e37526184ba257d47ae3994185776107fca60158f9f2526d8"
     assert old["legacy_patches"]["01ad2aca046895140729866ab5da3b0e7cfd92a00618d61f1d4b9b4cf36365eb"] == (
         "thinkingTime.strict.pre-coherent-picker-proof.patch"
