@@ -170,7 +170,9 @@ def test_doctor_orders_local_funnel_public_and_manual_failure_branch(tmp_path: P
         config_path=config_path,
     )
     assert seen == [current.local_health_url, current.public_health_url]
-    assert report["next_action"] == "MANUAL_CHATGPT_REGISTRATION_CHECK"
+    assert report["next_action"] == "POST_REGISTER_REFRESH_OR_EXTERNAL_APP_CHECK"
+    assert "run post-register once" in report["message"]
+    assert "do not automate or repeat app registration" in report["message"]
     assert report["registration_url"] == current.registration_url
     assert report["config"] == {
         "ok": True,
@@ -580,3 +582,280 @@ def test_setup_registers_login_autostart_and_serve_reapplies_compat(
         module.devspace_compat_argv(),
         module.devspace_serve_argv(),
     ]
+
+
+def test_post_register_always_recycles_service_and_preserves_oauth_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, current = config(tmp_path)
+    bash = tmp_path / "bash.exe"
+    bash.write_text("", encoding="utf-8")
+    monkeypatch.setenv("DEVSPACE_GIT_BASH", str(bash))
+    calls: list[list[str]] = []
+    launches: list[list[str]] = []
+
+    class Response:
+        status = 200
+
+        def read(self, limit):
+            return b'{"ok":true,"name":"devspace"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def runner(argv, **kwargs):
+        calls.append(list(argv))
+        if argv == ["tailscale", "funnel", "status", "--json"]:
+            status_reads = sum(call == ["tailscale", "funnel", "status", "--json"] for call in calls)
+            if status_reads == 2:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({"Web": {}}), stderr="")
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({
+                    "Web": {
+                        current.hostname + ":443": {
+                            "Handlers": {"/": {"Proxy": f"http://127.0.0.1:{current.local_port}"}}
+                        },
+                        "other.ts.net:8443": {"Proxy": "http://127.0.0.1:9000"},
+                    }
+                }),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    report = module.refresh_after_app_registration(
+        current,
+        opener=lambda *args, **kwargs: Response(),
+        runner=runner,
+        popen_factory=lambda argv, **kwargs: launches.append(list(argv)),
+    )
+
+    assert report["ok"] is True
+    assert report["service_restarted"] is True
+    assert report["credentials_preserved"] is True
+    assert report["exact_funnel_recycled"] is True
+    assert report["funnel_recycle_scope"] == "https:443"
+    assert report["next_action"] == "VERIFY_REGISTERED_CHATGPT_APP_WITH_ORACLE"
+    assert "different connector" in report["verification_boundary"]
+    assert calls[0] == module.devspace_compat_argv()
+    assert calls[1] == module.devspace_compat_argv(stop_exact_service=True)
+    assert calls[2] == module.devspace_compat_argv(confirm_restarted=True)
+    assert ["tailscale", "funnel", "--bg", "--https=443", "off"] in calls
+    assert [
+        "tailscale", "funnel", "--bg", "--https=443", f"http://127.0.0.1:{current.local_port}"
+    ] in calls
+    assert launches == [module.devspace_serve_argv()]
+
+
+def test_post_register_preserves_shared_funnel_port(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module, current = config(tmp_path)
+    bash = tmp_path / "bash.exe"
+    bash.write_text("", encoding="utf-8")
+    monkeypatch.setenv("DEVSPACE_GIT_BASH", str(bash))
+    calls: list[list[str]] = []
+
+    class Response:
+        status = 200
+
+        def read(self, limit):
+            return b'{"ok":true,"name":"devspace"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def runner(argv, **kwargs):
+        calls.append(list(argv))
+        if argv == ["tailscale", "funnel", "status", "--json"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({
+                    "Web": {
+                        current.hostname + ":443": {
+                            "Handlers": {
+                                "/": {"Proxy": f"http://127.0.0.1:{current.local_port}"},
+                                "/other": {"Proxy": "http://127.0.0.1:9000"},
+                            }
+                        }
+                    }
+                }),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with pytest.raises(module.SetupError, match="TAILSCALE_FUNNEL_PORT_IN_USE"):
+        module.refresh_after_app_registration(
+            current,
+            opener=lambda *args, **kwargs: Response(),
+            runner=runner,
+            popen_factory=lambda *args, **kwargs: None,
+        )
+    assert not any(call[-1:] == ["off"] for call in calls)
+
+
+def test_post_register_conflicting_funnel_fails_closed_without_off(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, current = config(tmp_path)
+    bash = tmp_path / "bash.exe"
+    bash.write_text("", encoding="utf-8")
+    monkeypatch.setenv("DEVSPACE_GIT_BASH", str(bash))
+    calls: list[list[str]] = []
+
+    class Response:
+        status = 200
+
+        def read(self, limit):
+            return b'{"ok":true,"name":"devspace"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def runner(argv, **kwargs):
+        calls.append(list(argv))
+        if argv == ["tailscale", "funnel", "status", "--json"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({
+                    "Web": {current.hostname + ":443": {"Proxy": "http://127.0.0.1:9999"}}
+                }),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with pytest.raises(module.SetupError, match="TAILSCALE_FUNNEL_PORT_IN_USE"):
+        module.refresh_after_app_registration(
+            current,
+            opener=lambda *args, **kwargs: Response(),
+            runner=runner,
+            popen_factory=lambda *args, **kwargs: None,
+        )
+    assert not any(call[-1:] == ["off"] for call in calls)
+
+
+def test_parser_exposes_explicit_post_register_command() -> None:
+    module = load_module()
+    parsed = module.parser().parse_args([
+        "post-register",
+        "--root",
+        str(Path.cwd()),
+        "--hostname",
+        "device.tailnet.ts.net",
+    ])
+    assert parsed.command == "post-register"
+
+
+def test_persist_existing_setup_config_preserves_keys_and_reads_back(tmp_path: Path) -> None:
+    module = load_module()
+    existing = tmp_path / "existing"
+    requested = tmp_path / "오사카여행"
+    existing.mkdir()
+    requested.mkdir()
+    current = module.validate_config([str(existing), str(requested)], "device.tailnet.ts.net")
+    config_path = tmp_path / "config.json"
+    original = {
+        "host": "127.0.0.1",
+        "port": 9999,
+        "allowedRoots": [str(requested)],
+        "publicBaseUrl": "https://old.tailnet.ts.net",
+        "toolMode": "full",
+        "custom": "preserved",
+    }
+    config_path.write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
+
+    backup = module.persist_existing_setup_config(config_path, current)
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+
+    assert backup.is_file()
+    assert json.loads(backup.read_text(encoding="utf-8")) == original
+    assert persisted["allowedRoots"] == [str(existing.resolve()), str(requested.resolve())]
+    assert persisted["publicBaseUrl"] == "https://device.tailnet.ts.net"
+    assert persisted["port"] == current.local_port
+    assert persisted["toolMode"] == "full"
+    assert persisted["custom"] == "preserved"
+
+
+def test_apply_setup_skips_init_and_merges_existing_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module()
+    existing = tmp_path / "existing"
+    requested = tmp_path / "requested"
+    existing.mkdir()
+    requested.mkdir()
+    current = module.validate_config([str(existing), str(requested)], "device.tailnet.ts.net")
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "allowedRoots": [str(requested)],
+        "toolMode": "full",
+        "custom": "preserved",
+    }), encoding="utf-8")
+    bash = tmp_path / "bash.exe"
+    bash.write_text("", encoding="utf-8")
+    monkeypatch.setenv("DEVSPACE_GIT_BASH", str(bash))
+    calls: list[list[str]] = []
+
+    def runner(argv, **kwargs):
+        calls.append(list(argv))
+        if argv == ["tailscale", "funnel", "status", "--json"]:
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"Web": {}}), stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    module.apply_setup(
+        current,
+        runner=runner,
+        popen_factory=lambda *args, **kwargs: None,
+        config_path=config_path,
+    )
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["allowedRoots"] == [str(existing.resolve()), str(requested.resolve())]
+    assert persisted["toolMode"] == "full"
+    assert persisted["custom"] == "preserved"
+    assert not any("init" in call for call in calls)
+    assert calls[0] == ["tailscale", "funnel", "status", "--json"]
+    assert calls[1] == module.devspace_compat_argv()
+    assert calls[-1][0] == "reg.exe"
+
+
+def test_persist_existing_setup_config_fails_closed_on_symlink(tmp_path: Path) -> None:
+    module = load_module()
+    root = tmp_path / "project"
+    root.mkdir()
+    target = tmp_path / "real.json"
+    target.write_text(json.dumps({"allowedRoots": [str(root)]}), encoding="utf-8")
+    link = tmp_path / "config.json"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks are unavailable on this platform")
+    current = module.validate_config([str(root)], "device.tailnet.ts.net")
+
+    with pytest.raises(module.SetupError, match="DEVSPACE_CONFIG_SYMLINK_UNSUPPORTED"):
+        module.persist_existing_setup_config(link, current)
+    assert link.is_symlink()
+    assert json.loads(target.read_text(encoding="utf-8"))["allowedRoots"] == [str(root)]
+
+
+def test_persist_existing_setup_config_fails_closed_on_invalid_existing_json(tmp_path: Path) -> None:
+    module = load_module()
+    root = tmp_path / "project"
+    root.mkdir()
+    current = module.validate_config([str(root)], "device.tailnet.ts.net")
+    config_path = tmp_path / "config.json"
+    config_path.write_text("not-json", encoding="utf-8")
+
+    with pytest.raises(module.SetupError, match="DEVSPACE_CONFIG_INVALID"):
+        module.persist_existing_setup_config(config_path, current)
+    assert config_path.read_text(encoding="utf-8") == "not-json"

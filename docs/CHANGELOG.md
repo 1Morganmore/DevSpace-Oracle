@@ -5,6 +5,27 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
 
 ## 현재 릴리스
 
+### 1.8.1 DevSpace 등록 후 연결 안정화
+
+- 수동 ChatGPT 앱 등록·재연결 직후 기존 DevSpace 설정, Owner 자격, OAuth DB,
+  허용 루트와 Funnel 주소를 보존하면서 관리 서비스를 한 번 재순환하는 명시적
+  `post-register` CLI 단계를 추가했습니다. 등록 앱 검증은 일반(non-Pro) Oracle
+  `@codex` 읽기 검사로 분리하며, 자동 등록·재등록·반복 refresh는 하지
+  않습니다. doctor의 실패 분기는 일회 `post-register` 안내로 변경했습니다.
+- `post-register`는 먼저 로컬 `/healthz`의 정확한 DevSpace 신원을 확인한 뒤,
+  status가 정확한 host+HTTPS port의 단일 `/` handler이고 정확한
+  `http://127.0.0.1:<local_port>` proxy일 때만 scoped
+  `tailscale funnel --bg --https=<port> off`로 exclusive HTTPS 슬롯을
+  재순환하고 같은 target으로 재수립합니다. 전체 `tailscale funnel reset`은
+  사용하지 않으며, 같은 port의 추가 path handler·충돌 매핑·다른 port는 절대
+  제거하지 않고 충돌은 mutation 전에 fail-closed합니다. 재수립 후 공개
+  `/healthz`의 정확한 신원을 다시 확인합니다.
+- 기존 `%USERPROFILE%\.devspace\config.json`이 있으면 `setup --apply`가
+  interactive `devspace init`을 건너뛰고, 설정을 백업한 뒤 전체
+  `allowedRoots`를 atomic replace+readback으로 병합합니다. Owner/OAuth/기타
+  키는 보존하며, symlink나 invalid(JSON/단계) 설정은 mutation 없이
+  fail-closed합니다.
+
 ### 1.8.0 상위 런타임 갱신
 
 - 지원 Node.js 범위를 `>=24 <27`로 올리고 프로젝트 릴리스를 1.8.0으로

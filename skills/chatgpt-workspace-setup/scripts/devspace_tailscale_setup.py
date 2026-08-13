@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -186,6 +187,49 @@ def configure_roots(
     return result
 
 
+def persist_existing_setup_config(config_path: Path, config: SetupConfig) -> Path:
+    """Atomically merge the managed roots into an existing DevSpace config.
+
+    The existing config is backed up, then rewritten with the exact requested
+    root list while every other key (Owner/OAuth state, tool mode, unknown
+    fields) is preserved.  The staged bytes are parsed strictly before the
+    atomic replace, and the live file is read back afterwards.  Symlinked or
+    invalid configs fail closed without any mutation.
+    """
+    target = Path(config_path).expanduser()
+    if target.is_symlink():
+        raise SetupError("DEVSPACE_CONFIG_SYMLINK_UNSUPPORTED")
+    _, payload = load_devspace_config(target)
+    backup_path = target.with_name(f"{target.name}.bak-{time.time_ns()}")
+    shutil.copy2(target, backup_path)
+    payload.update(
+        {
+            "host": payload.get("host") or "127.0.0.1",
+            "port": config.local_port,
+            "allowedRoots": [str(root) for root in config.roots],
+            "publicBaseUrl": f"https://{config.hostname}",
+        }
+    )
+    expected_roots = [str(root) for root in config.roots]
+    temporary = target.with_name(f".{target.name}.tmp-{time.time_ns()}")
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        if os.name != "nt":
+            temporary.chmod(0o600)
+        # Parse the staged bytes strictly before replacing the live file.
+        load_devspace_config(temporary)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    _, readback = load_devspace_config(target)
+    if readback.get("allowedRoots") != expected_roots:
+        raise SetupError("DEVSPACE_ROOTS_READBACK_MISMATCH")
+    return backup_path
+
+
 def git_bash_path() -> Path:
     candidate = Path(os.environ.get("DEVSPACE_GIT_BASH") or r"C:\Program Files\Git\bin\bash.exe")
     if not candidate.is_file():
@@ -312,17 +356,24 @@ def apply_setup(
     *,
     runner: Callable[..., Any] = subprocess.run,
     popen_factory: Callable[..., Any] = subprocess.Popen,
+    config_path: Path | None = None,
 ) -> None:
-    # Init remains DevSpace's own interactive prompt so it can safely retain its
-    # Owner credential.  The root list/public origin are displayed before this call.
+    # Interactive init remains DevSpace's own prompt so it can safely retain its
+    # Owner credential.  An existing installation is never re-initialized:
+    # its config is backed up and merged atomically instead, preserving the
+    # Owner/OAuth state and every other key.  The root list/public origin are
+    # displayed before this call.
     slot = funnel_status(config, runner=runner, allow_absent=True)
     if slot.get("mapping") == "conflict":
         raise SetupError("TAILSCALE_FUNNEL_PORT_IN_USE")
-    run_checked(
-        bash_argv(["npx", "--yes", DEVSPACE_PACKAGE, "init"]),
-        runner=runner,
-        interactive=True,
-    )
+    if config_path is not None and config_path.exists():
+        persist_existing_setup_config(config_path, config)
+    else:
+        run_checked(
+            bash_argv(["npx", "--yes", DEVSPACE_PACKAGE, "init"]),
+            runner=runner,
+            interactive=True,
+        )
     run_checked(devspace_compat_argv(), runner=runner)
     run_checked(
         devspace_compat_argv(stop_exact_service=True, local_port=config.local_port),
@@ -433,24 +484,33 @@ def funnel_status(
         return {"ok": False, "error": "TAILSCALE_STATUS_JSON_INVALID"}
 
 
+def wait_for_local_service(
+    config: SetupConfig,
+    *,
+    opener: Callable[..., Any] = urllib.request.urlopen,
+) -> tuple[dict[str, Any], int]:
+    """Wait for the exact loopback DevSpace health identity; return last probe and attempts."""
+    last: dict[str, Any] = {"ok": False, "error": "DEVSPACE_LOCAL_SERVICE_NOT_READY"}
+    for index in range(1, LOCAL_HEALTH_ATTEMPTS + 1):
+        last = devspace_health_probe(
+            config.local_health_url,
+            opener=opener,
+            timeout=LOCAL_HEALTH_PROBE_TIMEOUT_SECONDS,
+        )
+        if last.get("ok"):
+            return last, index
+        if index < LOCAL_HEALTH_ATTEMPTS:
+            time.sleep(LOCAL_HEALTH_INTERVAL_SECONDS)
+    return last, LOCAL_HEALTH_ATTEMPTS
+
+
 def ensure_public_route(
     config: SetupConfig,
     *,
     opener: Callable[..., Any] = urllib.request.urlopen,
     runner: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
-    local: dict[str, Any] = {"ok": False}
-    attempts = 0
-    for attempts in range(1, LOCAL_HEALTH_ATTEMPTS + 1):
-        local = devspace_health_probe(
-            config.local_health_url,
-            opener=opener,
-            timeout=LOCAL_HEALTH_PROBE_TIMEOUT_SECONDS,
-        )
-        if local.get("ok"):
-            break
-        if attempts < LOCAL_HEALTH_ATTEMPTS:
-            time.sleep(LOCAL_HEALTH_INTERVAL_SECONDS)
+    local, attempts = wait_for_local_service(config, opener=opener)
     report: dict[str, Any] = {
         "ok": False,
         "created": False,
@@ -493,6 +553,101 @@ def ensure_public_route(
     if not public.get("ok"):
         return {**report, "next_action": "CHECK_PUBLIC_FUNNEL_ENDPOINT"}
     return {**report, "ok": True, "next_action": "READY"}
+
+
+def refresh_after_app_registration(
+    config: SetupConfig,
+    *,
+    opener: Callable[..., Any] = urllib.request.urlopen,
+    runner: Callable[..., Any] = subprocess.run,
+    popen_factory: Callable[..., Any] = subprocess.Popen,
+) -> dict[str, Any]:
+    """Recycle the managed server after manual ChatGPT OAuth registration.
+
+    DevSpace can leave a newly approved ChatGPT connector unable to create its
+    first tool session until the server is recycled.  This command is
+    deliberately explicit: it never opens ChatGPT settings and it preserves the
+    existing config, Owner credential, OAuth database, roots, and Funnel
+    hostname.
+    """
+    run_checked(devspace_compat_argv(), runner=runner)
+    run_checked(
+        devspace_compat_argv(stop_exact_service=True, local_port=config.local_port),
+        runner=runner,
+    )
+    launch_hidden(
+        devspace_serve_argv(),
+        popen_factory=popen_factory,
+    )
+    run_checked(
+        devspace_compat_argv(confirm_restarted=True, local_port=config.local_port),
+        runner=runner,
+    )
+    result = refresh_exact_public_route(config, opener=opener, runner=runner)
+    return {
+        **result,
+        "service_restarted": True,
+        "credentials_preserved": True,
+        "next_action": "VERIFY_REGISTERED_CHATGPT_APP_WITH_ORACLE",
+        "verification_boundary": (
+            "Use a fresh regular Oracle @codex read-only probe; Codex Desktop's "
+            "DevSpace plugin tools are a different connector and are not proof of "
+            "the manually registered ChatGPT app."
+        ),
+    }
+
+
+def _exclusive_exact_funnel_entry(config: SetupConfig, entry: Any) -> bool:
+    """Return true only for one root handler owned by this managed route."""
+    if not isinstance(entry, dict):
+        return False
+    handlers = entry.get("Handlers")
+    if not isinstance(handlers, dict) or set(handlers) != {"/"}:
+        return False
+    root = handlers.get("/")
+    if not isinstance(root, dict):
+        return False
+    proxy = str(root.get("Proxy") or "").rstrip("/").casefold()
+    expected = f"http://127.0.0.1:{config.local_port}".casefold()
+    return proxy == expected
+
+
+def refresh_exact_public_route(
+    config: SetupConfig,
+    *,
+    opener: Callable[..., Any] = urllib.request.urlopen,
+    runner: Callable[..., Any] = subprocess.run,
+) -> dict[str, Any]:
+    """Recycle only the exact managed HTTPS slot before reasserting it.
+
+    A matching local Funnel status can survive while its public relay path is
+    stale.  First require the exact local DevSpace ``/healthz`` identity; then
+    turn the slot off only when it is one ``/`` handler proxying exactly
+    ``http://127.0.0.1:<local_port>`` on the exact host and HTTPS port.  Never
+    use the global ``funnel reset`` here: it would erase unrelated ports.
+    Shared path handlers, conflicting mappings, and other ports are never
+    removed; any conflict fails closed before mutation.
+    """
+    local, _ = wait_for_local_service(config, opener=opener)
+    if not local.get("ok"):
+        raise SetupError("DEVSPACE_LOCAL_SERVICE_NOT_READY")
+    current = funnel_status(config, runner=runner, allow_absent=True)
+    if current.get("mapping") == "conflict":
+        raise SetupError("TAILSCALE_FUNNEL_PORT_IN_USE")
+    recycled = current.get("mapping") == "match" and _exclusive_exact_funnel_entry(
+        config, current.get("status")
+    )
+    if recycled:
+        run_checked(
+            ["tailscale", "funnel", "--bg", f"--https={config.public_port}", "off"],
+            runner=runner,
+        )
+    result = ensure_public_route(config, opener=opener, runner=runner)
+    return {
+        **result,
+        "exact_funnel_recycled": recycled,
+        "funnel_recycle_scope": f"https:{config.public_port}" if recycled else None,
+    }
 
 
 def doctor(
@@ -566,8 +721,13 @@ def doctor(
     if config_path is not None:
         report["config"] = config_evidence
     if public.get("ok") and chatgpt_call_failed:
-        report["next_action"] = "MANUAL_CHATGPT_REGISTRATION_CHECK"
-        report["message"] = "Public endpoint is healthy. Re-enter this URL manually in ChatGPT Developer Mode; do not automate re-registration."
+        report["next_action"] = "POST_REGISTER_REFRESH_OR_EXTERNAL_APP_CHECK"
+        report["message"] = (
+            "Public endpoint is healthy. If manual registration or reconnect just completed, "
+            "run post-register once and verify the registered app with a fresh regular Oracle "
+            "@codex read-only probe. Do not use Codex Desktop DevSpace plugin tools as proof, "
+            "and do not automate or repeat app registration."
+        )
     elif not public.get("ok"):
         report["next_action"] = "CHECK_PUBLIC_FUNNEL_ENDPOINT"
     else:
@@ -584,7 +744,7 @@ def parser() -> argparse.ArgumentParser:
     roots.add_argument("--dry-run", action="store_true")
     roots.add_argument("--apply", action="store_true")
     roots.add_argument("--restart", action="store_true", help="Restart the exact DevSpace service after applying")
-    for name in ("setup", "ensure", "doctor"):
+    for name in ("setup", "ensure", "doctor", "post-register"):
         command = sub.add_parser(name)
         command.add_argument("--root", action="append", default=[], help="Narrow allowed DevSpace root; repeat as needed")
         command.add_argument("--hostname", required=True, help="Tailscale MagicDNS hostname")
@@ -623,12 +783,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             plan = setup_plan(config)
             print(json.dumps(plan, ensure_ascii=False, indent=2))
             if args.apply:
-                apply_setup(config)
+                apply_setup(config, config_path=devspace_config_path())
             return 0
         if args.command == "ensure":
             report = ensure_public_route(config)
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0 if report["ok"] else 2
+        if args.command == "post-register":
+            report = refresh_after_app_registration(config)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return 0 if report.get("ok") else 2
         print(json.dumps(doctor(
             config,
             chatgpt_call_failed=args.chatgpt_call_failed,

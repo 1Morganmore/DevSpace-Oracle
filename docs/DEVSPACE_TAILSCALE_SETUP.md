@@ -18,6 +18,12 @@ python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py setup 
 
 After reviewing the plan, use `--apply`. It invokes `devspace init` through Git Bash, then starts `devspace serve` and configures a Tailscale HTTPS Funnel to the local default port (7676). DevSpace asks you to select roots and enter the public origin. Enter exactly the reviewed roots and `https://your-device.your-tailnet.ts.net`, without `/mcp`.
 
+If `%USERPROFILE%\.devspace\config.json` already exists (a previous
+installation), `--apply` never re-runs interactive init. It backs up that file
+and atomically merges the requested roots into it, preserving the Owner
+credential, OAuth state, and every other key; symlinked or invalid configs
+fail closed without any mutation.
+
 The helper pins DevSpace `1.0.7` and applies its exact hash-validated Windows
 compatibility patch before starting the service.
 
@@ -69,6 +75,30 @@ change, and requires the same exact identity through the public `/healthz`
 endpoint. It does not start DevSpace, change roots, register startup tasks, or
 touch ChatGPT settings or app registration.
 
+## Recycle after manual registration or reconnect
+
+After a manual first registration or requested reconnect, recycle the managed
+DevSpace process exactly once without changing its roots, Owner credential,
+OAuth database, or Funnel hostname:
+
+```powershell
+python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py post-register --root C:\projects\one --hostname your-device.your-tailnet.ts.net
+```
+
+`post-register` first requires the exact local DevSpace `/healthz` identity.
+It then recycles only the exclusive managed HTTPS slot: the slot is turned off
+with a scoped `tailscale funnel --bg --https=<port> off` only when it is a
+single `/` handler proxying exactly `http://127.0.0.1:<local_port>`, and is
+reasserted to the same target afterwards. It never uses the global
+`tailscale funnel reset` and never removes shared path handlers, conflicting
+mappings, or other ports — any conflict fails closed before mutation.
+
+Verify the registered app with a fresh regular, non-Pro Oracle `@codex`
+read-only probe that opens the exact project root and reads a small directory
+listing. Do not substitute Codex Desktop's built-in `DevSpace` plugin tools:
+they are a separate connector and do not validate the manually registered
+ChatGPT app. Never spend a Pro submission as the first connectivity probe.
+
 ## Manual ChatGPT registration
 
 Enable Developer Mode in ChatGPT and manually create the connector:
@@ -84,6 +114,6 @@ Approve the initial Owner-password page when DevSpace asks. This tooling never o
 python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py doctor --root C:\projects\one --hostname your-device.your-tailnet.ts.net
 ```
 
-Diagnosis checks the exact local DevSpace `/healthz` identity, then `tailscale funnel status --json`, then the exact public `/healthz` identity. If the endpoint is healthy but a ChatGPT tool call fails, keep the server running and re-check the same manual connector URL; do not automate deletion or re-registration.
+Diagnosis checks the exact local DevSpace `/healthz` identity, then `tailscale funnel status --json`, then the exact public `/healthz` identity. If the endpoint is healthy but a ChatGPT tool call fails just after manual registration or reconnect, run the explicit `post-register` refresh once and repeat only the regular read-only Oracle probe. If it still fails, keep the server running and report the same connector URL; do not automate deletion, re-registration, or repeated refreshes.
 
 Tailscale Funnel makes the endpoint public. It requires Tailnet permissions and uses the device's stable MagicDNS name. Review Tailscale's policy and exposure rules before `--apply`.

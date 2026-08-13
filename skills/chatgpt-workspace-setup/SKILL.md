@@ -25,6 +25,12 @@ python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py setup 
 
 `--apply` runs DevSpace through Git Bash without a visible Windows console, starts `devspace serve`, registers the per-user `DevSpace MCP Server` Windows login entry, and creates an HTTPS Funnel to `127.0.0.1:7676`. During `devspace init`, enter only the listed roots and the public origin `https://<hostname>` (without `/mcp`).
 
+For an existing installation, `--apply` backs up and atomically updates the
+non-secret DevSpace `config.json` (merging the requested roots) while
+preserving its other fields, so interactive init is skipped. A first
+installation still uses DevSpace's interactive initialization. Symlinked or
+invalid configs fail closed without any mutation.
+
 Managed `serve` launches set
 `DEVSPACE_OAUTH_SCOPES=devspace,offline_access`. DevSpace 1.0.7 uses that value
 in OAuth discovery and already issues refresh tokens. If an older app was
@@ -61,6 +67,23 @@ The only app information to enter manually in ChatGPT Developer Mode is:
 
 Never open ChatGPT settings, register/delete an app, change permissions, inspect app lists, select an app name, or press Tab in the ChatGPT UI.
 
+Immediately after a manual first registration or requested reconnect, recycle
+the managed DevSpace process exactly once while preserving its configuration,
+Owner credential, OAuth database, roots, and Funnel hostname:
+
+```powershell
+python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py post-register --root C:\projects\example --hostname your-device.your-tailnet.ts.net
+```
+
+`post-register` also recycles only the exclusive managed HTTPS port before
+reasserting the same Funnel target. It never uses the global `funnel reset`
+operation and preserves a port that has additional path handlers. Verify the
+registered app with a fresh **regular, non-Pro** Oracle `@codex` read-only
+probe that opens the exact project root and reads a small directory listing.
+Codex Desktop's built-in `DevSpace` plugin is a different connector; its tools
+cannot prove that the manually registered ChatGPT app works. A Pro submission
+must never be the first connectivity test.
+
 ## Diagnosis
 
 This is read-only and checks local DevSpace, confirms every requested root is
@@ -71,7 +94,11 @@ the public `/mcp` endpoint:
 python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py doctor --root C:\projects\one --hostname your-device.your-tailnet.ts.net
 ```
 
-If the public endpoint is healthy but a ChatGPT call still fails, report the same registration URL and stop. Do not re-register the app automatically.
+If the public endpoint is healthy but a ChatGPT call still fails immediately
+after a manual registration or reconnect, run `post-register` once and repeat
+only the regular read-only Oracle probe. If that still fails, report the same
+registration URL and stop. Do not re-register the app automatically or loop
+the refresh.
 
 ## Explicit Funnel repair
 
