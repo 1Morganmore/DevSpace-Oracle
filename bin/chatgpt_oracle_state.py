@@ -129,6 +129,12 @@ ORACLE_COPY_PROFILE_MANUAL_LOGIN_CONFLICT = (
 ORACLE_PROFILE_COPY_RSYNC_MISSING = (
     "--copy-profile requires rsync on PATH (spawn failed): spawn rsync ENOENT"
 )
+ORACLE_MANUAL_LOGIN_PROFILE_UNINITIALIZED_RE = re.compile(
+    r"(?m)^(?P<prefix>ERROR|User error \(browser-automation\)):\s+"
+    r"ChatGPT browser manual-login profile is not initialized\. "
+    r"Browser mode is using Oracle's private Chrome profile at (?P<profile>[^,\r\n]+), "
+    r"separate from your normal Chrome profile\. Run first-time setup, sign in there, then retry:"
+)
 ORACLE_NO_LIVE_TAB_MARKER = "No live ChatGPT tab matched session"
 ORACLE_NO_RECOVERABLE_URL_MARKER = (
     "session metadata has no recoverable ChatGPT conversation URL"
@@ -1868,6 +1874,144 @@ def proven_pre_submit_ui_failure(state_path: Path) -> dict[str, Any] | None:
     }
 
 
+def proven_pre_submit_manual_login_profile_uninitialized(
+    state_path: Path,
+) -> dict[str, Any] | None:
+    """Prove Oracle 0.17.1 stopped before opening its manual-login profile.
+
+    This is exact-recovery only: it recognizes one exact upstream 0.17.1
+    failure transcript for a run persisted with the current Pro
+    attachment-only manifest shape (noncopy profile, browser mode).  A
+    different version, transport, profile mode, artifact layout, extra output,
+    or any conversation URL remains submitted-unknown and keeps the project
+    lock.  Copy-profile runs cannot emit this error, so a persisted
+    ``copy_profile`` also fails closed.
+    """
+    state = load_state(state_path)
+    if str(state.get("session_authority") or "") not in {"pre_submit", "submitted_unknown"}:
+        return None
+    if state.get("terminal_harvested") is True or _state_has_conversation_url(state):
+        return None
+    profile = state.get("profile") if isinstance(state.get("profile"), dict) else {}
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
+    if (
+        str(state.get("mode") or "") != "browser"
+        or str(state.get("transport") or "").casefold() != "pro-attachment-only"
+        or state.get("app_name") is not None
+        or str(profile.get("model") or "").casefold() != "gpt-5.6-sol"
+        or str(profile.get("model_strategy") or "").casefold() != "select"
+        or str(profile.get("thinking_time") or "").casefold() != "heavy"
+        or str(profile.get("copy_profile") or "").strip()
+        or normalize_oracle_version(oracle.get("resolved_version")) != "0.17.1"
+        or not locator
+    ):
+        return None
+
+    run_dir = state_path.parent.resolve()
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    canonical = {
+        "output": run_dir / "output.md",
+        "stdout": run_dir / "stdout.log",
+        "stderr": run_dir / "stderr.log",
+        "transcript": run_dir / "transcript.md",
+    }
+    resolved: dict[str, Path] = {}
+    try:
+        for name, expected in canonical.items():
+            path = Path(str(artifacts.get(name) or ""))
+            if not path.is_absolute() or path.is_symlink() or path.resolve() != expected:
+                return None
+            resolved[name] = path
+        # The known failure never creates output.md.  Even an empty output file
+        # is treated as contradictory evidence rather than guessed away.
+        if resolved["output"].exists():
+            return None
+        stdout_bytes = resolved["stdout"].read_bytes()
+        stderr_bytes = resolved["stderr"].read_bytes()
+        transcript_bytes = resolved["transcript"].read_bytes()
+        stdout_text = stdout_bytes.decode("utf-8", errors="strict")
+        stderr_text = stderr_bytes.decode("utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if stderr_bytes or stderr_text or transcript_bytes != stdout_bytes:
+        return None
+    if _settlement_logs_have_conversation_url(state_path) or CHATGPT_CONVERSATION_URL_RE.search(
+        stdout_text
+    ):
+        return None
+
+    expected_profile = (Path.home() / ".oracle" / "browser-profile").resolve()
+    matches = list(ORACLE_MANUAL_LOGIN_PROFILE_UNINITIALIZED_RE.finditer(stdout_text))
+    if [match.group("prefix") for match in matches] != ["ERROR", "User error (browser-automation)"]:
+        return None
+    try:
+        if any(Path(match.group("profile")).resolve() != expected_profile for match in matches):
+            return None
+    except OSError:
+        return None
+
+    escaped_profile = str(expected_profile).replace("\\", "\\\\")
+    failure_tail = (
+        "ChatGPT browser manual-login profile is not initialized. "
+        f"Browser mode is using Oracle's private Chrome profile at {expected_profile}, "
+        "separate from your normal Chrome profile. Run first-time setup, sign in there, then retry: "
+        "oracle --engine browser --browser-manual-login --browser-keep-browser "
+        f'--browser-manual-login-profile-dir "{escaped_profile}" -p "HI". '
+        "If you want to reuse an already signed-in Chrome instead, use --browser-attach-running."
+    )
+    expected_errors = [f"ERROR: {failure_tail}", f"User error (browser-automation): {failure_tail}"]
+    lines = stdout_text.splitlines()
+    if lines[-2:] != expected_errors:
+        return None
+
+    prefix_lines = lines[:-2]
+    if len(prefix_lines) != 11:
+        return None
+    banner_ok = bool(re.fullmatch(r".{1,4} oracle 0\.17\.1 .{2,120}", prefix_lines[0]))
+    launch_ok = bool(
+        re.fullmatch(
+            r"Launching browser mode \(target=GPT-5\.6 Sol; requested=gpt-5\.6-sol\) "
+            r"with ~[1-9][0-9]* tokens\.",
+            prefix_lines[6],
+        )
+    )
+    if not (
+        banner_ok
+        and prefix_lines[1] == f"Session: {locator}"
+        and prefix_lines[2:6]
+        == [
+            "Mode: browser foreground",
+            "Models: 1",
+            "Detach: no",
+            f"Reattach: oracle session {locator}",
+        ]
+        and launch_ok
+        and prefix_lines[7:]
+        == [
+            "This run can take up to an hour (usually ~10 minutes).",
+            "[browser] Browser control: launch Chrome in hidden-window mode; may focus/control the browser UI.",
+            "[browser] Browser guidance: On macOS, Oracle launches Chrome off-screen while keeping the page rendered.",
+            "[browser] Browser guidance: For the calmest shared-desktop flow, prefer --browser-attach-running or --remote-chrome.",
+        ]
+    ):
+        return None
+
+    return {
+        "schema": "codex.chatgpt.oracle-pre-submit-host-failure/v1",
+        "code": "ORACLE_MANUAL_LOGIN_PROFILE_UNINITIALIZED_PRELAUNCH_FAILED",
+        "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+        "transcript_sha256": hashlib.sha256(transcript_bytes).hexdigest(),
+        "output_absent": True,
+        "conversation_url_absent": True,
+        "resolved_version": "0.17.1",
+        "oracle_locator": locator,
+        "failure_reason": "oracle-manual-login-profile-uninitialized",
+        "manual_login_profile": str(expected_profile),
+    }
+
+
 def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
     """Prove a structured readiness or host failure happened before Oracle launch.
 
@@ -1875,6 +2019,9 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
     process is created.  The additional immutable-state checks keep this from
     reclassifying a real submitted or live session.
     """
+    manual_login = proven_pre_submit_manual_login_profile_uninitialized(state_path)
+    if manual_login is not None:
+        return manual_login
     state = load_state(state_path)
     authority = str(state.get("session_authority") or "")
     if authority not in {"pre_submit", "submitted_unknown"}:
@@ -2286,6 +2433,7 @@ def settle_proven_pre_submit_failure(state_path: Path) -> dict[str, Any] | None:
             "ORACLE_THINKING_TIME_PRE_SUBMIT_FAILED",
             "ORACLE_MODEL_SWITCHER_PRE_SUBMIT_FAILED",
             "ORACLE_LAUNCH_FLAGS_MUTUALLY_EXCLUSIVE_PRELAUNCH_FAILED",
+            "ORACLE_MANUAL_LOGIN_PROFILE_UNINITIALIZED_PRELAUNCH_FAILED",
         } else "pending",
         "task_outcome_reason": (
             "oracle-profile-copy-ebusy-pre-submit"
@@ -2302,6 +2450,8 @@ def settle_proven_pre_submit_failure(state_path: Path) -> dict[str, Any] | None:
             if evidence["code"] == "ORACLE_MODEL_SWITCHER_PRE_SUBMIT_FAILED"
             else "oracle-launch-flags-mutually-exclusive-pre-submit"
             if evidence["code"] == "ORACLE_LAUNCH_FLAGS_MUTUALLY_EXCLUSIVE_PRELAUNCH_FAILED"
+            else "oracle-manual-login-profile-uninitialized-pre-submit"
+            if evidence["code"] == "ORACLE_MANUAL_LOGIN_PROFILE_UNINITIALIZED_PRELAUNCH_FAILED"
             else "prelaunch-host-failure"
         ),
         "pre_submit_failure": evidence,
@@ -2415,6 +2565,20 @@ TASK_OUTCOME_RE = re.compile(
     re.IGNORECASE,
 )
 
+MARKDOWN_HTTP_REFERENCE_DEFINITION_RE = re.compile(
+    r"\[[^\]\r\n]+\]:[ \t]+(?:<https?://[^>\s]+>|https?://\S+)"
+    r"(?:[ \t]+(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|\([^\)\r\n]*\)))?[ \t]*",
+    re.IGNORECASE,
+)
+
+
+def _only_bounded_reference_definitions(lines: list[str]) -> bool:
+    return all(
+        not line.strip()
+        or MARKDOWN_HTTP_REFERENCE_DEFINITION_RE.fullmatch(line.strip()) is not None
+        for line in lines
+    )
+
 
 def classify_task_outcome(path: Path, *, contract: str, transport: str) -> str:
     if transport == "pro-attachment-only":
@@ -2423,10 +2587,22 @@ def classify_task_outcome(path: Path, *, contract: str, transport: str) -> str:
         text = path.read_text(encoding="utf-8", errors="strict")
     except (OSError, UnicodeDecodeError):
         return "unknown"
-    final_line = next((line.strip() for line in reversed(text.splitlines()) if line.strip()), "")
-    marker = TASK_OUTCOME_RE.fullmatch(final_line)
-    if marker:
-        return marker.group(1).casefold()
+    # The v1 marker is normally the final nonempty line.  Some provider renderers
+    # move Markdown link definitions below it.  Accept only that bounded,
+    # non-semantic appendix: one marker in the entire artifact followed solely
+    # by single-line HTTP(S) reference definitions and blank lines.
+    if len(TASK_OUTCOME_RE.findall(text)) != 1:
+        return "unknown" if contract == "v1" else "legacy_unclassified"
+    lines = text.splitlines()
+    marker_lines = [
+        (index, marker)
+        for index, line in enumerate(lines)
+        if (marker := TASK_OUTCOME_RE.fullmatch(line.strip())) is not None
+    ]
+    if len(marker_lines) == 1:
+        index, marker = marker_lines[0]
+        if _only_bounded_reference_definitions(lines[index + 1 :]):
+            return marker.group(1).casefold()
     return "unknown" if contract == "v1" else "legacy_unclassified"
 
 

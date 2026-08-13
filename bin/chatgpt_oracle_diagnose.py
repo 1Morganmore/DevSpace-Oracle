@@ -147,6 +147,8 @@ def classify_run(
             return {"bucket": PRE_SUBMIT_UI, "signature": "model-option-label-missing"}
         if code == "ORACLE_THINKING_TIME_PRE_SUBMIT_FAILED":
             return {"bucket": PRE_SUBMIT_UI, "signature": "thinking-time-selection-unverified"}
+        if code == "ORACLE_MANUAL_LOGIN_PROFILE_UNINITIALIZED_PRELAUNCH_FAILED":
+            return {"bucket": PRE_SUBMIT_HOST, "signature": "oracle-manual-login-profile-uninitialized"}
         if code == "SUBMISSION_NOT_READY" and host_failure.get("failed_checks"):
             return {"bucket": PRE_SUBMIT_HOST, "signature": "submission-readiness-not-ready"}
         if code == "DEVSPACE_SERVICE_RESTART_REQUIRED":
