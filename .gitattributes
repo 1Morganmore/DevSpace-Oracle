@@ -1,4 +1,4 @@
 tests/fixtures/oracle-0.17.0/promptComposer.js text eol=lf
 tests/fixtures/oracle-0.17.1/thinkingTime.pristine.js text eol=lf
-bin/oracle-compat/0.17.2/*.patch text eol=lf
+bin/oracle-compat/0.17.2/*.patch text eol=lf whitespace=-blank-at-eol
 tests/fixtures/oracle-0.17.2/thinkingTime.pristine.js text eol=lf

@@ -85,7 +85,13 @@ def make_removal_upgrade_fixture(tmp_path: Path) -> tuple[Path, Path, Path, byte
     return repo, home, legacy, legacy_bytes
 
 
-def write_v3_receipt(home: Path, installed: Path, name: str) -> Path:
+def write_v3_receipt(
+    home: Path,
+    installed: Path,
+    name: str,
+    *,
+    previous_receipt: Path | None = None,
+) -> Path:
     relative = installed.relative_to(home).as_posix()
     digest = hashlib.sha256(installed.read_bytes()).hexdigest()
     transaction = hashlib.md5(name.encode(), usedforsecurity=False).hexdigest()
@@ -111,12 +117,15 @@ def write_v3_receipt(home: Path, installed: Path, name: str) -> Path:
         'manifest_version': '1.8.0', 'status': 'COMPLETE', 'backup': str(backup),
         'receipt': str(receipt), 'wal_path': str(wal), 'files': [record],
     }), encoding='utf-8')
-    receipt.write_text(json.dumps({
+    receipt_value = {
         'schema': 'codexpro.install-receipt/v3', 'transaction_id': transaction,
         'manifest_version': '1.8.0', 'backup': str(backup), 'wal': str(wal),
         'files': [{k: record[k] for k in ('path', 'action', 'installed_sha256', 'backup_sha256')}],
         'dependency': {'mode': 'skipped'},
-    }), encoding='utf-8')
+    }
+    if previous_receipt is not None:
+        receipt_value['previous_receipt'] = str(previous_receipt)
+    receipt.write_text(json.dumps(receipt_value), encoding='utf-8')
     return receipt
 
 
@@ -151,6 +160,135 @@ def test_removal_upgrade_writes_wal_v3_receipt_v4_and_rolls_back_exactly(tmp_pat
                                  '-Receipt', str(receipt_path))
     assert rolled_back.returncode == 0, rolled_back.stderr
     assert legacy.read_bytes() == legacy_bytes
+    assert not (home / 'bin' / 'active.py').exists()
+
+
+def test_removal_upgrade_reinstall_after_rollback_keeps_linear_receipt_chain(
+    tmp_path: Path,
+) -> None:
+    repo, home, legacy, _ = make_removal_upgrade_fixture(tmp_path)
+    baseline_receipts = set((home / 'receipts').glob('*.json'))
+    first = run_fixture_install(repo, home)
+    assert first.returncode == 0, first.stderr
+    first_receipt = next(
+        path
+        for path in (home / 'receipts').glob('*.json')
+        if json.loads(path.read_text(encoding='utf-8'))['schema']
+        == 'codexpro.install-receipt/v4'
+    )
+    rolled_back = run_powershell(
+        '-File',
+        str(repo / 'rollback.ps1'),
+        '-CodexHome',
+        str(home),
+        '-Receipt',
+        str(first_receipt),
+    )
+    assert rolled_back.returncode == 0, rolled_back.stderr
+
+    second = run_fixture_install(repo, home)
+    assert second.returncode == 0, second.stderr
+    second_paths = set((home / 'receipts').glob('*.json')) - baseline_receipts - {
+        first_receipt,
+    }
+    assert len(second_paths) == 1
+    second_receipt = second_paths.pop()
+
+    third = run_fixture_install(repo, home)
+    assert third.returncode == 0, third.stderr
+    third_paths = set((home / 'receipts').glob('*.json')) - baseline_receipts - {
+        first_receipt,
+        second_receipt,
+    }
+    assert len(third_paths) == 1
+    third_receipt = third_paths.pop()
+
+    assert json.loads(second_receipt.read_text(encoding='utf-8'))[
+        'previous_receipt'
+    ] == str(first_receipt)
+    assert json.loads(third_receipt.read_text(encoding='utf-8'))[
+        'previous_receipt'
+    ] == str(second_receipt)
+    assert not legacy.exists()
+
+
+def test_removal_upgrade_uses_nearest_owner_in_single_receipt_branch(
+    tmp_path: Path,
+) -> None:
+    repo, home, _, _ = make_removal_upgrade_fixture(tmp_path)
+    known: set[Path] = set((home / 'receipts').glob('*.json'))
+    first = run_fixture_install(repo, home)
+    assert first.returncode == 0, first.stderr
+    first_receipt = (set((home / 'receipts').glob('*.json')) - known).pop()
+    known.add(first_receipt)
+
+    second = run_fixture_install(repo, home)
+    assert second.returncode == 0, second.stderr
+    second_receipt = (set((home / 'receipts').glob('*.json')) - known).pop()
+    known.add(second_receipt)
+
+    (repo / 'bin' / 'active.py').write_text('changed\n', encoding='utf-8')
+    third = run_fixture_install(repo, home)
+    assert third.returncode == 0, third.stderr
+    third_receipt = (set((home / 'receipts').glob('*.json')) - known).pop()
+    known.add(third_receipt)
+    assert (home / 'bin' / 'active.py').read_text(encoding='utf-8') == 'changed\n'
+
+    rolled_back = run_powershell(
+        '-File',
+        str(repo / 'rollback.ps1'),
+        '-CodexHome',
+        str(home),
+        '-Receipt',
+        str(third_receipt),
+    )
+    assert rolled_back.returncode == 0, rolled_back.stderr
+    assert (home / 'bin' / 'active.py').read_text(encoding='utf-8') == 'active\n'
+
+    fourth = run_fixture_install(repo, home)
+    assert fourth.returncode == 0, fourth.stderr
+    fourth_receipt = (set((home / 'receipts').glob('*.json')) - known).pop()
+    fourth_value = json.loads(fourth_receipt.read_text(encoding='utf-8'))
+    assert fourth_value['previous_receipt'] == str(third_receipt)
+    assert json.loads(third_receipt.read_text(encoding='utf-8'))[
+        'previous_receipt'
+    ] == str(second_receipt)
+    assert json.loads(second_receipt.read_text(encoding='utf-8'))[
+        'previous_receipt'
+    ] == str(first_receipt)
+    assert (home / 'bin' / 'active.py').read_text(encoding='utf-8') == 'changed\n'
+
+
+
+
+def test_removal_upgrade_refuses_single_chain_without_current_owner(
+    tmp_path: Path,
+) -> None:
+    repo, home, legacy, _ = make_removal_upgrade_fixture(tmp_path)
+    installed = run_fixture_install(repo, home)
+    assert installed.returncode == 0, installed.stderr
+    receipt = next(
+        path
+        for path in (home / 'receipts').glob('*.json')
+        if json.loads(path.read_text(encoding='utf-8'))['schema']
+        == 'codexpro.install-receipt/v4'
+    )
+    rolled_back = run_powershell(
+        '-File',
+        str(repo / 'rollback.ps1'),
+        '-CodexHome',
+        str(home),
+        '-Receipt',
+        str(receipt),
+    )
+    assert rolled_back.returncode == 0, rolled_back.stderr
+    legacy.write_text('user-modified-after-rollback\n', encoding='utf-8')
+
+    retried = run_fixture_install(repo, home)
+
+    assert retried.returncode != 0
+    assert 'INSTALL_UPGRADE_AMBIGUOUS_RECEIPT' in retried.stderr
+    assert legacy.read_text(encoding='utf-8') == 'user-modified-after-rollback\n'
     assert not (home / 'bin' / 'active.py').exists()
 
 
@@ -198,6 +336,67 @@ def test_removal_upgrade_refuses_ambiguous_receipts_before_mutation(tmp_path: Pa
     assert 'INSTALL_UPGRADE_AMBIGUOUS_RECEIPT' in installed.stderr
     assert legacy.read_bytes() == legacy_bytes
     assert not (home / 'bin' / 'active.py').exists()
+
+
+def test_removal_upgrade_refuses_disconnected_receipt_cycle_before_mutation(
+    tmp_path: Path,
+) -> None:
+    repo, home, legacy, legacy_bytes = make_removal_upgrade_fixture(tmp_path)
+    stale_target = home / 'bin' / 'stale-cycle.py'
+    stale_target.write_text('receipt-owned\n', encoding='utf-8')
+    cycle = write_v3_receipt(home, stale_target, 'self-cycle')
+    cycle_value = json.loads(cycle.read_text(encoding='utf-8'))
+    cycle_value['previous_receipt'] = str(cycle)
+    cycle.write_text(json.dumps(cycle_value), encoding='utf-8')
+    stale_target.write_text('user-changed\n', encoding='utf-8')
+
+    installed = run_fixture_install(repo, home)
+
+    assert installed.returncode != 0
+    assert 'INSTALL_UPGRADE_AMBIGUOUS_RECEIPT' in installed.stderr
+    assert legacy.read_bytes() == legacy_bytes
+    assert stale_target.read_text(encoding='utf-8') == 'user-changed\n'
+    assert not (home / 'bin' / 'active.py').exists()
+
+
+def test_removal_upgrade_selects_unique_receipt_chain_head(tmp_path: Path) -> None:
+    repo, home, legacy, _ = make_removal_upgrade_fixture(tmp_path)
+    previous = home / 'receipts' / 'codexpro-automation-previous.json'
+    head = write_v3_receipt(
+        home,
+        legacy,
+        'current-head',
+        previous_receipt=previous,
+    )
+
+    installed = run_fixture_install(repo, home)
+
+    assert installed.returncode == 0, installed.stderr
+    receipts = [
+        json.loads(path.read_text(encoding='utf-8'))
+        for path in (home / 'receipts').glob('*.json')
+        if json.loads(path.read_text(encoding='utf-8'))['schema']
+        == 'codexpro.install-receipt/v4'
+    ]
+    assert len(receipts) == 1
+    assert receipts[0]['previous_receipt'] == str(head)
+    assert not legacy.exists()
+
+
+def test_removal_upgrade_prefers_unique_owner_over_stale_valid_receipts(
+    tmp_path: Path,
+) -> None:
+    repo, home, legacy, _ = make_removal_upgrade_fixture(tmp_path)
+    stale_target = home / 'bin' / 'stale.py'
+    stale_target.write_text('no-longer-owned\n', encoding='utf-8')
+    write_v3_receipt(home, stale_target, 'stale-valid')
+    stale_target.write_text('user-changed\n', encoding='utf-8')
+
+    installed = run_fixture_install(repo, home)
+
+    assert installed.returncode == 0, installed.stderr
+    assert not legacy.exists()
+    assert stale_target.read_text(encoding='utf-8') == 'user-changed\n'
 
 
 def test_removal_upgrade_refuses_active_legacy_run_before_mutation(tmp_path: Path) -> None:

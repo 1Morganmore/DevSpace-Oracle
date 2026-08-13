@@ -40,6 +40,9 @@ def run_gpt56_pro_diagnostic_recovery_case(
     states: list[bool],
     hidden_stale: bool = False,
     hidden_ancestor: bool = False,
+    sibling_slider: bool = False,
+    transparent_slider: bool = False,
+    control_power: str | None = None,
     version: str = "0.17.1",
 ) -> tuple[int, str | None, list[str]]:
     compat = load_compat()
@@ -57,6 +60,9 @@ def run_gpt56_pro_diagnostic_recovery_case(
             "states": states,
             "hiddenStale": hidden_stale,
             "hiddenAncestor": hidden_ancestor,
+            "siblingSlider": sibling_slider,
+            "transparentSlider": transparent_slider,
+            "controlPower": control_power,
         }
     )
     harness = f"""
@@ -77,29 +83,50 @@ const node = (kind, text, attrs, stale = false) => ({{
   querySelectorAll() {{ return []; }},
   getBoundingClientRect() {{ return {{ width: 10, height: 10 }}; }},
   matches() {{ return false; }},
+  closest(selector) {{
+    for (let node = this; node; node = node.parentElement) {{
+      if (selector === '[role="menu"]' && node.getAttribute('role') === 'menu') return node;
+    }}
+    return null;
+  }},
 }});
 const stale = scenario.hiddenStale;
 const page = node('page', '', {{}});
+const menu = node('menu', '', {{ role: 'menu' }});
 const picker = node('picker', '', {{ id: 'picker-a' }});
-picker.parentElement = page;
+menu.parentElement = page;
+picker.parentElement = scenario.siblingSlider ? menu : page;
 const model = node('model', stale ? 'GPT-5.6 Sol' : 'Pro', {{
   'aria-label': stale ? 'GPT-5.6 Sol' : 'Pro',
   'aria-controls': 'picker-a',
 }});
-const slider = node('slider', stale ? 'Power 4 of 5 Extra High' : 'Power 5 of 5 Pro', {{ 'aria-valuenow': stale ? '4' : '5' }});
+const slider = node('slider', stale ? 'Power 4 of 5 Extra High' : 'Power 5 of 5 Pro', {{
+  role: 'slider',
+  'aria-valuenow': scenario.controlPower ?? (stale ? '3' : '4'),
+  'aria-valuemin': '0',
+  'aria-valuemax': '4',
+}});
 const advanced = node('advanced', stale ? 'Model GPT-5.6 Sol Effort Extra High' : 'Model GPT-5.6 Sol Effort Pro', {{}});
 const staleModel = node('model', 'Pro', {{ 'aria-label': 'Pro' }}, stale);
 const staleSlider = node('slider', 'Power 5 of 5 Pro', {{ 'aria-valuenow': '5' }}, stale);
 const staleAdvanced = node('advanced', 'Model GPT-5.6 Sol Effort Pro', {{}}, stale);
 model.parentElement = page;
-slider.parentElement = picker;
+slider.parentElement = scenario.siblingSlider ? menu : picker;
 advanced.parentElement = picker;
 staleModel.parentElement = page;
 staleSlider.parentElement = picker;
 staleAdvanced.parentElement = picker;
 picker.querySelectorAll = (selector) => {{
-  if (selector.includes('slider-simple')) return stale ? [staleSlider, slider] : [slider];
+  if (selector.includes('slider-simple')) {{
+    if (scenario.siblingSlider) return [];
+    return stale ? [staleSlider, slider] : [slider];
+  }}
   if (selector.includes('slider-advanced')) return stale ? [staleAdvanced, advanced] : [advanced];
+  return [];
+}};
+menu.querySelectorAll = (selector) => {{
+  if (selector.includes('slider-simple')) return scenario.siblingSlider ? [slider] : [];
+  if (selector.includes('slider-advanced')) return scenario.siblingSlider ? [advanced] : [];
   return [];
 }};
 const candidates = (selector) => {{
@@ -126,7 +153,9 @@ const window = {{
       active = scenario.states[Math.min(observation, scenario.states.length - 1)];
     }}
     const visible = !candidate.stale && active;
-    return {{ display: visible ? 'block' : 'none', visibility: 'visible', opacity: '1', pointerEvents: 'auto' }};
+    return {{ display: visible ? 'block' : 'none', visibility: 'visible',
+      opacity: candidate === slider && scenario.transparentSlider ? '0' : '1',
+      pointerEvents: 'auto' }};
   }},
 }};
 let tick = 0;
@@ -324,6 +353,18 @@ def run_gpt56_0172_advanced_owner_cases(tmp_path: Path) -> dict[str, dict[str, i
         {"label": "one-observation-then-lost", "level": "heavy", "power": 5, "observations": [True, False]},
         {"label": "power4-owned", "level": "extra-high", "power": 4},
         {"label": "power4-unrelated", "level": "extra-high", "power": 3, "unrelatedPower": 4},
+        {"label": "live-sibling-slider", "level": "heavy", "power": 5, "controlledSubtree": True},
+        {"label": "extra-high-sibling-slider", "level": "extra-high", "power": 4, "controlledSubtree": True},
+        {"label": "extra-high-self-transparent-slider", "level": "extra-high", "power": 4, "controlledSubtree": True, "selfOpacityZero": True},
+        {"label": "power5-zero-based", "level": "heavy", "power": 5},
+        {"label": "power4-control-text-mismatch", "level": "extra-high", "power": 4, "controlPower": 2},
+        {"label": "zero-based-raw-out-of-range", "level": "heavy", "power": 5, "controlPower": 5},
+        {"label": "malformed-raw", "level": "heavy", "power": 5, "controlPower": "not-a-number"},
+        {"label": "minimum-only", "level": "heavy", "power": 5, "omitMaximum": True},
+        {"label": "maximum-only", "level": "heavy", "power": 5, "omitMinimum": True},
+        {"label": "legacy-one-based", "level": "heavy", "power": 5, "omitMinimum": True, "omitMaximum": True, "controlPower": 5},
+        {"label": "cross-menu-controlled-root", "level": "heavy", "power": 5, "crossMenuControl": True},
+        {"label": "nested-controlled-menu", "level": "heavy", "power": 5, "nestedControlledMenu": True},
     ])
     harness = """
 const scenarios = SCENARIOS;
@@ -350,7 +391,12 @@ class FakeNode extends EventTarget {
     for (let node = candidate; node; node = node.parentElement) if (node === this) return true;
     return false;
   }
-  closest() { return null; }
+  closest(selector) {
+    for (let node = this; node; node = node.parentElement) {
+      if (selector === '[role="menu"]' && node.getAttribute('role') === 'menu') return node;
+    }
+    return null;
+  }
   focus() {}
 }
 globalThis.HTMLElement = FakeNode;
@@ -360,25 +406,51 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const run = async (scenario) => {
   const effort = scenario.level === 'heavy' ? 'Pro' : 'Extra High';
   const page = new FakeNode('page');
-  const owner = new FakeNode('owner', '', { id: 'picker-owner', 'data-testid': 'composer-intelligence-picker-content' });
+  const owner = new FakeNode('owner', '', {
+    id: 'picker-owner',
+    'data-testid': 'composer-intelligence-picker-content',
+    role: 'menu',
+  });
   const effortMenu = new FakeNode('menu', '', { id: 'effort-menu' });
   const splitRoot = new FakeNode('split', '', { id: 'picker-split' });
+  const controlledRoot = scenario.controlledSubtree || scenario.nestedControlledMenu
+    ? new FakeNode('controlled', '', {
+        id: 'picker-controlled',
+        role: scenario.nestedControlledMenu ? 'menu' : null,
+      })
+    : scenario.crossMenuControl ? splitRoot : owner;
   const unrelatedRoot = new FakeNode('unrelated', '', { id: 'picker-unrelated' });
   owner.parentElement = page;
   splitRoot.parentElement = page;
   unrelatedRoot.parentElement = page;
+  if (controlledRoot !== owner && controlledRoot !== splitRoot) {
+    controlledRoot.parentElement = owner;
+  }
   effortMenu.parentElement = page;
   const pill = new FakeNode('pill', effort, {
     'aria-label': effort,
     'aria-expanded': 'true',
-    'aria-controls': 'picker-owner',
+    'aria-controls': scenario.controlledSubtree || scenario.nestedControlledMenu
+      ? 'picker-controlled'
+      : scenario.crossMenuControl ? 'picker-split' : 'picker-owner',
     'data-testid': 'model-button',
   });
-  pill.parentElement = page;
-  const sliderAttrs = { 'aria-valuenow': String(scenario.power) };
+  pill.parentElement = scenario.crossMenuControl || scenario.nestedControlledMenu
+    ? owner
+    : page;
+  const sliderAttrs = {};
   if (scenario.ariaHidden) sliderAttrs['aria-hidden'] = 'true';
   const ownerSlider = new FakeNode('slider', `Power ${scenario.power} of 5 ${effort}`, sliderAttrs);
   ownerSlider.parentElement = owner;
+  const controlAttrs = {
+    role: 'slider',
+    'aria-valuenow': String(scenario.controlPower ?? scenario.power - 1),
+  };
+  if (!scenario.omitMinimum) controlAttrs['aria-valuemin'] = '0';
+  if (!scenario.omitMaximum) controlAttrs['aria-valuemax'] = '4';
+  const ownerControl = new FakeNode('control', '', controlAttrs);
+  ownerControl.parentElement = ownerSlider;
+  ownerSlider.query = (selector) => selector.includes('role="slider"') ? [ownerControl] : [];
   const unrelatedSlider = scenario.unrelatedPower
     ? new FakeNode('slider', `Power ${scenario.unrelatedPower} of 5 Extra High`, { 'aria-valuenow': String(scenario.unrelatedPower) })
     : null;
@@ -387,13 +459,13 @@ const run = async (scenario) => {
     'advanced',
     scenario.splitPicker ? 'Advanced' : `Model GPT-5.6 Sol Effort ${effort}`,
   );
-  advanced.parentElement = owner;
+  advanced.parentElement = controlledRoot;
   const splitAdvanced = scenario.splitPicker
     ? new FakeNode('advanced', `Model GPT-5.6 Sol Effort ${effort}`)
     : null;
   if (splitAdvanced) splitAdvanced.parentElement = splitRoot;
   const advancedToggle = new FakeNode('toggle', 'Advanced', { role: 'menuitem', 'aria-expanded': 'true' });
-  advancedToggle.parentElement = owner;
+  advancedToggle.parentElement = controlledRoot;
   const opener = new FakeNode('opener', `Effort ${effort}`, {
     role: 'menuitem', 'aria-haspopup': 'menu', 'aria-expanded': 'true', 'aria-controls': 'effort-menu',
   });
@@ -413,10 +485,23 @@ const run = async (scenario) => {
     if (selector === '[role="menuitem"]') return [advancedToggle];
     return [];
   };
+  if (controlledRoot !== owner) {
+    controlledRoot.query = (selector) => {
+      if (selector.includes('slider-advanced')) return [advanced];
+      if (selector === '[role="menuitem"]') return [advancedToggle];
+      return [];
+    };
+  }
   splitRoot.query = (selector) => selector.includes('slider-advanced') && splitAdvanced ? [splitAdvanced] : [];
   unrelatedRoot.query = (selector) => selector.includes('slider-simple') && unrelatedSlider ? [unrelatedSlider] : [];
   effortMenu.query = (selector) => selector === '[role="menuitem"]' ? [high, extraHigh, pro] : [];
-  const ids = { 'picker-owner': owner, 'picker-split': splitRoot, 'picker-unrelated': unrelatedRoot, 'effort-menu': effortMenu };
+  const ids = {
+    'picker-owner': owner,
+    'picker-controlled': controlledRoot,
+    'picker-split': splitRoot,
+    'picker-unrelated': unrelatedRoot,
+    'effort-menu': effortMenu,
+  };
   const allSliders = [ownerSlider, ...(unrelatedSlider ? [unrelatedSlider] : [])];
   const allAdvanced = [advanced, ...(splitAdvanced ? [splitAdvanced] : [])];
   const document = {
@@ -446,7 +531,8 @@ const run = async (scenario) => {
       return {
         display,
         visibility: 'visible',
-        opacity: node === page ? (scenario.ancestorOpacity ?? '1') : '1',
+        opacity: node === page ? (scenario.ancestorOpacity ?? '1') :
+          node === ownerSlider && scenario.selfOpacityZero ? '0' : '1',
       };
     },
   };
@@ -481,6 +567,12 @@ def test_oracle_0172_generated_advanced_owner_proof_is_stable_and_bound(
 
     assert results["pro-stable"] == {"status": "already-selected", "observations": 2}
     assert results["power4-owned"] == {"status": "already-selected", "observations": 2}
+    assert results["live-sibling-slider"] == {"status": "already-selected", "observations": 2}
+    assert results["extra-high-sibling-slider"] == {"status": "already-selected", "observations": 2}
+    assert results["extra-high-self-transparent-slider"] == {"status": "already-selected", "observations": 2}
+    assert results["power5-zero-based"] == {"status": "already-selected", "observations": 2}
+    assert results["legacy-one-based"] == {"status": "already-selected", "observations": 2}
+    assert results["nested-controlled-menu"] == {"status": "already-selected", "observations": 2}
     for label in (
         "ancestor-display-none",
         "ancestor-opacity-zero",
@@ -488,6 +580,12 @@ def test_oracle_0172_generated_advanced_owner_proof_is_stable_and_bound(
         "split-picker",
         "one-observation-then-lost",
         "power4-unrelated",
+        "power4-control-text-mismatch",
+        "zero-based-raw-out-of-range",
+        "malformed-raw",
+        "minimum-only",
+        "maximum-only",
+        "cross-menu-controlled-root",
     ):
         assert results[label]["status"] == "selection-unverified"
 
@@ -505,6 +603,8 @@ def test_gpt56_primary_proof_rejects_css_hidden_stale_candidates(tmp_path: Path)
         "split-picker",
     ):
         assert statuses[label] not in {"already-selected", "switched"}
+
+
 
 
 def run_prompt_route_case(
@@ -2125,9 +2225,38 @@ def test_oracle_0172_has_exact_hash_gated_patches_and_preserves_0171_recovery(
         "dist/src/browser/index.js": ("335f29c8864399cf2795333e4da8b87bc1b3591c30862eb9e82ea12cd3b37d11", "9a78695ba89a6e7eb6761dd06b9be74d500ac65b585158d75f8fd3c7a6eb8895"),
         "dist/src/browser/actions/assistantResponse.js": ("0bbc106f79c6abf253690c83794a2dab1b432378f57e16542d15cfcd5365e16d", "18661304c7fb545bc327876d38045818cbd23257488137836d43661be8742af4"),
         "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96"),
-        "dist/src/browser/actions/thinkingTime.js": ("303d33ebe915b27407ca22ec0da1d18729464ce50417f405ddb628c31f6fb867", "91c5d356a597fbf1a8e08cde922fd468a94f8cd3a9e441d7534fb7877a117828"),
+        "dist/src/browser/actions/thinkingTime.js": ("303d33ebe915b27407ca22ec0da1d18729464ce50417f405ddb628c31f6fb867", "77d00dadc13e77bd54b0254a7086a1c6d43a39deacd4f489da808f8d6334ab53"),
     }
     assert all((compat.patch_root("0.17.2") / value["patch"]).is_file() for value in contracts.values())
+    thinking_contract = contracts["dist/src/browser/actions/thinkingTime.js"]
+    assert thinking_contract["legacy_patched"] == [
+        "ba5cf86ec7136a0e1da824b7efa2155c76c32cb16bc838b8dc1e70134b25e872",
+        "7ee4983faf0a0215b13c45293d19da334a44f953a671c721f1ec974a852d8f37",
+        "decfb6830bf20cbfdc8ac0460b7d196599dc510ed8698e062b86161ee52d8829",
+        "91c5d356a597fbf1a8e08cde922fd468a94f8cd3a9e441d7534fb7877a117828",
+        "9583e9b4f56661e1bfe87def1ffb44f08058eba356b87525ccb099b175e90d06",
+        "fac4926083c107d1ed02781ade102995d8003a842a4c92a170c8d5ee01375331",
+    ]
+    assert thinking_contract["legacy_patches"] == {
+        "ba5cf86ec7136a0e1da824b7efa2155c76c32cb16bc838b8dc1e70134b25e872":
+            "thinkingTime.strict.pre-self-transparent-slider.patch",
+        "7ee4983faf0a0215b13c45293d19da334a44f953a671c721f1ec974a852d8f37":
+            "thinkingTime.strict.pre-power-range-validation.patch",
+        "decfb6830bf20cbfdc8ac0460b7d196599dc510ed8698e062b86161ee52d8829":
+            "thinkingTime.strict.pre-diagnostic-range-validation.patch",
+        "91c5d356a597fbf1a8e08cde922fd468a94f8cd3a9e441d7534fb7877a117828":
+            "thinkingTime.strict.pre-picker-menu-scope.patch",
+        "9583e9b4f56661e1bfe87def1ffb44f08058eba356b87525ccb099b175e90d06":
+            "thinkingTime.strict.pre-picker-button-menu-scope.patch",
+        "fac4926083c107d1ed02781ade102995d8003a842a4c92a170c8d5ee01375331":
+            "thinkingTime.strict.pre-picker-containment-proof.patch",
+    }
+    assert all(
+        (compat.patch_root("0.17.2") / patch_name).is_file()
+        for patch_name in thinking_contract["legacy_patches"].values()
+    )
+    assert thinking_contract["legacy_patch"] == "thinkingTime.strict.pre-picker-menu-scope.patch"
+    assert (compat.patch_root("0.17.2") / thinking_contract["legacy_patch"]).is_file()
 
     relative = Path("dist/src/browser/actions/thinkingTime.js")
     package = tmp_path / "package"
@@ -2157,6 +2286,30 @@ def test_oracle_0172_has_exact_hash_gated_patches_and_preserves_0171_recovery(
     assert "selectEffortFromAdvancedSubmenu" in source
     assert "collectGpt56PowerProofDiagnostic" in source
     assert "consecutive >= 2" in source
+    for index, (legacy_hash, legacy_patch) in enumerate(
+        thinking_contract["legacy_patches"].items()
+    ):
+        legacy_package = tmp_path / f"legacy-package-{index}"
+        legacy_target = legacy_package / relative
+        legacy_target.parent.mkdir(parents=True)
+        legacy_target.write_bytes(PRISTINE_THINKING_TIME_0172)
+        (legacy_package / "package.json").write_text(
+            '{"version":"0.17.2"}', encoding="utf-8"
+        )
+        compat._apply_patch(
+            legacy_package,
+            compat.patch_root("0.17.2") / legacy_patch,
+        )
+        assert digest(legacy_target.read_bytes()) == legacy_hash
+
+        migrated = compat.ensure_oracle_compatibility(
+            "oracle 0.17.2",
+            package_root=legacy_package,
+            backup_root=tmp_path / f"legacy-backup-{index}",
+        )
+
+        assert migrated["changed"] == [str(relative).replace("\\", "/")]
+        assert digest(legacy_target.read_bytes()) == thinking_contract["patched"]
     assert old["patched"] == "c973d2801a75bc1e37526184ba257d47ae3994185776107fca60158f9f2526d8"
     assert old["legacy_patches"]["01ad2aca046895140729866ab5da3b0e7cfd92a00618d61f1d4b9b4cf36365eb"] == (
         "thinkingTime.strict.pre-coherent-picker-proof.patch"
@@ -2172,11 +2325,38 @@ def test_oracle_0172_pro_diagnostic_proof_is_visible_stable_and_same_picker(
     stable_calls, stable_error, stable_logs = run_gpt56_pro_diagnostic_recovery_case(
         tmp_path / "stable", states=[True, True], version="0.17.2"
     )
+    sibling_calls, sibling_error, sibling_logs = run_gpt56_pro_diagnostic_recovery_case(
+        tmp_path / "sibling-slider",
+        states=[True, True],
+        sibling_slider=True,
+        version="0.17.2",
+    )
+    transparent_calls, transparent_error, transparent_logs = run_gpt56_pro_diagnostic_recovery_case(
+        tmp_path / "transparent-slider",
+        states=[True, True],
+        sibling_slider=True,
+        transparent_slider=True,
+        version="0.17.2",
+    )
+    mismatch_calls, mismatch_error, mismatch_logs = run_gpt56_pro_diagnostic_recovery_case(
+        tmp_path / "control-text-mismatch",
+        states=[True, True],
+        sibling_slider=True,
+        transparent_slider=True,
+        control_power="2",
+        version="0.17.2",
+    )
 
-    assert hidden_calls == stable_calls == 2
+    assert hidden_calls == stable_calls == sibling_calls == transparent_calls == mismatch_calls == 2
     assert "refusing to submit" in str(hidden_error)
     assert stable_error is None
     assert stable_logs == ["[browser] Thinking time: Power 5 of 5 (Pro) (already selected)"]
+    assert sibling_error is None
+    assert sibling_logs == ["[browser] Thinking time: Power 5 of 5 (Pro) (already selected)"]
+    assert transparent_error is None
+    assert transparent_logs == ["[browser] Thinking time: Power 5 of 5 (Pro) (already selected)"]
+    assert "refusing to submit" in str(mismatch_error)
+    assert mismatch_logs and mismatch_logs[0].startswith("[browser] Model picker diagnostic:")
 
 
 def test_copy_profile_recovery_patch_reuses_only_the_persisted_profile_seed() -> None:

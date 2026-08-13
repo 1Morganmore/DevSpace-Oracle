@@ -1,6 +1,6 @@
 --- a/dist/src/browser/actions/thinkingTime.js
 +++ b/dist/src/browser/actions/thinkingTime.js
-@@ -36,6 +36,131 @@
+@@ -36,6 +36,81 @@
      // own, independently of the legacy Pro-model + "extended" combination.
      const strictProEffort = level === "pro" ||
          ((targetModelKind === "pro" || observedModelKind === "pro") && level === "extended");
@@ -26,13 +26,13 @@
 +        const confirmation = await Runtime.evaluate({
 +            expression: `(async () => {
 +                const marker = 'oracle-gpt56-pro-visible-proof-v1';
-+                const visible = (node, allowSelfOpacityZero = false) => {
++                const visible = (node) => {
 +                    const rect = node?.getBoundingClientRect?.();
 +                    if (!rect?.width || !rect?.height) return false;
 +                    for (let current = node; current; current = current.parentElement) {
 +                        const style = window.getComputedStyle(current);
 +                        if (style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility) ||
-+                            ((!allowSelfOpacityZero || current !== node) && !(Number(style.opacity ?? '1') > 0)) ||
++                            !(Number(style.opacity ?? '1') > 0) ||
 +                            current.getAttribute?.('aria-hidden') === 'true') return false;
 +                    }
 +                    return true;
@@ -42,65 +42,15 @@
 +                const pickerRoots = (button) => String(button.getAttribute?.('aria-controls') ?? '')
 +                    .trim().split(/\\s+/).filter(Boolean)
 +                    .map((id) => document.getElementById(id)).filter(visible);
-+                const boundProofScopes = (button) => {
-+                    const controlled = pickerRoots(button);
-+                    const buttonMenu = button?.closest?.('[role="menu"]');
-+                    const ownedControlled = controlled.filter((root) =>
-+                        buttonMenu?.contains?.(root));
-+                    if (buttonMenu && ownedControlled.length && visible(buttonMenu)) {
-+                        return [buttonMenu];
-+                    }
-+                    return controlled.map((root) => {
-+                        const menu = root?.matches?.('[role="menu"]') ? root :
-+                            root?.closest?.('[role="menu"]');
-+                        return menu && visible(menu) ? menu : root;
-+                    });
-+                };
-+                const readPowerTextValue = (view) => {
-+                    const compact = Array.from(String(view?.textContent ?? '').toLowerCase())
-+                        .filter((character) =>
-+                            (character >= 'a' && character <= 'z') ||
-+                            (character >= '0' && character <= '9'))
-+                        .join('');
-+                    for (let candidate = 1; candidate <= 5; candidate += 1) {
-+                        if (compact.includes(String(candidate) + 'of5')) return candidate;
-+                    }
-+                    return null;
-+                };
-+                const readPowerValue = (view) => {
-+                    const control = view?.querySelector?.('[role="slider"], input[type="range"]') || view;
-+                    const rawAttribute = control?.getAttribute?.('aria-valuenow');
-+                    const minimumAttribute = control?.getAttribute?.('aria-valuemin');
-+                    const maximumAttribute = control?.getAttribute?.('aria-valuemax');
-+                    const hasRaw = rawAttribute !== null && rawAttribute !== undefined &&
-+                        String(rawAttribute).trim() !== '';
-+                    const hasMinimum = minimumAttribute !== null && minimumAttribute !== undefined &&
-+                        String(minimumAttribute).trim() !== '';
-+                    const hasMaximum = maximumAttribute !== null && maximumAttribute !== undefined &&
-+                        String(maximumAttribute).trim() !== '';
-+                    let controlValue = null;
-+                    if (hasMinimum || hasMaximum) {
-+                        if (!hasRaw || !hasMinimum || !hasMaximum) return null;
-+                        const raw = Number(rawAttribute);
-+                        const minimum = Number(minimumAttribute);
-+                        const maximum = Number(maximumAttribute);
-+                        if (!Number.isInteger(raw) || minimum !== 0 || maximum !== 4 ||
-+                            raw < minimum || raw > maximum) return null;
-+                        controlValue = raw + 1;
-+                    } else if (hasRaw) {
-+                        const raw = Number(rawAttribute);
-+                        if (!Number.isInteger(raw) || raw < 1 || raw > 5) return null;
-+                        controlValue = raw;
-+                    }
-+                    const textValue = readPowerTextValue(view);
-+                    if (controlValue !== null && textValue !== null &&
-+                        controlValue !== textValue) return null;
-+                    return controlValue ?? textValue;
++                const boundProofScope = (root) => {
++                    const menu = root?.matches?.('[role="menu"]') ? root :
++                        root?.closest?.('[role="menu"]');
++                    return menu && visible(menu) ? menu : root;
 +                };
 +                const sliderPro = (root) => Array.from(root.querySelectorAll(
 +                    '[data-testid="composer-model-picker-slider-simple-view"]',
-+                )).some((node) => visible(node, true) && readPowerValue(node) === 5 &&
-+                    /\\bpro\\b/i.test(text(node)));
++                )).some((node) => visible(node) && /\\bpro\\b/i.test(text(node)) &&
++                    /\\b5\\s+of\\s+5\\b/i.test(text(node)));
 +                const advancedPro = (root) => Array.from(root.querySelectorAll(
 +                    '[data-testid="composer-model-picker-slider-advanced-view"]',
 +                )).some((node) => visible(node) &&
@@ -109,7 +59,7 @@
 +                const proof = () => Array.from(document.querySelectorAll(
 +                    ${JSON.stringify(MODEL_BUTTON_SELECTOR)},
 +                )).some((button) => visible(button) && /\\bpro\\b/i.test(text(button)) &&
-+                    boundProofScopes(button)
++                    pickerRoots(button).map(boundProofScope)
 +                        .some((root) => sliderPro(root) && advancedPro(root)));
 +                const deadline = performance.now() + 500;
 +                let consecutive = 0;
@@ -132,7 +82,7 @@
      switch (result?.status) {
          case "already-selected":
              logger(formatBrowserThinkingLog(`${result.label ?? capitalizedLevel} (already selected)`));
-@@ -56,9 +140,8 @@
+@@ -56,9 +131,8 @@
                      ? ` for ${targetModelKind}`
                      : "";
              const message = `Thinking time: ${result.status.replaceAll("-", " ")}${kindHint} (requested ${capitalizedLevel})`;
@@ -144,7 +94,7 @@
              }
              // "selection-unverified" is the one status here that already dispatched a
              // click, so the effort may or may not have moved. Every other status left
-@@ -72,9 +155,8 @@
+@@ -72,9 +146,8 @@
          default: {
              await logDomFailure(Runtime, logger, "thinking-time-unknown");
              logPickerDiagnostic(result, logger);
@@ -156,7 +106,7 @@
              }
              logger(formatBrowserThinkingLog(`unknown outcome selecting ${capitalizedLevel}; continuing with ChatGPT default.`));
              return;
-@@ -380,12 +462,157 @@
+@@ -380,12 +453,125 @@
        // 'intelligen' matches both "Intelligence" and German "Intelligenz".
        return normalize(label?.textContent ?? '').includes('intelligen');
      };
@@ -185,39 +135,16 @@
 +      return null;
 +    };
 +    const readPowerValue = (view) => {
-+      const control = powerSliderControl(view);
-+      const rawAttribute = control?.getAttribute?.('aria-valuenow');
-+      const minimumAttribute = control?.getAttribute?.('aria-valuemin');
-+      const maximumAttribute = control?.getAttribute?.('aria-valuemax');
-+      const hasRaw = rawAttribute !== null && rawAttribute !== undefined && String(rawAttribute).trim() !== '';
-+      const hasMinimum = minimumAttribute !== null && minimumAttribute !== undefined &&
-+        String(minimumAttribute).trim() !== '';
-+      const hasMaximum = maximumAttribute !== null && maximumAttribute !== undefined &&
-+        String(maximumAttribute).trim() !== '';
-+      let controlValue = null;
-+      if (hasMinimum || hasMaximum) {
-+        if (!hasRaw || !hasMinimum || !hasMaximum) return null;
-+        const raw = Number(rawAttribute);
-+        const minimum = Number(minimumAttribute);
-+        const maximum = Number(maximumAttribute);
-+        if (!Number.isInteger(raw) || minimum !== 0 || maximum !== 4 ||
-+            raw < minimum || raw > maximum) return null;
-+        controlValue = raw + 1;
-+      } else if (hasRaw) {
-+        const raw = Number(rawAttribute);
-+        if (!Number.isInteger(raw) || raw < 1 || raw > 5) return null;
-+        controlValue = raw;
-+      }
-+      const textValue = readPowerTextValue(view);
-+      if (controlValue !== null && textValue !== null && controlValue !== textValue) return null;
-+      return controlValue ?? textValue;
++      const value = Number(powerSliderControl(view)?.getAttribute?.('aria-valuenow') ?? '');
++      if (Number.isInteger(value) && value >= 1 && value <= 5) return value;
++      return readPowerTextValue(view);
 +    };
-+    const isPowerProofVisible = (node, allowSelfOpacityZero = false) => {
++    const isPowerProofVisible = (node) => {
 +      if (!isVisible(node)) return false;
 +      for (let current = node; current; current = current.parentElement) {
 +        const style = window.getComputedStyle?.(current);
 +        if (!style || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility) ||
-+            ((!allowSelfOpacityZero || current !== node) && !(Number(style.opacity ?? '1') > 0)) ||
++            !(Number(style.opacity ?? '1') > 0) ||
 +            current.getAttribute?.('aria-hidden') === 'true') return false;
 +      }
 +      return true;
@@ -228,23 +155,10 @@
 +    ).filter((character) =>
 +      (character >= 'a' && character <= 'z') ||
 +      (character >= '0' && character <= '9')).join('');
-+    const boundPowerProofScopes = (modelButton) => {
-+      const controlledRoots = String(modelButton.getAttribute?.('aria-controls') ?? '')
-+        .trim().split(/\s+/).filter(Boolean)
-+        .map((id) => document.getElementById(id))
-+        .filter(isPowerProofVisible);
-+      const buttonMenu = modelButton?.closest?.('[role="menu"]');
-+      const ownedControlledRoots = controlledRoots.filter((root) =>
-+        buttonMenu?.contains?.(root));
-+      if (buttonMenu && ownedControlledRoots.length &&
-+          isPowerProofVisible(buttonMenu)) {
-+        return [buttonMenu];
-+      }
-+      return controlledRoots.map((root) => {
-+        const menu = root?.matches?.('[role="menu"]') ? root :
-+          root?.closest?.('[role="menu"]');
-+        return menu && isPowerProofVisible(menu) ? menu : root;
-+      });
++    const boundPowerProofScope = (root) => {
++      const menu = root?.matches?.('[role="menu"]') ? root :
++        root?.closest?.('[role="menu"]');
++      return menu && isPowerProofVisible(menu) ? menu : root;
 +    };
 +    // Power proof belongs to one visible effort pill and its controlled picker.
 +    // A controlled subtree may use sibling proof only inside its same visible menu.
@@ -255,11 +169,15 @@
 +        .filter(isPowerProofVisible);
 +      const proofTrees = modelButtons.flatMap((modelButton) => {
 +        if (!compactNodeText(modelButton).includes(targetEffort)) return [];
-+        return boundPowerProofScopes(modelButton)
-+          .map((root) => {
++        return String(modelButton.getAttribute?.('aria-controls') ?? '')
++          .trim().split(/\s+/).filter(Boolean)
++          .map((id) => document.getElementById(id))
++          .filter(isPowerProofVisible)
++          .map((controlledRoot) => {
++            const root = boundPowerProofScope(controlledRoot);
 +            const sliders = Array.from(root.querySelectorAll(
 +              '[data-testid="composer-model-picker-slider-simple-view"]',
-+            )).filter((candidate) => isPowerProofVisible(candidate, true));
++            )).filter(isPowerProofVisible);
 +            const advancedViews = Array.from(root.querySelectorAll(
 +              '[data-testid="composer-model-picker-slider-advanced-view"]',
 +            )).filter(isPowerProofVisible);
@@ -320,7 +238,7 @@
      const findOptionInMenu = (menu, modelKindOverride = null) => {
        // Container controls reveal other controls; they are not tiers you can pick.
        // Two shapes exist and both can collide with a tier label: a submenu opener
-@@ -402,6 +613,14 @@
+@@ -402,6 +588,14 @@
          (item) => !isContainerControl(item),
        );
        const modelKind = modelKindOverride || effectiveTargetModelKind();
@@ -335,7 +253,7 @@
        if (modelKind === 'pro') {
          // GPT-5.6's unified Intelligence picker exposes Pro as the highest
          // effort radio directly. It no longer has a nested "Pro Extended"
-@@ -605,27 +824,31 @@
+@@ -605,27 +799,31 @@
            hasToken(pillLabel, 'pro') ||
            currentEffortPillMatchesTarget(trigger, triggerModelKind)
          ) {
@@ -375,7 +293,7 @@
        }
  
        const reopenTrigger = freshComposerTrigger(trigger) || trigger;
-@@ -637,12 +860,14 @@
+@@ -637,12 +835,14 @@
        while (performance.now() < deadline) {
          const selected = findOption();
          if (selected && optionIsSelected(selected)) {
