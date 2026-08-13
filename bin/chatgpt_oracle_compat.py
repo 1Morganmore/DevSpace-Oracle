@@ -315,15 +315,23 @@ PATCHES_0172 = {
     "dist/src/browser/actions/thinkingTime.js": {
         "patch": "thinkingTime.strict.patch",
         "pristine": "303d33ebe915b27407ca22ec0da1d18729464ce50417f405ddb628c31f6fb867",
-        "patched": "ba5cf86ec7136a0e1da824b7efa2155c76c32cb16bc838b8dc1e70134b25e872",
+        "patched": "77d00dadc13e77bd54b0254a7086a1c6d43a39deacd4f489da808f8d6334ab53",
         "legacy_patched": [
-            # Deployed 1.8.0 levels before ChatGPT moved the visible Power
-            # slider beside the Advanced subtree within the same picker menu.
+            # Deployed 1.8.0 levels retained for exact reverse migration.
+            "ba5cf86ec7136a0e1da824b7efa2155c76c32cb16bc838b8dc1e70134b25e872",
+            "7ee4983faf0a0215b13c45293d19da334a44f953a671c721f1ec974a852d8f37",
+            "decfb6830bf20cbfdc8ac0460b7d196599dc510ed8698e062b86161ee52d8829",
             "91c5d356a597fbf1a8e08cde922fd468a94f8cd3a9e441d7534fb7877a117828",
             "9583e9b4f56661e1bfe87def1ffb44f08058eba356b87525ccb099b175e90d06",
             "fac4926083c107d1ed02781ade102995d8003a842a4c92a170c8d5ee01375331",
         ],
         "legacy_patches": {
+            "ba5cf86ec7136a0e1da824b7efa2155c76c32cb16bc838b8dc1e70134b25e872":
+                "thinkingTime.strict.pre-self-transparent-slider.patch",
+            "7ee4983faf0a0215b13c45293d19da334a44f953a671c721f1ec974a852d8f37":
+                "thinkingTime.strict.pre-power-range-validation.patch",
+            "decfb6830bf20cbfdc8ac0460b7d196599dc510ed8698e062b86161ee52d8829":
+                "thinkingTime.strict.pre-diagnostic-range-validation.patch",
             "91c5d356a597fbf1a8e08cde922fd468a94f8cd3a9e441d7534fb7877a117828":
                 "thinkingTime.strict.pre-picker-menu-scope.patch",
             "9583e9b4f56661e1bfe87def1ffb44f08058eba356b87525ccb099b175e90d06":

@@ -1,6 +1,6 @@
 --- a/dist/src/browser/actions/thinkingTime.js
 +++ b/dist/src/browser/actions/thinkingTime.js
-@@ -36,6 +36,131 @@
+@@ -36,6 +36,90 @@
      // own, independently of the legacy Pro-model + "extended" combination.
      const strictProEffort = level === "pro" ||
          ((targetModelKind === "pro" || observedModelKind === "pro") && level === "extended");
@@ -56,51 +56,10 @@
 +                        return menu && visible(menu) ? menu : root;
 +                    });
 +                };
-+                const readPowerTextValue = (view) => {
-+                    const compact = Array.from(String(view?.textContent ?? '').toLowerCase())
-+                        .filter((character) =>
-+                            (character >= 'a' && character <= 'z') ||
-+                            (character >= '0' && character <= '9'))
-+                        .join('');
-+                    for (let candidate = 1; candidate <= 5; candidate += 1) {
-+                        if (compact.includes(String(candidate) + 'of5')) return candidate;
-+                    }
-+                    return null;
-+                };
-+                const readPowerValue = (view) => {
-+                    const control = view?.querySelector?.('[role="slider"], input[type="range"]') || view;
-+                    const rawAttribute = control?.getAttribute?.('aria-valuenow');
-+                    const minimumAttribute = control?.getAttribute?.('aria-valuemin');
-+                    const maximumAttribute = control?.getAttribute?.('aria-valuemax');
-+                    const hasRaw = rawAttribute !== null && rawAttribute !== undefined &&
-+                        String(rawAttribute).trim() !== '';
-+                    const hasMinimum = minimumAttribute !== null && minimumAttribute !== undefined &&
-+                        String(minimumAttribute).trim() !== '';
-+                    const hasMaximum = maximumAttribute !== null && maximumAttribute !== undefined &&
-+                        String(maximumAttribute).trim() !== '';
-+                    let controlValue = null;
-+                    if (hasMinimum || hasMaximum) {
-+                        if (!hasRaw || !hasMinimum || !hasMaximum) return null;
-+                        const raw = Number(rawAttribute);
-+                        const minimum = Number(minimumAttribute);
-+                        const maximum = Number(maximumAttribute);
-+                        if (!Number.isInteger(raw) || minimum !== 0 || maximum !== 4 ||
-+                            raw < minimum || raw > maximum) return null;
-+                        controlValue = raw + 1;
-+                    } else if (hasRaw) {
-+                        const raw = Number(rawAttribute);
-+                        if (!Number.isInteger(raw) || raw < 1 || raw > 5) return null;
-+                        controlValue = raw;
-+                    }
-+                    const textValue = readPowerTextValue(view);
-+                    if (controlValue !== null && textValue !== null &&
-+                        controlValue !== textValue) return null;
-+                    return controlValue ?? textValue;
-+                };
 +                const sliderPro = (root) => Array.from(root.querySelectorAll(
 +                    '[data-testid="composer-model-picker-slider-simple-view"]',
-+                )).some((node) => visible(node, true) && readPowerValue(node) === 5 &&
-+                    /\\bpro\\b/i.test(text(node)));
++                )).some((node) => visible(node, true) && /\\bpro\\b/i.test(text(node)) &&
++                    /\\b5\\s+of\\s+5\\b/i.test(text(node)));
 +                const advancedPro = (root) => Array.from(root.querySelectorAll(
 +                    '[data-testid="composer-model-picker-slider-advanced-view"]',
 +                )).some((node) => visible(node) &&
@@ -156,7 +115,7 @@
              }
              logger(formatBrowserThinkingLog(`unknown outcome selecting ${capitalizedLevel}; continuing with ChatGPT default.`));
              return;
-@@ -380,12 +462,157 @@
+@@ -380,12 +462,141 @@
        // 'intelligen' matches both "Intelligence" and German "Intelligenz".
        return normalize(label?.textContent ?? '').includes('intelligen');
      };
@@ -186,28 +145,12 @@
 +    };
 +    const readPowerValue = (view) => {
 +      const control = powerSliderControl(view);
-+      const rawAttribute = control?.getAttribute?.('aria-valuenow');
-+      const minimumAttribute = control?.getAttribute?.('aria-valuemin');
-+      const maximumAttribute = control?.getAttribute?.('aria-valuemax');
-+      const hasRaw = rawAttribute !== null && rawAttribute !== undefined && String(rawAttribute).trim() !== '';
-+      const hasMinimum = minimumAttribute !== null && minimumAttribute !== undefined &&
-+        String(minimumAttribute).trim() !== '';
-+      const hasMaximum = maximumAttribute !== null && maximumAttribute !== undefined &&
-+        String(maximumAttribute).trim() !== '';
-+      let controlValue = null;
-+      if (hasMinimum || hasMaximum) {
-+        if (!hasRaw || !hasMinimum || !hasMaximum) return null;
-+        const raw = Number(rawAttribute);
-+        const minimum = Number(minimumAttribute);
-+        const maximum = Number(maximumAttribute);
-+        if (!Number.isInteger(raw) || minimum !== 0 || maximum !== 4 ||
-+            raw < minimum || raw > maximum) return null;
-+        controlValue = raw + 1;
-+      } else if (hasRaw) {
-+        const raw = Number(rawAttribute);
-+        if (!Number.isInteger(raw) || raw < 1 || raw > 5) return null;
-+        controlValue = raw;
-+      }
++      const raw = Number(control?.getAttribute?.('aria-valuenow') ?? '');
++      const minimum = Number(control?.getAttribute?.('aria-valuemin') ?? '');
++      const maximum = Number(control?.getAttribute?.('aria-valuemax') ?? '');
++      const controlValue = Number.isInteger(raw) && minimum === 0 && maximum === 4 &&
++        raw >= minimum && raw <= maximum ? raw + 1 :
++        Number.isInteger(raw) && raw >= 1 && raw <= 5 ? raw : null;
 +      const textValue = readPowerTextValue(view);
 +      if (controlValue !== null && textValue !== null && controlValue !== textValue) return null;
 +      return controlValue ?? textValue;

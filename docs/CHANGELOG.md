@@ -32,6 +32,12 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
   포함할 때만 허용합니다. 교차 menu root, 다른 menu의 slider, 숨은 조상,
   불일치 모델·Effort는 계속 거부합니다. 이전 1.8.0 패치 해시는 exact reverse
   patch로 pristine에 복원한 뒤 새 해시 결합 패치로 승격합니다.
+- 현재 ChatGPT가 크기를 유지한 simple Power readout 자체는 `opacity: 0`으로,
+  내부 ARIA slider는 `0..4` 범위로 렌더링하는 구조를 수용합니다. 완전한
+  zero-based 범위만 표시 Power `1..5`로 변환하고, 부분·비지원 범위나 유효하지
+  않은 control 값과 control/text 불일치는 모두 거부합니다.
+  opacity 예외는 정확한 slider test-id 노드에만 적용하며 조상 picker·effort
+  pill·coherent Advanced view의 표시와 양의 opacity는 계속 요구합니다.
 - 같은 정규화 `CODEX_HOME`을 대상으로 한 설치는 Windows named mutex로
   단일 writer만 허용합니다. 경쟁 설치는 파일 변경 전에 거부하고, 비정상 종료로
   버려진 mutex 소유권은 기존 WAL crash recovery를 계속 수행할 수 있게 인수합니다.
