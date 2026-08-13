@@ -66,6 +66,14 @@ and—when `task_outcome_contract` is `v1`—a final
 `TASK_OUTCOME: EXECUTED` marker. `TASK_OUTCOME: NOT_EXECUTED` and
 `TASK_OUTCOME: BLOCKED` preserve terminal transport evidence but return
 attention-required; transport success alone never claims project execution.
+The composer sends only the app mention plus the absolute mission path, so the
+outcome contract lives in the mission: mission authors must require every
+citation, footnote, and Markdown reference definition to appear before the
+final marker, keeping that marker the final nonempty line. The classifier
+still accepts the bounded provider-rendered case of exactly one marker followed
+solely by blank lines or single-line HTTP(S) Markdown reference definitions;
+ordinary trailing prose, a second marker, or a multiline or non-HTTP definition
+remains `unknown`.
 A nonzero Oracle exit after launch, including a browser response timeout, is
 `attention_required` rather than proof that the web session failed. It retains
 same-project ownership and permits only exact-slug `live` or `harvest`

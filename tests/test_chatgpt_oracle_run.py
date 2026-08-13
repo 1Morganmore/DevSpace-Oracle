@@ -500,6 +500,99 @@ def profile_copy_ebusy_popen(command, **kwargs):
     return Process(1, [])
 
 
+def manual_login_profile_uninitialized_lines(locator: str, *, variation: str | None = None) -> str:
+    """Fabricate Oracle 0.17.1's exact manual-login pre-submit stdout.
+
+    Variations flip one proof bound at a time so the contradiction tests
+    exercise each fail-closed condition independently.
+    """
+    expected_profile = (Path.home() / ".oracle" / "browser-profile").resolve()
+    reported_profile = (
+        (expected_profile.parent / "different-profile").resolve()
+        if variation == "different-profile"
+        else expected_profile
+    )
+    escaped_profile = str(reported_profile).replace("\\", "\\\\")
+    failure_tail = (
+        "ChatGPT browser manual-login profile is not initialized. "
+        f"Browser mode is using Oracle's private Chrome profile at {reported_profile}, "
+        "separate from your normal Chrome profile. Run first-time setup, sign in there, then retry: "
+        "oracle --engine browser --browser-manual-login --browser-keep-browser "
+        f'--browser-manual-login-profile-dir "{escaped_profile}" -p "HI". '
+        "If you want to reuse an already signed-in Chrome instead, use --browser-attach-running."
+    )
+    lines = [
+        "🧿 oracle 0.17.1 — Silent run, loud receipts.",
+        f"Session: {locator}",
+        "Mode: browser foreground",
+        "Models: 1",
+        "Detach: no",
+        f"Reattach: oracle session {locator}",
+        "Launching browser mode (target=GPT-5.6 Sol; requested=gpt-5.6-sol) with ~108 tokens.",
+        "This run can take up to an hour (usually ~10 minutes).",
+        "[browser] Browser control: launch Chrome in hidden-window mode; may focus/control the browser UI.",
+        "[browser] Browser guidance: On macOS, Oracle launches Chrome off-screen while keeping the page rendered.",
+        "[browser] Browser guidance: For the calmest shared-desktop flow, prefer --browser-attach-running or --remote-chrome.",
+        f"ERROR: {failure_tail}",
+    ]
+    if variation == "extra-line":
+        lines.insert(1, "[browser] Browser guidance: unexpected extra banner line.")
+    if variation != "missing-user-error":
+        lines.append(f"User error (browser-automation): {failure_tail}")
+    if variation == "conversation-url":
+        lines.append("URL: https://chatgpt.com/c/submitted-session")
+    return "\n".join(lines) + "\n"
+
+
+def manual_login_profile_uninitialized_state(
+    runner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_id: str,
+    *,
+    variation: str | None = None,
+) -> tuple[Path, Path]:
+    """Persist a legacy Oracle 0.17.1 Pro run with the exact failure transcript."""
+    monkeypatch.setenv("ORACLE_BROWSER_PROFILE_DIR", str(tmp_path / "profile-not-created"))
+    manifest_path = pro_manifest(tmp_path, run_id=run_id, test_profile=False)
+    config = runner.STATE.load_manifest(manifest_path)
+    layout = runner.STATE.create_layout(config, run_id=run_id)
+    layout.run_dir.mkdir(parents=True, exist_ok=False)
+    payload = runner.STATE.state_payload(
+        config,
+        layout,
+        status="failed",
+        resolved_version="oracle 0.17.1",
+        exit_code=1,
+    )
+    payload.update({
+        "session_authority": "submitted_unknown",
+        "transport_status": "failed",
+        "task_outcome": "pending",
+        "task_outcome_reason": None,
+    })
+    if variation == "copy-profile-set":
+        seed = tmp_path.parent / f"{tmp_path.name}-profile"
+        seed.mkdir(exist_ok=True)
+        payload["profile"]["copy_profile"] = str(seed.resolve())
+    if variation == "wrong-version":
+        payload["oracle"]["resolved_version"] = "oracle 0.17.0"
+    runner.STATE.write_json_atomic(layout.state_path, payload)
+    locator = payload["oracle"]["slug"]
+    stdout_text = manual_login_profile_uninitialized_lines(locator, variation=variation)
+    layout.stdout_path.write_text(stdout_text, encoding="utf-8")
+    layout.stderr_path.write_text("", encoding="utf-8")
+    if variation == "transcript-mismatch":
+        layout.transcript_path.write_text("different transcript bytes\n", encoding="utf-8")
+    else:
+        layout.transcript_path.write_text(stdout_text, encoding="utf-8")
+    if variation == "output-exists":
+        layout.output_path.write_text("unexpected output\n", encoding="utf-8")
+    if variation == "stderr-nonempty":
+        layout.stderr_path.write_text("unexpected stderr\n", encoding="utf-8")
+    return manifest_path, layout.run_dir
+
+
 def test_dry_run_never_executes_and_has_no_file_flag(tmp_path: Path) -> None:
     runner = load_runner()
     calls = []
@@ -2039,6 +2132,113 @@ def test_recovery_repairs_legacy_profile_copy_ebusy_without_oracle_call(tmp_path
     assert recovered["safe_for_fresh_run"] is True
     assert settled["session_authority"] == "pre_submit"
     assert settled["task_outcome"] == "not_executed"
+    assert calls == []
+
+
+def test_manual_login_profile_uninitialized_is_proven_pre_submit_and_releases_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_runner()
+    manifest_path, run_dir = manual_login_profile_uninitialized_state(
+        runner, tmp_path, monkeypatch, "8" * 32
+    )
+    state_path = run_dir / "state.json"
+
+    recovered = recover_run(runner, run_dir, action="harvest", dry_run=True)
+    settled = runner.STATE.load_state(state_path)
+
+    assert recovered["status"] == "pre_submit_failed"
+    assert recovered["safe_for_fresh_run"] is True
+    assert settled["session_authority"] == "pre_submit"
+    assert settled["transport_status"] == "failed_pre_submit"
+    assert settled["task_outcome"] == "not_executed"
+    assert (
+        settled["task_outcome_reason"]
+        == "oracle-manual-login-profile-uninitialized-pre-submit"
+    )
+    assert (
+        settled["pre_submit_failure"]["code"]
+        == "ORACLE_MANUAL_LOGIN_PROFILE_UNINITIALIZED_PRELAUNCH_FAILED"
+    )
+    assert settled["pre_submit_failure"]["output_absent"] is True
+    assert settled["pre_submit_failure"]["conversation_url_absent"] is True
+    assert settled["pre_submit_failure"]["resolved_version"] == "0.17.1"
+    assert (
+        settled["pre_submit_failure"]["manual_login_profile"]
+        == str((Path.home() / ".oracle" / "browser-profile").resolve())
+    )
+    assert runner.STATE.unresolved_project_sessions(
+        runner.STATE.load_manifest(manifest_path).run_root,
+        tmp_path,
+    ) == []
+
+
+@pytest.mark.parametrize(
+    "variation",
+    [
+        "missing-user-error",
+        "different-profile",
+        "output-exists",
+        "conversation-url",
+        "extra-line",
+        "stderr-nonempty",
+        "transcript-mismatch",
+        "copy-profile-set",
+        "wrong-version",
+    ],
+)
+def test_manual_login_profile_uninitialized_keeps_lock_when_proof_is_incomplete(
+    tmp_path: Path,
+    variation: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_runner()
+    manifest_path, run_dir = manual_login_profile_uninitialized_state(
+        runner, tmp_path, monkeypatch, "3" * 32, variation=variation
+    )
+    state_path = run_dir / "state.json"
+
+    recovered = recover_run(runner, run_dir, action="harvest", dry_run=True)
+    settled = runner.STATE.load_state(state_path)
+
+    assert recovered["status"] == "dry-run"
+    assert settled["session_authority"] == "submitted_unknown"
+    assert "pre_submit_failure" not in settled
+    owners = runner.STATE.unresolved_project_sessions(
+        runner.STATE.load_manifest(manifest_path).run_root,
+        tmp_path,
+    )
+    assert [owner["run_id"] for owner in owners] == ["3" * 32]
+
+
+def test_recovery_repairs_legacy_manual_login_profile_lock_without_oracle_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_runner()
+    _, run_dir = manual_login_profile_uninitialized_state(
+        runner, tmp_path, monkeypatch, "4" * 32
+    )
+    state_path = run_dir / "state.json"
+    calls: list[bool] = []
+
+    recovered = runner.recover_run(
+        run_dir,
+        action="harvest",
+        oracle_command=["oracle"],
+        popen_factory=lambda *args, **kwargs: calls.append(True),
+    )
+    settled = runner.STATE.load_state(state_path)
+
+    assert recovered["status"] == "pre_submit_failed"
+    assert recovered["safe_for_fresh_run"] is True
+    assert settled["session_authority"] == "pre_submit"
+    assert settled["task_outcome"] == "not_executed"
+    assert (
+        settled["pre_submit_failure"]["code"]
+        == "ORACLE_MANUAL_LOGIN_PROFILE_UNINITIALIZED_PRELAUNCH_FAILED"
+    )
     assert calls == []
 
 

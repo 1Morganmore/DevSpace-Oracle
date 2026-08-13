@@ -26,6 +26,24 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
   업그레이드 전에 시작된 Oracle `0.17.1` 실행도 해당 버전의 레거시
   Extra High/Pro Heavy 거부 증거가 완전하면 같은 `not_executed` 정산 경로로
   복구해 잘못 유지된 프로젝트 잠금을 해제합니다.
+- 저장된 Oracle `0.17.1` 실행의 manual-login 프로필 미초기화 전송 전 실패는
+  정확한 upstream transcript(11줄 prefix + 두 오류 줄), canonical artifact
+  경로, 빈 stderr, `transcript == stdout`, 기본
+  `~/.oracle/browser-profile` 경로, output·대화 URL 부재에만 결합해
+  `not_executed`로 정산하고 프로젝트 잠금을 해제합니다. 정확 복구 전용이며
+  Pro 첨부 전용·비복사(`copy_profile` 없음)·`gpt-5.6-sol`+`select`+`heavy`
+  manifest 형태만 허용합니다. 버전·transport·프로필 경로·artifact layout·
+  줄 수·내용이 조금이라도 다르거나 복사 프로필 모드면 submitted-unknown과
+  잠금을 유지합니다. 진단 도구는 이 증거를
+  `pre-submit-host-environment` 버킷의
+  `oracle-manual-login-profile-uninitialized` 시그니처로 분류합니다.
+- v1 `TASK_OUTCOME` 분류기는 마커 뒤 provider 렌더링 부산물이 빈 줄과 한 줄
+  HTTP(S) Markdown 참조 정의뿐일 때만 허용합니다. 마커 뒤 일반 prose, 두
+  번째 마커, 여러 줄·비HTTP 정의는 `unknown`으로 fail-closed하며, composer
+  프롬프트는 regular 실행에서 정확히 `@DevSpace` + 절대 미션 경로만 전송하므로
+  그대로 두고, 런타임 스킬 계약으로 미션 작성자가 모든 인용·각주·참조 정의를
+  최종 마커 앞에 배치하도록 요구합니다. Pro 첨부 전용 출력은 마커 분류
+  대상이 아닙니다(`not_applicable`).
 - ChatGPT의 현재 Advanced picker가 `aria-controls` 대상 subtree 밖이지만 같은
   visible menu 안에 Power slider를 배치하는 구조를 수용합니다. 메뉴 범위 확장은
   effort pill의 가장 가까운 visible menu가 해당 `aria-controls` root를 실제로

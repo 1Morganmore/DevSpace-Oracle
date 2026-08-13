@@ -212,6 +212,13 @@ zero, a fresh nonempty host-only `output.md`, immutable hashes, and a refreshed
 transcript. Oracle waits on the original submitted session for its bounded
 90-minute answer budget. Oracle archives only after the durable one-shot output
 is saved.
+Pro attachment-only output is never classified by the regular DevSpace
+`TASK_OUTCOME` marker contract: `task_outcome_contract` is `legacy` and the
+classifier returns `not_applicable`. The bounded v1 rule (exactly one marker
+followed solely by blank lines or single-line HTTP(S) Markdown reference
+definitions) applies only to regular DevSpace runs; Pro completion is judged by
+its own durable-output evidence and the required `WEB_MULTI_NEEDED` decision
+block, never by a marker footer.
 
 ## Recovery
 
