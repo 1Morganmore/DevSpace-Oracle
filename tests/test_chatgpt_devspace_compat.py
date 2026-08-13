@@ -224,6 +224,116 @@ def test_service_identity_normalizes_npx_bin_parent_path() -> None:
     assert compat._assert_devspace_service_identity(identity, [package]) is identity
 
 
+def test_service_identity_accepts_posix_npm_shim_only_for_exact_package(
+    tmp_path: Path,
+) -> None:
+    if sys.platform == "win32":
+        pytest.skip("POSIX npm launchers use symlinks")
+    compat = load_compat()
+    package = tmp_path / "node_modules" / "@waishnav" / "devspace"
+    cli = package / "dist" / "cli.js"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    shim = tmp_path / "node_modules" / ".bin" / "devspace"
+    shim.parent.mkdir()
+    shim.symlink_to(cli)
+    identity = {
+        "pid": 77,
+        "command_line": f"node {shim} serve",
+        "started_at_unix_ns": 1,
+    }
+
+    assert compat._assert_devspace_service_identity(identity, [package]) is identity
+
+
+def test_service_identity_rejects_posix_npm_shim_for_foreign_package(
+    tmp_path: Path,
+) -> None:
+    if sys.platform == "win32":
+        pytest.skip("POSIX npm launchers use symlinks")
+    compat = load_compat()
+    package = tmp_path / "node_modules" / "@waishnav" / "devspace"
+    cli = package / "dist" / "cli.js"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    foreign_cli = tmp_path / "foreign-cli.js"
+    foreign_cli.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    shim = tmp_path / "node_modules" / ".bin" / "devspace"
+    shim.parent.mkdir()
+    shim.symlink_to(foreign_cli)
+
+    with pytest.raises(compat.DevSpaceCompatError) as mismatch:
+        compat._assert_devspace_service_identity(
+            {"pid": 88, "command_line": f"node {shim} serve", "started_at_unix_ns": 1},
+            [package],
+        )
+    assert mismatch.value.code == "DEVSPACE_SERVICE_IDENTITY_MISMATCH"
+
+
+def test_service_identity_rejects_posix_non_symlink_shim(tmp_path: Path) -> None:
+    if sys.platform == "win32":
+        pytest.skip("POSIX npm launchers use symlinks")
+    compat = load_compat()
+    package = tmp_path / "node_modules" / "@waishnav" / "devspace"
+    cli = package / "dist" / "cli.js"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    shim = tmp_path / "node_modules" / ".bin" / "devspace"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("#!/bin/sh\nexec node dist/cli.js \"$@\"\n", encoding="utf-8")
+
+    with pytest.raises(compat.DevSpaceCompatError) as mismatch:
+        compat._assert_devspace_service_identity(
+            {"pid": 99, "command_line": f"node {shim} serve", "started_at_unix_ns": 1},
+            [package],
+        )
+    assert mismatch.value.code == "DEVSPACE_SERVICE_IDENTITY_MISMATCH"
+
+
+def test_service_identity_rejects_posix_shim_of_unselected_package(
+    tmp_path: Path,
+) -> None:
+    if sys.platform == "win32":
+        pytest.skip("POSIX npm launchers use symlinks")
+    compat = load_compat()
+    package = tmp_path / "node_modules" / "@waishnav" / "devspace"
+    cli = package / "dist" / "cli.js"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    other = tmp_path / "other" / "node_modules" / "@waishnav" / "devspace"
+    other_cli = other / "dist" / "cli.js"
+    other_cli.parent.mkdir(parents=True)
+    other_cli.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    other_shim = tmp_path / "other" / "node_modules" / ".bin" / "devspace"
+    other_shim.parent.mkdir()
+    other_shim.symlink_to(other_cli)
+
+    with pytest.raises(compat.DevSpaceCompatError) as mismatch:
+        compat._assert_devspace_service_identity(
+            {
+                "pid": 111,
+                "command_line": f"node {other_shim} serve",
+                "started_at_unix_ns": 1,
+            },
+            [package],
+        )
+    assert mismatch.value.code == "DEVSPACE_SERVICE_IDENTITY_MISMATCH"
+
+
+def test_service_identity_rejects_windows_bin_shim_path() -> None:
+    compat = load_compat()
+    package = Path(r"C:\cache\node_modules\@waishnav\devspace")
+    identity = {
+        "pid": 44,
+        "command_line": r'"node" "C:\cache\node_modules\.bin\devspace" serve',
+        "started_at_unix_ns": 1,
+    }
+
+    with pytest.raises(compat.DevSpaceCompatError) as mismatch:
+        compat._assert_devspace_service_identity(identity, [package])
+    assert mismatch.value.code == "DEVSPACE_SERVICE_IDENTITY_MISMATCH"
+
+
 def test_unknown_devspace_version_or_file_hash_fails_closed(tmp_path: Path) -> None:
     compat = load_compat()
     package = tmp_path / "package"

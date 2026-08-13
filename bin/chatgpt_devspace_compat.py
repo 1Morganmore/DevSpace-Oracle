@@ -179,6 +179,17 @@ def _assert_devspace_service_identity(
         ntpath.normcase(ntpath.normpath(str(root / "dist" / "cli.js")))
         for root in package_roots
     ]
+    if os.name != "nt":
+        for root in package_roots:
+            cli = root / "dist" / "cli.js"
+            if len(root.parents) < 2:
+                continue
+            shim = root.parents[1] / ".bin" / "devspace"
+            try:
+                if shim.is_symlink() and shim.resolve(strict=True) == cli.resolve(strict=True):
+                    expected_cli_paths.append(ntpath.normcase(ntpath.normpath(str(shim))))
+            except OSError:
+                continue
     if not any(
         token == expected
         and index + 1 < len(normalized_tokens)

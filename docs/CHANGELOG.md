@@ -45,6 +45,11 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
   가까운 ancestor를 제거 기준으로 사용하되, 새 `previous_receipt`는 그 branch의
   실제 head를 가리킵니다. rollback 뒤 재설치도 선형 이력을 유지하고, fork,
   cycle, 다중 영수증인데 현재 owner가 없는 상태는 mutation 전에 거부합니다.
+- POSIX에서 DevSpace 서비스 신원 검증은 npm이 만든
+  `node_modules/.bin/devspace` 심볼릭 링크가 resolve 후 정확한 선택 패키지
+  root의 `dist/cli.js`와 일치할 때만 launcher 경로를 추가로 허용합니다.
+  foreign symlink, 비심볼릭 shim·일반 파일, 선택되지 않은 패키지 root의
+  launcher, Windows `.bin` 경로는 계속 거부합니다.
 
 ## 이전 릴리스
 
