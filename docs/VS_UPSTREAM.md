@@ -5,18 +5,20 @@ This file binds package compatibility to exact public artifacts. The local fork 
 ## A. Fork versus parent project
 
 - Local ref: the exact commit containing this document in `1Morganmore/DevSpace-Oracle`.
-- Parent main observed and audited on 2026-08-11: `ventianima-lab/codexpro-automation@77bb79afcde2e5b95b18f5cc0490d1592f8fb954`.
+- Parent main observed and audited on 2026-08-13: `ventianima-lab/codex-web-gpt-automation@54a6b6e931dbedfd233be71c33129e3dcee4805e`.
 - Last direct integration baseline: `9542abeef6aa544f4ee6af03bab61cef3474f9e4`.
 - Merge-base before this release commit: `250b839a559cb61442feeb64bff6d49dfa185169`.
-- Observed ancestry immediately before this release commit: 32 commits ahead, 30 behind.
+- Observed ancestry immediately before this release commit: 46 commits ahead, 60 behind.
 - The exact release tree difference is reported externally after commit because a commit cannot contain its own final hash.
 
 The fork keeps Oracle-only browser submission, DevSpace workspace transport, exact-slug recovery, per-project locks, receipt-owned installation, Windows process/profile isolation, and bounded Web Multi sessions. Parent sync must preserve monotonic terminal authority, exact package/hash gating, host-only state, mutex/schema/receipt identities, and the absence of automatic Web Multi or alternate-backend fallback.
 
 The nine commits after `9542abee` were reviewed individually. The selector-proof changes in `51675967` and `d8f8fac1` are self-developed on the active fork Power patch: only visible picker candidates count, all three independent Pro signals are required, and two consecutive observations are required before an already-selected result. The existing final diagnostic-race fallback remains intact. The recovered-lane and merger-resume changes in `39f750f4` and `916aeffb` are deferred because they require adaptation to this fork's manifest hashes, parent lock, terminal seal, and monotonic exact-session authority. The persisted `allowedRoots` doctor readback from `69ad58c2` is selected. The `075b3719` change is intentionally rejected: making read-only DevSpace the default Pro route violates this fork's Pro contract, which is Oracle attachment-only with no app. The later `6d24cce` Funnel recovery is self-developed rather than cherry-picked: this fork's explicit `ensure` command waits for the exact local `/healthz` identity, creates only an absent exact mapping, refuses conflicts, reads back any change, and proves the public `/healthz` identity. It does not accept permissive `/mcp` status codes or claim automatic login recovery without a supervised startup path. The `ae3b3caf` OAuth fix is also self-developed on the pinned 1.0.6 launch path: all four managed `serve` entries advertise `devspace,offline_access`, while ChatGPT reconnect or recreation remains a manual settings action. The `77bb79af` task-outcome change is not applied because it governs the same rejected `pro-devspace-readonly` transport; this fork has no such route, keeps Pro attachment-only with the legacy non-DevSpace outcome contract, and already requires v1 task outcomes for regular DevSpace runs.
 
+The 30 commits between `77bb79af` and `54a6b6e` were audited on 2026-08-13. Selected: the manual-login pre-submit proof (`b9cdf382` releases the proven Oracle pre-submit profile locks), the bounded reference-footer classification (`07ca3394`), the explicit post-register stabilization with exact slot recycle (`63a61fad` settles DevSpace only after ChatGPT app registration and `8ea49f2b` recovers the stale Funnel onto the exact slot after reconnect), the auth-preserving existing-DevSpace-config persistence fragment of `fc454da1`, the POSIX exact npm launcher identity fragment of `51d2e415`, and the `MULTI_GPT_CODEX_CLI_PATH`/`CODEX_CLI_PATH` runtime override fragment of `e8105e6d`. Reviewed and deferred: the CDP bootstrap fragment of `fc454da1` and the drive-root persistence hygiene of `94f7dc70`, the fail-closed ultra-economy mode (`26595b76`), and the onboarding/global-agent installs and the Local Multi-GPT optional-install flip (`0f4dcb36`, `f75c9cc6`, `e8105e6d`) — Local Multi remains an always-installed manifest member. Rejected: Oracle/DevSpace downgrade acceptance (`4c3938a9` and the DevSpace 1.0.4/hash-downgrade fragment of `51d2e415`), configurable workspace app names (`b7b1766a`), `pro-devspace-readonly` (`eb423a53`), and the macOS/Cloudflare/rebrand/legacy-installer work (`9da21bbc`, `6af6d17e`, `c78302c7`, `84f3e027`) which targets platforms and packaging this fork does not ship.
+
 ```powershell
-git fetch https://github.com/ventianima-lab/codexpro-automation main
+git fetch https://github.com/ventianima-lab/codex-web-gpt-automation main
 git rev-parse HEAD
 git rev-parse FETCH_HEAD
 git merge-base HEAD FETCH_HEAD
@@ -114,7 +116,7 @@ regressed.
 
 For a new Oracle release, query registry metadata, download the exact npm tarball, verify integrity, calculate every pristine hash, dry-apply each patch, review changed upstream sources, calculate patched hashes, and only then update the version table and manifest. Source tags never substitute for npm dist bytes.
 
-Oracle main was observed at `f5b9c8106cf6b826b3d48fc5a0fb19de26ee584b` on 2026-08-12. It remains newer than the `v0.17.2` release tag. The only runtime-source delta since the prior audit is upstream Japanese Intelligence effort-label recognition; it is not adopted because the local compatibility proof uses different Power-selector authority and must be ported and verified independently. No unreleased source-main code is adopted.
+Oracle main was observed at `f5b9c8106cf6b826b3d48fc5a0fb19de26ee584b` on 2026-08-12 and re-observed unchanged on 2026-08-13. It remains newer than the `v0.17.2` release tag. The only runtime-source delta since the prior audit is upstream Japanese Intelligence effort-label recognition; it is not adopted because the local compatibility proof uses different Power-selector authority and must be ported and verified independently. No unreleased source-main code is adopted.
 
 ## C. DevSpace compatibility layer
 
@@ -132,4 +134,4 @@ Conversation reuse metadata is a ChatGPT host boundary. The local Oracle runner 
 
 For a new DevSpace release, verify exact registry/tarball identity, regenerate both patches against the dist bytes, inspect router/middleware and traversal changes, test OAuth/listener/restart/root behavior, then update the pin and manifest. The read-only `scripts/check_upstream.py` reports drift but never promotes compatibility.
 
-DevSpace main and release `v1.0.7` were observed at `b5b4ab62a8718e1186aef815538741d9402f92ba` on 2026-08-12. The release changes workspace-reuse guidance and the unknown-workspace error only; allowed roots, OAuth/healthz routing, and workspace traversal semantics are unchanged. Both local patches apply cleanly to the exact npm dist bytes, so the tested pin is promoted to `1.0.7`.
+DevSpace main and release `v1.0.7` were observed at `b5b4ab62a8718e1186aef815538741d9402f92ba` on 2026-08-12 and re-observed unchanged on 2026-08-13. The release changes workspace-reuse guidance and the unknown-workspace error only; allowed roots, OAuth/healthz routing, and workspace traversal semantics are unchanged. Both local patches apply cleanly to the exact npm dist bytes, so the tested pin is promoted to `1.0.7`.

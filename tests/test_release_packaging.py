@@ -143,7 +143,9 @@ def test_parent_upstream_report_parses_tab_counts_and_flags_unaudited_head(monke
     result = check_parent()
 
     assert (result["ahead"], result["behind"]) == (26, 27)
-    assert result["audited_parent_head"] == "77bb79afcde2e5b95b18f5cc0490d1592f8fb954"
+    assert result["repository"] == "ventianima-lab/codex-web-gpt-automation"
+    assert result["vendored_parent_ref"] == "vendor/codex-web-main"
+    assert result["audited_parent_head"] == "54a6b6e931dbedfd233be71c33129e3dcee4805e"
     assert result["last_integrated_donor"] == "9542abeef6aa544f4ee6af03bab61cef3474f9e4"
     assert result["vendored_head_audited"] is False
     assert {"PARENT_HEAD_UNAUDITED", "PARENT_AUDITED_HEAD_MISMATCH"} <= set(result["flags"])
