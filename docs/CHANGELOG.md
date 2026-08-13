@@ -45,6 +45,9 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
   가까운 ancestor를 제거 기준으로 사용하되, 새 `previous_receipt`는 그 branch의
   실제 head를 가리킵니다. rollback 뒤 재설치도 선형 이력을 유지하고, fork,
   cycle, 다중 영수증인데 현재 owner가 없는 상태는 mutation 전에 거부합니다.
+- Tailscale status JSON은 Windows ANSI locale과 무관하게 UTF-8(strict)로만
+  디코딩하므로 Unicode 장치명이 있어도 setup doctor가 중단되거나 출력이
+  조용히 왜곡되지 않습니다.
 
 ## 이전 릴리스
 

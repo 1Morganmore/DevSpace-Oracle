@@ -268,6 +268,54 @@ def test_secret_text_is_redacted_from_funnel_diagnostics() -> None:
     assert "[REDACTED]" in report["stderr"]
 
 
+def test_funnel_status_decodes_status_json_as_strict_utf8_and_matches_unicode_hostname(tmp_path: Path) -> None:
+    module = load_module()
+    unicode_config = module.SetupConfig((tmp_path / "project",), "오사카-pc.tailnet.ts.net")
+    seen: dict[str, object] = {}
+    payload = json.dumps(
+        {"Web": {f"{unicode_config.hostname}:443": {"Proxy": f"http://127.0.0.1:{unicode_config.local_port}"}}},
+        ensure_ascii=False,
+    )
+
+    def runner(argv, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout=payload, stderr="")
+
+    report = module.funnel_status(unicode_config, runner=runner)
+    assert seen["encoding"] == "utf-8"
+    assert seen["errors"] == "strict"
+    assert seen["capture_output"] is True
+    assert seen["text"] is True
+    assert seen["check"] is False
+    assert report == {
+        "ok": True,
+        "mapping": "match",
+        "status": {"Proxy": f"http://127.0.0.1:{unicode_config.local_port}"},
+    }
+
+
+def test_funnel_status_never_silently_replaces_non_utf8_tailscale_output(tmp_path: Path) -> None:
+    module = load_module()
+    current = module.SetupConfig((tmp_path / "project",), "device.tailnet.ts.net")
+    seen: dict[str, object] = {}
+
+    def runner(argv, **kwargs):
+        # Mimic subprocess.run text mode: decode the captured bytes with exactly
+        # the encoding/errors the module requested.
+        seen.update(kwargs)
+        malformed = b'{"Web": {"device.tailnet.ts.net:443": {"Proxy": "http://127.0.0.1:7676"}}\x80}'
+        return SimpleNamespace(
+            returncode=0,
+            stdout=malformed.decode(kwargs["encoding"], kwargs["errors"]),
+            stderr="",
+        )
+
+    with pytest.raises(UnicodeDecodeError):
+        module.funnel_status(current, runner=runner)
+    assert seen["encoding"] == "utf-8"
+    assert seen["errors"] == "strict"
+
+
 def test_doctor_rejects_404_and_unrelated_funnel_mapping(tmp_path: Path) -> None:
     module, current = config(tmp_path)
 
