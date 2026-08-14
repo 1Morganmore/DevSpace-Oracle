@@ -26,12 +26,42 @@ def test_regular_modes_route_only_through_oracle_and_devspace() -> None:
     assert "Oracle `0.17.3`" in value and "`Extra High`" in value
 
 
-def test_pro_is_oracle_attachment_only_heavy_and_has_no_app_fallback() -> None:
+def test_pro_evidence_route_is_oracle_attachment_only_heavy_and_has_no_app_fallback() -> None:
     value = text(PRO)
     assert "Oracle is the only backend for a new Pro run" in value
     assert "There is no DevSpace, alternate app, in-app Browser" in value
     assert "gpt-5.6-sol" in value and "heavy" in value
     assert "never downgrade" in value
+    assert "pro-attachment-only" in value and "pro-devspace" in value
+
+
+def test_qualified_pro_is_explicit_only_and_writes_inside_the_exact_root() -> None:
+    korean = text(ROOT / "README.md")
+    english = text(ROOT / "README.en.md")
+    for value in (korean, english):
+        assert "pro-devspace" in value and "pro-attachment-only" in value
+        assert "exact project root" in value
+        assert "allow_pro: true" in value
+    assert "자동으로 Pro로 승격하지 않습니다" in korean
+    assert "never promotes to Pro automatically" in english
+    assert "명시적으로 요청할 때만" in korean
+    assert "only when the user explicitly requests it" in english
+    assert "명시적 불변 증거 경로" in korean and "immutable-evidence route" in english
+    assert "자동 fallback이 아닙니다" in korean and "not an automatic fallback" in english
+
+
+def test_comprehensive_pro_stage_requires_allow_pro_opt_in() -> None:
+    value = text(HANDOFF)
+    assert "allow_pro" in value and "allow_pro: true" in value
+    assert "explicit user request" in value
+    assert "pro-devspace" in value and "pro-attachment-only" in value
+
+
+def test_pro_skill_auto_invocation_is_disabled() -> None:
+    assert "allow_implicit_invocation: false" in text(ROOT / "skills/chatgpt-pro-browser/agents/openai.yaml")
+    assert "allow_implicit_invocation: false" in text(ROOT / "skills/chatgpt-thinking-browser/agents/openai.yaml")
+    assert "allow_implicit_invocation: false" in text(ROOT / "README.md")
+    assert "allow_implicit_invocation: false" in text(ROOT / "README.en.md")
 
 
 def test_deep_research_and_web_multi_use_the_active_oracle_entry_points() -> None:
@@ -65,7 +95,8 @@ def test_manifest_exposes_only_active_routing_authorities() -> None:
     assert manifest["routing"] == {
         "new_work_engine": "oracle",
         "regular_workspace_transport": "devspace",
-        "pro_transport": "oracle-attachment-only",
+        "pro_transport": "oracle-pro-devspace",
+        "pro_evidence_transport": "oracle-pro-attachment-only",
     }
     assert set(manifest["external"]) == {"oracle", "devspace"}
 

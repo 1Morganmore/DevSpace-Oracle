@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -20,6 +22,27 @@ from urllib.parse import urlsplit
 
 SCHEMA = "codex.chatgpt.oracle-run/v1"
 DEVSPACE_APP_NAME = "DevSpace"
+# Exactly three transports.  pro-devspace is the qualified Pro default route
+# (DevSpace mention, exact-root write authority, no attachments or context
+# packets); pro-attachment-only is the frozen immutable-evidence Pro route;
+# devspace is the regular route.
+PRO_TRANSPORTS = frozenset(("pro-devspace", "pro-attachment-only"))
+DEVSPACE_TRANSPORTS = frozenset(("devspace", "pro-devspace"))
+TRANSPORTS = frozenset(("devspace", "pro-devspace", "pro-attachment-only"))
+
+
+def is_pro_transport(transport: str) -> bool:
+    return str(transport or "").strip().casefold() in PRO_TRANSPORTS
+
+
+def is_pro_devspace_transport(transport: str) -> bool:
+    return str(transport or "").strip().casefold() == "pro-devspace"
+
+
+def is_attachment_transport(transport: str) -> bool:
+    return str(transport or "").strip().casefold() == "pro-attachment-only"
+
+
 REGULAR_MODEL = "gpt-5.6"
 REGULAR_MODEL_STRATEGY = "select"
 REGULAR_THINKING_TIME = "extra-high"
@@ -510,10 +533,16 @@ def load_manifest(
     if mode != "browser":
         raise OracleStateError("MODE_INVALID", "Oracle foundation runner supports mode=browser only")
     transport = str(payload.get("transport") or "devspace").strip().casefold()
-    if transport not in {"devspace", "pro-attachment-only"}:
-        raise OracleStateError("TRANSPORT_INVALID", "transport must be devspace or pro-attachment-only")
+    if transport not in TRANSPORTS:
+        raise OracleStateError(
+            "TRANSPORT_INVALID",
+            "transport must be devspace, pro-devspace, or pro-attachment-only",
+        )
     app_name_raw = str(payload.get("app_name") or "").strip().lstrip("@").strip()
-    if transport == "devspace":
+    if transport in DEVSPACE_TRANSPORTS:
+        # devspace and pro-devspace share the exact DevSpace boundary: the
+        # mission must stay inside project_root, the app name must be exactly
+        # DevSpace, and attachments or context packets are forbidden.
         if not is_within(project_root, mission_path):
             raise OracleStateError("MISSION_OUTSIDE_PROJECT", "mission_path must stay inside project_root")
         if not app_name_raw or APP_RE.fullmatch(app_name_raw) is None:
@@ -521,11 +550,16 @@ def load_manifest(
         if app_name_raw != DEVSPACE_APP_NAME:
             raise OracleStateError(
                 "DEVSPACE_APP_REQUIRED",
-                f"new non-Pro Oracle runs require the exact app name {DEVSPACE_APP_NAME}",
+                f"new Oracle runs require the exact app name {DEVSPACE_APP_NAME}",
                 {"app_name": app_name_raw},
             )
         app_name: str | None = app_name_raw
         if payload.get("attachments"):
+            if transport == "pro-devspace":
+                raise OracleStateError(
+                    "PRO_DEVSPACE_ATTACHMENTS_FORBIDDEN",
+                    "Pro DevSpace runs must not attach files",
+                )
             raise OracleStateError("REGULAR_ATTACHMENTS_FORBIDDEN", "DevSpace runs must not attach files")
         if payload.get("project_context_manifest_path") not in {None, ""}:
             raise OracleStateError(
@@ -639,11 +673,11 @@ def load_manifest(
             "THINKING_TIME_INVALID",
             "thinking_time must be light, standard, extended, heavy, or extra-high",
         )
-    if transport == "pro-attachment-only":
+    if is_pro_transport(transport):
         if model.casefold() != "gpt-5.6-sol":
             raise OracleStateError(
                 "PRO_MODEL_INVALID",
-                "Pro attachment-only runs require GPT-5.6 Sol with an explicitly verified Pro effort; no downgrade is allowed",
+                "Pro runs require GPT-5.6 Sol with an explicitly verified Pro effort; no downgrade is allowed",
                 {"model": model},
             )
         if model_strategy != "select":
@@ -697,8 +731,8 @@ def load_manifest(
     research = str(payload.get("research") or "off").strip().casefold()
     if research not in {"off", "deep"}:
         raise OracleStateError("RESEARCH_INVALID", "research must be off or deep")
-    if transport == "pro-attachment-only" and research != "off":
-        raise OracleStateError("PRO_RESEARCH_FORBIDDEN", "Pro attachment-only runs do not enable research mode")
+    if is_pro_transport(transport) and research != "off":
+        raise OracleStateError("PRO_RESEARCH_FORBIDDEN", "Pro runs do not enable research mode")
     archive = str(payload.get("archive") or "auto").strip().casefold()
     if archive not in {"auto", "always", "never"}:
         raise OracleStateError("ARCHIVE_INVALID", "archive must be auto, always, or never")
@@ -708,7 +742,7 @@ def load_manifest(
             "TASK_OUTCOME_CONTRACT_INVALID",
             "task_outcome_contract must be legacy or v1",
         )
-    if transport == "pro-attachment-only" and task_outcome_contract != "legacy":
+    if is_attachment_transport(transport) and task_outcome_contract != "legacy":
         raise OracleStateError(
             "PRO_TASK_OUTCOME_CONTRACT_FORBIDDEN",
             "Pro attachment-only output is not wrapped in the DevSpace task outcome contract",
@@ -758,8 +792,46 @@ def load_manifest(
     )
 
 
+PROFILES_PATH = Path(__file__).resolve().parent / "chatgpt_oracle_profiles.py"
+
+
+def _load_profiles_module() -> Any:
+    """Load the sibling profiles module with the parent-runner loader pattern.
+
+    The pro-devspace composer text is defined exactly once in
+    ``chatgpt_oracle_profiles.py``; this module reuses it so the
+    write-authority wording cannot drift.  profiles.py has no local
+    dependencies, so there is no import cycle.
+    """
+    if PROFILES_PATH.is_symlink() or not PROFILES_PATH.is_file():
+        raise OracleStateError(
+            "ORACLE_PROFILES_MODULE_MISSING",
+            "the installed Oracle profiles module is missing; reinstall before running a qualified Pro lane",
+            {"profiles_path": str(PROFILES_PATH)},
+        )
+    spec = importlib.util.spec_from_file_location("chatgpt_oracle_profiles_state_runtime", PROFILES_PATH)
+    if spec is None or spec.loader is None:
+        raise OracleStateError(
+            "ORACLE_PROFILES_MODULE_UNLOADABLE",
+            "the installed Oracle profiles module could not be prepared for import",
+            {"profiles_path": str(PROFILES_PATH)},
+        )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(spec.name, None)
+        raise OracleStateError(
+            "ORACLE_PROFILES_MODULE_UNLOADABLE",
+            "the installed Oracle profiles module could not be imported",
+            {"profiles_path": str(PROFILES_PATH), "error": str(exc)},
+        ) from exc
+    return module
+
+
 def composer_prompt(config: OracleConfig, mission_path: Path | None = None) -> str:
-    if config.transport == "pro-attachment-only":
+    if is_attachment_transport(config.transport):
         identity_material = "\0".join((
             str(config.project_root).casefold(),
             config.mission_sha256,
@@ -772,6 +844,11 @@ def composer_prompt(config: OracleConfig, mission_path: Path | None = None) -> s
             f"Task identity: oracle-pro-{identity}."
         )
     effective_path = config.mission_path if mission_path is None else mission_path
+    if is_pro_devspace_transport(config.transport):
+        # The qualified Pro route reuses the single one-line DevSpace handoff
+        # (app mention, explicit write authority, trailing absolute mission
+        # path) from the profiles module.
+        return _load_profiles_module().pro_devspace_composer_handoff(effective_path, config.project_root)
     # Single composer authority for regular GPT-5.6 Sol runs: exactly the app
     # mention plus the absolute UTF-8 mission path, with no task body and no
     # operational prose.  Keep the Windows npx.cmd prompt in one argument
@@ -829,7 +906,7 @@ def state_payload(config: OracleConfig, layout: RunLayout, *, status: str, resol
         ),
         "transport_status": "prepared",
         "task_outcome_contract": config.task_outcome_contract,
-        "task_outcome": "not_applicable" if config.transport == "pro-attachment-only" else "pending",
+        "task_outcome": "not_applicable" if is_attachment_transport(config.transport) else "pending",
         "task_outcome_reason": None,
         "mission": {
             "path": str(config.mission_path),
@@ -1123,9 +1200,22 @@ def _comprehensive_no_submission_evidence(state_path: Path) -> dict[str, Any] | 
     oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
     locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
     stdout_lines = {line.strip() for line in stdout_text.splitlines()}
+    profile = state.get("profile") if isinstance(state.get("profile"), dict) else {}
+    app_route_contract = (
+        str(state.get("app_name") or "").casefold() == DEVSPACE_APP_NAME.casefold()
+        and (
+            str(state.get("transport") or "").casefold() == "devspace"
+            or (
+                # The qualified Pro route mentions the same app, so it emits the
+                # same pre-send rejection.  Bind it to its exact Pro profile.
+                is_pro_devspace_transport(state.get("transport"))
+                and str(profile.get("model") or "").casefold() == "gpt-5.6-sol"
+                and str(profile.get("thinking_time") or "").casefold() == "heavy"
+            )
+        )
+    )
     app_route_unconfirmed = (
-        str(state.get("transport") or "").casefold() == "devspace"
-        and str(state.get("app_name") or "").casefold() == "devspace"
+        app_route_contract
         and normalize_oracle_version(oracle.get("resolved_version"))
         in ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_PROOF_VERSIONS
         and {
@@ -1494,14 +1584,28 @@ def _direct_app_route_no_submission_evidence(state_path: Path) -> dict[str, Any]
     fail-closed because their promptComposer patches were never bound here.
     """
     state = load_state(state_path)
+    profile = state.get("profile") if isinstance(state.get("profile"), dict) else {}
+    # Both DevSpace-family routes mention the same app, so both can be refused
+    # before send with the same marker.  The qualified Pro route is additionally
+    # bound to its exact Pro profile so no other shape can settle through it.
+    app_route_contract = (
+        str(state.get("app_name") or "").casefold() == DEVSPACE_APP_NAME.casefold()
+        and (
+            str(state.get("transport") or "").casefold() == "devspace"
+            or (
+                is_pro_devspace_transport(state.get("transport"))
+                and str(profile.get("model") or "").casefold() == "gpt-5.6-sol"
+                and str(profile.get("thinking_time") or "").casefold() == "heavy"
+            )
+        )
+    )
     if (
         str(state.get("session_authority") or "") not in {"submitted_unknown", "pre_submit"}
         or state.get("parallel_parent_id") not in {None, ""}
         or state.get("terminal_harvested") is True
         or _state_has_conversation_url(state)
         or str(state.get("mode") or "").casefold() != "browser"
-        or str(state.get("transport") or "").casefold() != "devspace"
-        or str(state.get("app_name") or "").casefold() != "devspace"
+        or not app_route_contract
     ):
         return None
     run_dir = state_path.parent
@@ -1798,12 +1902,19 @@ def proven_pre_submit_ui_failure(state_path: Path) -> dict[str, Any] | None:
         and str(profile.get("model") or "").casefold() == "gpt-5.6"
         and str(profile.get("thinking_time") or "").casefold() == "extra-high"
     )
-    pro_contract = (
+    pro_attachment_contract = (
         str(state.get("transport") or "").casefold() == "pro-attachment-only"
         and state.get("app_name") is None
         and str(profile.get("model") or "").casefold() in {"gpt-5.5-pro", "gpt-5.6-sol"}
         and str(profile.get("thinking_time") or "").casefold() == "heavy"
     )
+    pro_devspace_contract = (
+        str(state.get("transport") or "").casefold() == "pro-devspace"
+        and str(state.get("app_name") or "").casefold() == DEVSPACE_APP_NAME.casefold()
+        and str(profile.get("model") or "").casefold() == "gpt-5.6-sol"
+        and str(profile.get("thinking_time") or "").casefold() == "heavy"
+    )
+    pro_contract = pro_attachment_contract or pro_devspace_contract
     if (
         str(state.get("session_authority") or "") not in {"pre_submit", "submitted_unknown"}
         or state.get("terminal_harvested") is True
@@ -2099,7 +2210,7 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
         return None
     normalized_error = stderr_text.lstrip()
     if (
-        str(state.get("transport") or "") == "pro-attachment-only"
+        is_attachment_transport(str(state.get("transport") or ""))
         and "The following files exceed the 1 MB limit:" in normalized_error
         and attachment_limit_banner_only
     ):
@@ -2214,12 +2325,19 @@ def proven_pre_submit_thinking_time_failure(state_path: Path) -> dict[str, Any] 
         and str(profile.get("model") or "").casefold() == "gpt-5.6"
         and str(profile.get("thinking_time") or "").casefold() == "extra-high"
     )
-    pro_contract = (
+    pro_attachment_contract = (
         str(state.get("transport") or "").casefold() == "pro-attachment-only"
         and state.get("app_name") is None
         and str(profile.get("model") or "").casefold() == "gpt-5.6-sol"
         and str(profile.get("thinking_time") or "").casefold() == "heavy"
     )
+    pro_devspace_contract = (
+        str(state.get("transport") or "").casefold() == "pro-devspace"
+        and str(state.get("app_name") or "").casefold() == DEVSPACE_APP_NAME.casefold()
+        and str(profile.get("model") or "").casefold() == "gpt-5.6-sol"
+        and str(profile.get("thinking_time") or "").casefold() == "heavy"
+    )
+    pro_contract = pro_attachment_contract or pro_devspace_contract
     if not (regular_contract or pro_contract):
         return None
     artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
@@ -2627,7 +2745,7 @@ def _only_bounded_reference_definitions(lines: list[str]) -> bool:
 
 
 def classify_task_outcome(path: Path, *, contract: str, transport: str) -> str:
-    if transport == "pro-attachment-only":
+    if is_attachment_transport(transport):
         return "not_applicable"
     try:
         text = path.read_text(encoding="utf-8", errors="strict")

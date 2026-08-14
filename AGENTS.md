@@ -9,7 +9,7 @@
 
 ## Comprehensive-mode ownership
 
-- Every new ChatGPT submission uses Oracle. Regular GPT uses the manually registered DevSpace app; Pro uses Oracle attachment-only and never selects an app.
+- Every new ChatGPT submission uses Oracle. Regular GPT uses the manually registered DevSpace app. Qualified Pro uses the `pro-devspace` transport: the `@DevSpace` mention plus the absolute mission path, with mission-scoped file writes and command execution confined to the exact project root. Explicit immutable-evidence Pro uses the `pro-attachment-only` transport and never selects an app. Pro runs only on an explicit user request; no route promotes itself to Pro automatically.
 - GPT comprehensive workflows use `codex.chatgpt.oracle-comprehensive/v1`. Retired backend state is host-only historical data and must not be submitted, recovered, or automatically deleted.
 - The completing web GPT stage authors the next stage's semantic prompt. Local Codex may validate UTF-8, hashes, stage identity, immutable bindings, transport, recovery, and deterministic final tests, but must not rewrite the next prompt or take over expensive exploration/implementation.
 - A selected Web Multi advisory uses genuine independent Oracle sessions. Provider generation is limited to at most five concurrent children; larger accepted topologies run in capacity waves without reducing their logical lane count.

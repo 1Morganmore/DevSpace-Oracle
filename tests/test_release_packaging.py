@@ -37,7 +37,8 @@ def test_manifest_and_package_cover_the_active_release_surface() -> None:
     assert manifest["routing"] == {
         "new_work_engine": "oracle",
         "regular_workspace_transport": "devspace",
-        "pro_transport": "oracle-attachment-only",
+        "pro_transport": "oracle-pro-devspace",
+        "pro_evidence_transport": "oracle-pro-attachment-only",
     }
     assert {"bin/", "skills/", "bin/*.py", "skills/**/scripts/*.py"}.isdisjoint(include | set(package["files"]))
 
@@ -89,7 +90,7 @@ def test_package_metadata_is_publishable_and_lockfile_matches() -> None:
     lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
     assert package["private"] is False
     assert package["name"] == lock["name"] == lock["packages"][""]["name"]
-    assert package["version"] == lock["version"] == lock["packages"][""]["version"] == "1.8.1"
+    assert package["version"] == lock["version"] == lock["packages"][""]["version"] == "1.9.0"
     assert package["engines"]["node"] == lock["packages"][""]["engines"]["node"] == ">=24 <27"
     assert package["repository"]["url"] == "git+https://github.com/1Morganmore/DevSpace-Oracle.git"
 

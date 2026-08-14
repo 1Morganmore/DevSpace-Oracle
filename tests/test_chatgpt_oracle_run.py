@@ -122,6 +122,21 @@ def pro_manifest(tmp_path: Path, prompt_text: str = "pro instructions", **extra)
     )
 
 
+def pro_devspace_manifest(tmp_path: Path, prompt_text: str = "pro instructions", **extra) -> Path:
+    prompt = tmp_path / "pro-mission.md"
+    prompt.write_text(prompt_text, encoding="utf-8")
+    return manifest(
+        tmp_path,
+        transport="pro-devspace",
+        app_name="DevSpace",
+        model="gpt-5.6-sol",
+        model_strategy="select",
+        thinking_time="heavy",
+        mission_path=str(prompt.resolve()),
+        **extra,
+    )
+
+
 def version_runner(command, **kwargs):
     return subprocess.CompletedProcess(command, 0, stdout="oracle 0.17.3\n", stderr="")
 
@@ -282,6 +297,77 @@ def test_pro_live_submission_never_calls_devspace_readiness_adapters(tmp_path: P
     )
 
     assert result["ok"] is True
+
+
+def test_pro_devspace_preflight_runs_devspace_readiness_with_exact_root(tmp_path: Path) -> None:
+    runner = load_runner()
+    profile = tmp_path.parent / f"{tmp_path.name}-profile"
+    profile.mkdir()
+    job = pro_devspace_manifest(tmp_path, copy_profile=str(profile.resolve()))
+    expected = hashlib.sha256(job.read_bytes()).hexdigest()
+    doctor_calls = []
+
+    result = runner.preflight_run(
+        job,
+        expected_manifest_sha256=expected,
+        devspace_hostname="device.tailnet.ts.net",
+        run_factory=version_runner,
+        oracle_inspector=lambda version: {"ok": True, "ready": True, "version": version},
+        devspace_inspector=lambda **kwargs: {"ok": True, "ready": True},
+        devspace_doctor=lambda config: doctor_calls.append(config) or {"next_action": "READY"},
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "ready"
+    assert result["failed_checks"] == []
+    assert {"tailscale_hostname", "devspace_compatibility", "devspace_endpoint"}.issubset(
+        [check["name"] for check in result["checks"]]
+    )
+    assert len(doctor_calls) == 1
+    assert doctor_calls[0].registration_url == "https://device.tailnet.ts.net/mcp"
+    assert doctor_calls[0].roots == (tmp_path.resolve(),)
+
+
+def test_pro_devspace_live_submission_runs_devspace_readiness_before_submit(tmp_path: Path) -> None:
+    runner = load_runner()
+    doctor_calls = []
+
+    result = runner.execute_run(
+        pro_devspace_manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=popen_for(0, b"answer\nTASK_OUTCOME: EXECUTED\n", {}, []),
+        compat_factory=lambda version: {"ok": True, "version": version},
+        runtime_command_factory=lambda compatibility, version: ("node", "validated-oracle-cli.js"),
+        devspace_compat_factory=lambda: {"ok": True, "changed": [], "service_restart_required": False},
+        devspace_hostname="device.tailnet.ts.net",
+        devspace_doctor=lambda config: doctor_calls.append(config) or {"next_action": "READY"},
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["status"] == "complete"
+    assert result["result"]["task_outcome"] == "executed"
+    assert len(doctor_calls) == 1
+    assert doctor_calls[0].roots == (tmp_path.resolve(),)
+
+
+def test_pro_devspace_dry_run_never_attaches_files(tmp_path: Path) -> None:
+    runner = load_runner()
+    result = execute_run(runner, pro_devspace_manifest(tmp_path), dry_run=True)
+    argv = result["argv"]
+    assert result["transport"] == "pro-devspace"
+    assert result["contains_file_flag"] is False
+    assert "--file" not in argv
+    assert "--browser-attachments" not in argv
+    assert argv[argv.index("--model") + 1] == "gpt-5.6-sol"
+    assert argv[argv.index("--browser-model-strategy") + 1] == "select"
+    assert argv[argv.index("--browser-thinking-time") + 1] == "heavy"
+    assert "--browser-hide-window" in argv
+    prompt = argv[argv.index("--prompt") + 1]
+    assert prompt.splitlines() == [prompt]
+    assert prompt.startswith("@DevSpace Read and execute the mission file inside exact_project_root=")
+    assert "create, edit, and remove mission-owned files" in prompt
+    assert result["attachments"] == []
+    assert result["project_context_manifest"] is None
 
 
 def test_version_resolution_allows_a_bounded_slow_valid_oracle_0173() -> None:
@@ -3021,6 +3107,89 @@ def test_direct_app_route_unconfirmed_can_be_user_settled_without_recovery(
     assert runner.STATE.proven_user_confirmed_no_submission(run_dir / "state.json") is None
     manifest_path.write_bytes(manifest_bytes)
     assert runner.STATE.proven_user_confirmed_no_submission(run_dir / "state.json") is not None
+
+
+def test_pro_devspace_app_route_unconfirmed_can_be_user_settled_and_releases_project(
+    tmp_path: Path,
+) -> None:
+    """The qualified Pro route mentions the same app, so it must settle too.
+
+    Without this the new write-capable transport would hold an unreleasable
+    project lock after a pre-send app-route rejection.
+    """
+    runner = load_runner()
+    manifest_path = pro_devspace_manifest(tmp_path)
+
+    def app_route_unconfirmed(command, **kwargs):
+        slug = command[command.index("--slug") + 1]
+        kwargs["stdout"].write(
+            (
+                f"Session: {slug}\n"
+                "ERROR: APP_MENTION_ROUTE_UNCONFIRMED\n"
+                "User error (browser-automation): APP_MENTION_ROUTE_UNCONFIRMED\n"
+            ).encode()
+        )
+        kwargs["stdout"].flush()
+        return Process(1, [])
+
+    failed = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=app_route_unconfirmed,
+    )
+    run_dir = Path(failed["run_dir"])
+    state = runner.STATE.load_state(run_dir / "state.json")
+    assert state["transport"] == "pro-devspace"
+    settled = runner.settle_user_confirmed_no_submission(
+        run_dir,
+        confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION,
+        reason="user confirmed the exact qualified Pro run was not submitted",
+    )
+    proof = runner.STATE.proven_user_confirmed_no_submission(run_dir / "state.json")
+
+    assert settled["ok"] is True
+    assert settled["safe_for_fresh_run"] is True
+    assert settled["result"]["session_authority"] == "pre_submit"
+    assert settled["result"]["task_outcome_reason"] == (
+        "user-confirmed-no-submission-after-app-route-unconfirmed"
+    )
+    assert proof is not None
+    assert proof["settlement_eligibility"] == "oracle-direct-app-route-unconfirmed/v1"
+    assert runner.STATE.unresolved_project_sessions(
+        run_dir.parent, Path(state["project_root"])
+    ) == []
+
+
+def test_pro_devspace_app_route_settlement_requires_the_exact_pro_profile(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+    manifest_path = pro_devspace_manifest(tmp_path)
+
+    def app_route_unconfirmed(command, **kwargs):
+        slug = command[command.index("--slug") + 1]
+        kwargs["stdout"].write(
+            (
+                f"Session: {slug}\n"
+                "ERROR: APP_MENTION_ROUTE_UNCONFIRMED\n"
+                "User error (browser-automation): APP_MENTION_ROUTE_UNCONFIRMED\n"
+            ).encode()
+        )
+        kwargs["stdout"].flush()
+        return Process(1, [])
+
+    failed = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=app_route_unconfirmed,
+    )
+    state_path = Path(failed["run_dir"]) / "state.json"
+    state = runner.STATE.load_state(state_path)
+    state["profile"]["thinking_time"] = "extra-high"
+    runner.STATE.write_json_atomic(state_path, state)
+    assert runner.STATE.proven_user_confirmed_no_submission(state_path) is None
 
 
 def test_direct_app_route_unconfirmed_with_stored_0172_settles_and_releases_project(

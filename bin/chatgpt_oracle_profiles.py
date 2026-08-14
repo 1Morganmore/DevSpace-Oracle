@@ -26,6 +26,16 @@ DEVSPACE_APP_NAME = "DevSpace"
 # (Power 5 of 5 proof); `heavy` is only Oracle's compatibility token for it.
 PRO_MODEL = "gpt-5.6-sol"
 PRO_COMPOSER_PROMPT = "Read the attached prompt/instructions and all attached files, then complete the task."
+# The single immutable write-authority statement for the qualified Pro path.
+# It lives only here; chatgpt_oracle_state.py reuses it through
+# pro_devspace_composer_handoff so the wording cannot drift.
+PRO_DEVSPACE_WRITE_AUTHORITY = (
+    "Within that exact project root you may inspect, create, edit, and remove mission-owned files and run "
+    "the commands the mission requires. Use only the exact project root recorded in the mission; never "
+    "substitute a parent, child, similarly named, or active workspace. Repository safety rules stay "
+    "authoritative. Do not change accounts, ChatGPT app settings, or any external state unless the mission "
+    "explicitly authorizes it."
+)
 
 
 class OracleProfileError(ValueError):
@@ -56,7 +66,7 @@ _PROFILES = {
     "orchestrator": OracleModeProfile("orchestrator", "orchestrator", True, True),
     "deep-research": OracleModeProfile("deep-research", "deep-research", True, True, research=True),
     "manual": OracleModeProfile("manual", "manual", False, False),
-    "pro": OracleModeProfile("pro", "pro", True, False),
+    "pro": OracleModeProfile("pro", "pro", True, True),
 }
 _ALIASES = {
     "gpt": "direct",
@@ -126,6 +136,25 @@ def composer_handoff(mission_path: str | Path) -> str:
     return f"@{DEVSPACE_APP_NAME} {mission}"
 
 
+def pro_devspace_composer_handoff(mission_path: str | Path, project_root: str | Path) -> str:
+    """The qualified Pro-through-DevSpace composer text: exactly one line.
+
+    It must stay on one argument line for the same reason as the regular
+    handoff: a literal newline truncates the prompt in the Windows `npx.cmd`
+    argument before Oracle receives it, which would silently drop the write
+    authority.  The exact project root is named before the authority sentence
+    so the granted write and command scope has a host-recorded antecedent, and
+    the absolute UTF-8 mission path stays last so nothing can be swallowed
+    into it.
+    """
+    mission = _absolute_mission_path(mission_path)
+    root = _absolute_mission_path(project_root)
+    return (
+        f"@{DEVSPACE_APP_NAME} Read and execute the mission file inside "
+        f"exact_project_root={root}. {PRO_DEVSPACE_WRITE_AUTHORITY} Mission file: {mission}"
+    )
+
+
 def _attachment_paths(values: list[str | Path] | tuple[str | Path, ...] | None) -> list[Path]:
     result: list[Path] = []
     for value in values or ():
@@ -146,11 +175,15 @@ def build_launch_contract(
     mission_path: str | Path | None = None,
     reasoning_level: str | None = None,
     attachment_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
+    project_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Build an immutable, browser-agnostic launch contract for parent runners.
 
     `manual` intentionally produces a non-launch contract. Pro uses the same
-    Oracle browser engine but has a distinct attachment-only transport.
+    Oracle browser engine: explicit user attachments select the frozen
+    attachment-only transport unchanged; without attachments the qualified
+    Pro run routes through DevSpace with the explicit write-authority
+    handoff and no attachments or context packets.
     """
     profile = resolve_profile(mode)
     result: dict[str, Any] = {
@@ -163,6 +196,7 @@ def build_launch_contract(
         "attachments": [],
         "app_picker": False,
         "app_settings_automation": False,
+        "pro_selection_policy": "explicit-only",
     }
     if not profile.oracle_launch:
         result.update({
@@ -176,13 +210,44 @@ def build_launch_contract(
     mission = _absolute_mission_path(mission_path)
     if profile.mode == "pro":
         attachments = _attachment_paths(attachment_paths)
+        if not attachments:
+            # No user attachments: the qualified Pro path runs through
+            # DevSpace with an explicit write-authority handoff and zero
+            # attachments or context packets.  A caller that forces
+            # attachments onto this route after the fact is rejected by the
+            # manifest gate with PRO_DEVSPACE_ATTACHMENTS_FORBIDDEN.  The
+            # granted write and command scope must name an exact root, so the
+            # caller has to supply it.
+            if project_root is None or not str(project_root).strip():
+                raise OracleProfileError(
+                    "PRO_DEVSPACE_PROJECT_ROOT_REQUIRED",
+                    "qualified Pro requires the exact project root that bounds its write authority",
+                )
+            result.update({
+                "route": "oracle-pro-devspace",
+                "app_policy": "prompt-mention-only",
+                "app_name": DEVSPACE_APP_NAME,
+                "devspace_required": True,
+                "attachment_policy": "forbidden",
+                "attachments": [],
+                "model": PRO_MODEL,
+                "reasoning_level": "Pro",
+                # `heavy` is Oracle's compatibility token for the account-visible
+                # Pro power tier (Power 5 of 5).  Keep it explicit so parent
+                # runners cannot fall back to the regular Extra High default.
+                "thinking_time": "heavy",
+                "mission_path": str(mission),
+                "composer_prompt": pro_devspace_composer_handoff(mission, project_root),
+            })
+            return result
+        # Explicit user attachments select the immutable-evidence Pro path
+        # unchanged, with the mission auto-inserted first.
         if mission not in attachments:
             attachments.insert(0, mission)
-        if not attachments:
-            raise OracleProfileError("PRO_ATTACHMENTS_REQUIRED", "Pro requires at least one exact attachment")
         result.update({
             "route": "oracle-pro-attachment-only",
             "app_policy": "forbidden",
+            "devspace_required": False,
             "attachment_policy": "always",
             "attachments": [str(path) for path in attachments],
             "model": PRO_MODEL,
@@ -222,6 +287,7 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mission-path")
     parser.add_argument("--reasoning-level")
     parser.add_argument("--attachment", action="append", default=[])
+    parser.add_argument("--project-root")
     args = parser.parse_args(argv)
     try:
         if args.command == "list":
@@ -236,6 +302,7 @@ def _main(argv: list[str] | None = None) -> int:
                     mission_path=args.mission_path,
                     reasoning_level=args.reasoning_level,
                     attachment_paths=args.attachment,
+                    project_root=args.project_root,
                 ),
             }
     except OracleProfileError as exc:

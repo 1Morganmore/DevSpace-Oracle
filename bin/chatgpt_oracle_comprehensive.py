@@ -67,6 +67,7 @@ def _load(name: str, path: Path):
 
 RUNNER = _load("oracle_comprehensive_runner", BIN / "chatgpt_oracle_run.py")
 MULTI = _load("oracle_comprehensive_multi", BIN / "chatgpt_oracle_multi.py")
+PROFILES = _load("oracle_comprehensive_profiles", BIN / "chatgpt_oracle_profiles.py")
 
 
 class WorkflowError(RuntimeError):
@@ -221,6 +222,9 @@ def load_manifest(
     app_name = str(value.get("app_name") or "DevSpace").strip()
     if app_name != "DevSpace":
         raise WorkflowError("app_name must be exactly DevSpace")
+    allow_pro = value.get("allow_pro", False)
+    if not isinstance(allow_pro, bool):
+        raise WorkflowError("allow_pro must be a boolean explicit opt-in")
     chatgpt_project_url = RUNNER.STATE.normalize_chatgpt_project_url(value.get("chatgpt_project_url"))
     return {
         **value,
@@ -230,6 +234,7 @@ def load_manifest(
         "initial_mission_path": mission,
         "max_stages": maximum,
         "app_name": app_name,
+        "allow_pro": allow_pro,
         "chatgpt_project_url": chatgpt_project_url,
         "model": str(value.get("model") or "gpt-5.6"),
         "local_gate_command": list(local_gate),
@@ -519,9 +524,25 @@ def _stage_mission(
         "are the authority.\n"
     )
     if stage == "plan":
+        if config.get("allow_pro") is True:
+            pro_selection_policy = (
+                "pro_selection_allowed=true\n"
+                "next_stage=pro is the qualified Pro route; it defaults to a writable pro-devspace stage, or to "
+                "an attachment-bound pro-attachment-only stage when the authored next mission declares immutable "
+                "evidence files.\n"
+            )
+        else:
+            pro_selection_policy = (
+                "pro_selection_allowed=false\n"
+                "Do not emit next_stage=pro; continue with review or an authorized web-multi stage.\n"
+            )
         protocol += (
-            "\n[PRO_ATTACHMENT_AUTHORING_CONTRACT]\n"
-            "If and only if next_stage=pro requires evidence files, the authored next mission must contain exactly "
+            "\n[PRO_SELECTION_POLICY]\n"
+            + pro_selection_policy
+            + "\n[PRO_ATTACHMENT_AUTHORING_CONTRACT]\n"
+            "next_stage=pro defaults to the writable pro-devspace route when the authored next mission declares "
+            "no evidence files; the attachment block below is the immutable-evidence path only. If and only if "
+            "next_stage=pro must bind immutable evidence files, the authored next mission must contain exactly "
             "one closed [PRO_ATTACHMENT_CONTRACT] block. Its body must be one JSON object with "
             f"schema={PRO_ATTACHMENT_SCHEMA} and an attachments array. Each attachment entry contains an absolute "
             "path and may contain its lowercase SHA-256. Paths must name regular non-symlink files inside "
@@ -575,6 +596,8 @@ def _pro_stage_mission(
     attempt_id: str,
     source_sha: str,
     source_bytes: bytes,
+    *,
+    writable: bool = False,
 ) -> tuple[Path, Path, str, str]:
     stage_dir = config["workflow_dir"] / "stages" / f"{index:02d}-pro-{attempt_id[:12]}"
     receipt = stage_dir / "stage-result.json"
@@ -588,6 +611,8 @@ def _pro_stage_mission(
         "\n\n[HOST_STAGE_CONTRACT]\n"
         f"workflow_id={workflow_id}\nstage=pro\nstage_index={index}\n"
         f"attempt_id={attempt_id}\ninput_mission_sha256={input_sha}\n"
+        f"exact_project_root={config['project_root']}\n"
+        f"exact_input_mission_path={source}\n"
         "Return exactly one JSON object and no surrounding prose or Markdown fences. "
         f"The schema must be {PRO_OUTPUT_SCHEMA}. Include workflow_id, stage, attempt_id, "
         "input_mission_sha256, status, output_text, next_stage, next_mission_text, ready_for_next, blocker. "
@@ -598,6 +623,14 @@ def _pro_stage_mission(
         "next_mission_text. Never paste a nested JSON document into either string with raw, unescaped quotes; "
         "encode it as string content with JSON escaping.\n"
     )
+    if writable:
+        protocol += (
+            "\n[PRO_DEVSPACE_WRITE_AUTHORITY]\n"
+            f"{PROFILES.PRO_DEVSPACE_WRITE_AUTHORITY}\n"
+            "All writes and command execution are permitted only within the scope this mission directs, "
+            "and only inside exact_project_root. Never substitute a parent root, child directory, "
+            "similarly named workspace, active workspace, or shell-based boundary workaround.\n"
+        )
     mission_bytes = (body.rstrip() + protocol).encode("utf-8")
     target.write_bytes(mission_bytes)
     return target, receipt, input_sha, hashlib.sha256(mission_bytes).hexdigest()
@@ -627,43 +660,46 @@ def _oracle_manifest(
         "archive": "auto",
         "parallel_parent_id": config["_parallel_parent_id"],
         "run_id": run_id,
+        "pro_selection_policy": "explicit-only",
     }
     if config.get("chatgpt_project_url"):
         payload["chatgpt_project_url"] = config["chatgpt_project_url"]
     if stage == "pro":
         evidence = tuple(pro_attachments)
-        if not evidence:
-            raise WorkflowError("Pro context packet requires explicit project evidence")
-        builder = RUNNER.PRO_CONTEXT_BUILDER
-        context_manifest = stage_dir / "project-context-manifest.json"
-        packet = stage_dir / "project-context.zip"
-        category = "comprehensive-stage-evidence"
-        _write(context_manifest, {
-            "schema": builder.SCHEMA,
-            "project_root": str(config["project_root"]),
-            "question": "Complete the comprehensive Pro stage using the exact attached project evidence.",
-            "mission_path": str(mission),
-            "mission_sha256": mission_sha,
-            "required_categories": [category],
-            "category_omissions": [],
-            "local_transport_envelope_bytes": builder.TOTAL_ENVELOPE_BYTES,
-            "answer_headroom_bytes": builder.TRANSPORT_ANSWER_HEADROOM_BYTES,
-            "metadata_reserve_bytes": builder.METADATA_RESERVE_BYTES,
-            "packet_path": str(packet),
-            "evidence": [
-                {"path": str(item), "category": category, "priority": priority, "sha256": expected_sha}
-                for priority, (item, expected_sha) in enumerate(evidence)
-            ],
-        })
-        try:
-            context_receipt = builder.build(context_manifest)
-        except builder.PacketError as exc:
-            raise WorkflowError(f"Pro context packet invalid: {exc}") from exc
-        payload["transport"] = "pro-attachment-only"
-        payload["attachments"] = [str(mission), str(packet)]
-        payload["attachment_sha256s"] = [mission_sha, str(context_receipt["packet_sha256"])]
-        payload["project_context_manifest_path"] = str(context_manifest)
-        payload["project_context_manifest_sha256"] = sha(context_manifest)
+        if evidence:
+            builder = RUNNER.PRO_CONTEXT_BUILDER
+            context_manifest = stage_dir / "project-context-manifest.json"
+            packet = stage_dir / "project-context.zip"
+            category = "comprehensive-stage-evidence"
+            _write(context_manifest, {
+                "schema": builder.SCHEMA,
+                "project_root": str(config["project_root"]),
+                "question": "Complete the comprehensive Pro stage using the exact attached project evidence.",
+                "mission_path": str(mission),
+                "mission_sha256": mission_sha,
+                "required_categories": [category],
+                "category_omissions": [],
+                "local_transport_envelope_bytes": builder.TOTAL_ENVELOPE_BYTES,
+                "answer_headroom_bytes": builder.TRANSPORT_ANSWER_HEADROOM_BYTES,
+                "metadata_reserve_bytes": builder.METADATA_RESERVE_BYTES,
+                "packet_path": str(packet),
+                "evidence": [
+                    {"path": str(item), "category": category, "priority": priority, "sha256": expected_sha}
+                    for priority, (item, expected_sha) in enumerate(evidence)
+                ],
+            })
+            try:
+                context_receipt = builder.build(context_manifest)
+            except builder.PacketError as exc:
+                raise WorkflowError(f"Pro context packet invalid: {exc}") from exc
+            payload["transport"] = "pro-attachment-only"
+            payload["attachments"] = [str(mission), str(packet)]
+            payload["attachment_sha256s"] = [mission_sha, str(context_receipt["packet_sha256"])]
+            payload["project_context_manifest_path"] = str(context_manifest)
+            payload["project_context_manifest_sha256"] = sha(context_manifest)
+        else:
+            payload["transport"] = "pro-devspace"
+            payload["app_name"] = config["app_name"]
     else:
         payload["transport"] = "devspace"
         payload["app_name"] = config["app_name"]
@@ -1074,6 +1110,10 @@ def _validate_receipt(
         and not (stage == "review" and status == "FAIL")
     ):
         raise WorkflowError("stage receipt did not pass")
+    if stage == "plan" and next_stage == "pro" and config.get("allow_pro") is not True:
+        raise WorkflowError(
+            "PRO_EXPLICIT_OPT_IN_REQUIRED: set allow_pro=true only after an explicit Pro request"
+        )
     output_raw = value.get("output_path")
     output, output_relative = _receipt_path(config["project_root"], output_raw)
     if not output.is_file() or not output.read_bytes().strip() or value.get("output_sha256") != sha(output):
@@ -2007,7 +2047,6 @@ def _run_workflow_locked(
                 ) < 1
                 and persisted_run_dir.is_dir()
                 and _is_unambiguous_pre_submit_failure(persisted_run_dir)
-                and (stored_stage != "pro" or bool(stored.get("pro_attachments")))
                 and _user_confirmed_retry_binding_matches(
                     persisted_run_dir,
                     config=config,
@@ -2040,7 +2079,7 @@ def _run_workflow_locked(
                     "next_stage": str(stored["current_stage"]),
                     "next_mission_path": str(source),
                     "next_mission_sha256": stored_input_sha,
-                    **({"pro_attachments": stored["pro_attachments"]} if stored_stage == "pro" else {}),
+                    **({"pro_attachments": stored["pro_attachments"]} if stored_stage == "pro" and stored.get("pro_attachments") else {}),
                     "next_index": int(stored["next_index"]),
                     "records": stored_records + [retry_record],
                     "pre_submit_retries": pre_submit_retries + 1,
@@ -2188,10 +2227,9 @@ def _run_workflow_locked(
             pro_attachments = frozen_pro_attachments
             if pro_attachments is None:
                 pro_attachments = _declared_pro_attachments(config, source, source_bytes)
-            if not pro_attachments:
-                pro_attachments = ((source, source_sha),)
             mission, receipt_path, input_sha, augmented_mission_sha = _pro_stage_mission(
-                config, workflow_id, index, source, attempt_id, source_sha, source_bytes
+                config, workflow_id, index, source, attempt_id, source_sha, source_bytes,
+                writable=not bool(pro_attachments),
             )
         else:
             if _mission_contains_pro_attachment_contract(source_bytes):
@@ -2220,7 +2258,7 @@ def _run_workflow_locked(
             "current_binding_source_sha256": input_sha,
             "current_augmented_mission_path": str(mission),
             "current_augmented_mission_sha256": augmented_mission_sha,
-            **({"pro_attachments": _pro_attachment_state(pro_attachments)} if stage == "pro" else {}),
+            **({"pro_attachments": _pro_attachment_state(pro_attachments)} if stage == "pro" and pro_attachments else {}),
             "oracle_run_id": attempt_id, "oracle_run_dir": str(oracle_layout.run_dir),
             "oracle_manifest_path": str(oracle_manifest), "oracle_manifest_sha256": oracle_manifest_sha,
             "next_index": index, "records": records, "pre_submit_retries": stage_pre_submit_retries,
@@ -2249,7 +2287,7 @@ def _run_workflow_locked(
                 "current_binding_source_sha256": input_sha,
                 "current_augmented_mission_path": str(mission),
                 "current_augmented_mission_sha256": augmented_mission_sha,
-                **({"pro_attachments": _pro_attachment_state(pro_attachments)} if stage == "pro" else {}),
+                **({"pro_attachments": _pro_attachment_state(pro_attachments)} if stage == "pro" and pro_attachments else {}),
                 "oracle_run_dir": run.get("run_dir"), "oracle_manifest_path": str(oracle_manifest),
                 "oracle_manifest_sha256": oracle_manifest_sha, "next_index": index, "records": records,
             })
@@ -2299,7 +2337,7 @@ def _run_workflow_locked(
                     "next_stage": stage,
                     "next_mission_path": str(source),
                     "next_mission_sha256": input_sha,
-                    **({"pro_attachments": _pro_attachment_state(pro_attachments)} if stage == "pro" else {}),
+                    **({"pro_attachments": _pro_attachment_state(pro_attachments)} if stage == "pro" and pro_attachments else {}),
                     "next_index": index,
                     "records": records + [retry_record],
                     "pre_submit_retries": pre_submit_retries + 1,

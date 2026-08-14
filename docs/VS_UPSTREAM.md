@@ -5,7 +5,7 @@ This file binds package compatibility to exact public artifacts. The local fork 
 ## A. Fork versus parent project
 
 - Local ref: the exact commit containing this document in `1Morganmore/DevSpace-Oracle`.
-- Parent main observed and audited on 2026-08-13: `ventianima-lab/codex-web-gpt-automation@9bd6843ee9424b260cdc6968feace2bb46ef1ceb`.
+- Parent main observed and audited on 2026-08-14: `ventianima-lab/codex-web-gpt-automation@66c23f170661e36bfc9d0f970c01dd4234863d6c` (parent 1.14.0). Previous audited head: `9bd6843ee9424b260cdc6968feace2bb46ef1ceb` (2026-08-13).
 - Last direct integration baseline: `9542abeef6aa544f4ee6af03bab61cef3474f9e4`.
 - Merge-base before this release commit: `250b839a559cb61442feeb64bff6d49dfa185169`.
 - Observed ancestry immediately before this release commit: 47 commits ahead, 61 behind.
@@ -13,11 +13,40 @@ This file binds package compatibility to exact public artifacts. The local fork 
 
 The fork keeps Oracle-only browser submission, DevSpace workspace transport, exact-slug recovery, per-project locks, receipt-owned installation, Windows process/profile isolation, and bounded Web Multi sessions. Parent sync must preserve monotonic terminal authority, exact package/hash gating, host-only state, mutex/schema/receipt identities, and the absence of automatic Web Multi or alternate-backend fallback.
 
-The nine commits after `9542abee` were reviewed individually. The selector-proof changes in `51675967` and `d8f8fac1` are self-developed on the active fork Power patch: only visible picker candidates count, all three independent Pro signals are required, and two consecutive observations are required before an already-selected result. The existing final diagnostic-race fallback remains intact. The recovered-lane and merger-resume changes in `39f750f4` and `916aeffb` are deferred because they require adaptation to this fork's manifest hashes, parent lock, terminal seal, and monotonic exact-session authority. The persisted `allowedRoots` doctor readback from `69ad58c2` is selected. The `075b3719` change is intentionally rejected: making read-only DevSpace the default Pro route violates this fork's Pro contract, which is Oracle attachment-only with no app. The later `6d24cce` Funnel recovery is self-developed rather than cherry-picked: this fork's explicit `ensure` command waits for the exact local `/healthz` identity, creates only an absent exact mapping, refuses conflicts, reads back any change, and proves the public `/healthz` identity. It does not accept permissive `/mcp` status codes or claim automatic login recovery without a supervised startup path. The `ae3b3caf` OAuth fix is also self-developed on the pinned 1.0.6 launch path: all four managed `serve` entries advertise `devspace,offline_access`, while ChatGPT reconnect or recreation remains a manual settings action. The `77bb79af` task-outcome change is not applied because it governs the same rejected `pro-devspace-readonly` transport; this fork has no such route, keeps Pro attachment-only with the legacy non-DevSpace outcome contract, and already requires v1 task outcomes for regular DevSpace runs.
+The nine commits after `9542abee` were reviewed individually. The selector-proof changes in `51675967` and `d8f8fac1` are self-developed on the active fork Power patch: only visible picker candidates count, all three independent Pro signals are required, and two consecutive observations are required before an already-selected result. The existing final diagnostic-race fallback remains intact. The recovered-lane and merger-resume changes in `39f750f4` and `916aeffb` are deferred because they require adaptation to this fork's manifest hashes, parent lock, terminal seal, and monotonic exact-session authority. The persisted `allowedRoots` doctor readback from `69ad58c2` is selected. The `075b3719` read-only-DevSpace Pro default remains rejected: it was audited against the then attachment-only Pro contract, and the parent 1.14.0 adoption below creates a DevSpace-based Pro *write* route (`pro-devspace`), not a read-only one. The later `6d24cce` Funnel recovery is self-developed rather than cherry-picked: this fork's explicit `ensure` command waits for the exact local `/healthz` identity, creates only an absent exact mapping, refuses conflicts, reads back any change, and proves the public `/healthz` identity. It does not accept permissive `/mcp` status codes or claim automatic login recovery without a supervised startup path. The `ae3b3caf` OAuth fix is also self-developed on the pinned 1.0.6 launch path: all four managed `serve` entries advertise `devspace,offline_access`, while ChatGPT reconnect or recreation remains a manual settings action. The `77bb79af` task-outcome change is not applied: it governs the `pro-devspace-readonly` transport this fork does not have and did not create. This fork's `pro-devspace` inherits the `devspace` outcome policy (the caller chooses `legacy` or `v1`; dispatch uses `v1` and comprehensive uses `legacy` like every other stage), while `pro-attachment-only` keeps its forced legacy `not_applicable` classification.
 
 The 30 commits between `77bb79af` and `54a6b6e` were audited on 2026-08-13. Selected: the manual-login pre-submit proof (`b9cdf382` releases the proven Oracle pre-submit profile locks) and the bounded reference-footer classification (`07ca3394`). Deferred until receipt-bound absolute runtimes, minimal-authority environment, live root/runtime attestation, and a hard private first-init boundary exist: the explicit post-register stabilization with exact slot recycle (`63a61fad` settles DevSpace only after ChatGPT app registration and `8ea49f2b` recovers the stale Funnel onto the exact slot after reconnect), the auth-preserving existing-DevSpace-config persistence and CDP bootstrap fragments of `fc454da1`, and the `MULTI_GPT_CODEX_CLI_PATH`/`CODEX_CLI_PATH` runtime override fragment of `e8105e6d`. Also deferred: the drive-root persistence hygiene of `94f7dc70`, the fail-closed ultra-economy mode (`26595b76`), and the onboarding/global-agent installs and the Local Multi-GPT optional-install flip (`0f4dcb36`, `f75c9cc6`, `e8105e6d`) — Local Multi remains an always-installed manifest member. Rejected: the POSIX command-line launcher identity of `51d2e415` as-is (including its DevSpace 1.0.4/hash-downgrade fragment) — a command-line-shaped launcher identity must not carry launch authority; Oracle/DevSpace downgrade acceptance (`4c3938a9`), configurable workspace app names (`b7b1766a`), `pro-devspace-readonly` (`eb423a53`), and the macOS/Cloudflare/rebrand/legacy-installer work (`9da21bbc`, `6af6d17e`, `c78302c7`, `84f3e027`) which targets platforms and packaging this fork does not ship.
 
 The single commit after `54a6b6e`, `9bd6843e` ("feat: complete safe first-install onboarding"), was audited on 2026-08-13. Selected: the strict UTF-8 Tailscale status decoding — `encoding="utf-8"` with `errors="strict"` on the `tailscale status` and hostname-discovery captures — which only controls deterministic JSON decoding of the Tailscale status fragment and adds no launch authority. Deferred: the native-runtime probe (`--check-native-runtime`/`DEVSPACE_NATIVE_BINDING_UNAVAILABLE`) until it loads better-sqlite3 through a receipt-bound Node runtime and fully verified package extraction instead of ambient `shutil.which("node")` resolution against candidate package roots. Rejected: the TTY-as-human-boundary for first init (`DEVSPACE_FIRST_INIT_REQUIRES_INTERACTIVE_TTY`) because an agent-owned PTY can still capture the Owner password that the follow-on review prints; the owner-password review concept remains human-only/manual, run by the person in their own terminal (`owner-password`), and is not adopted as an automation step. Rejected/N-A: the ultra-economy one-time conversational handshake (it replaces the exact runtime-identity proof with an unverifiable conversation acknowledgment), the configurable app name (`--app-name` relaxing the fixed `codex` identity), and upstream versioning (the install-manifest/package `1.12.1` → `1.13.0` bump is upstream's own versioning and is not adopted).
+
+The parent head was advanced and re-audited on 2026-08-14 at
+`66c23f17` (parent 1.14.0), and its explicit Pro read/write policy was
+adopted as release 1.9.0:
+
+(i) The explicit Pro read/write policy is adopted. Regular web work stays on the
+supported top-tier `extra-high` (`Power 4 of 5`) and never promotes to Pro
+automatically; Pro has a limited daily allowance and is selected only on an
+explicit user request. Qualified Pro runs use the new `pro-devspace` transport
+with mission-scoped writes and commands inside the exact project root, and the
+standard comprehensive workflow schedules a Pro stage only when its manifest
+sets `allow_pro: true` (written only after an explicit user request).
+
+(ii) This fork has never had a `pro-devspace-readonly` transport and does not
+create one. This fork's legacy Pro history is `pro-attachment-only`; its
+meaning and exact recovery contract are preserved as the explicit
+immutable-evidence route, and it is never an automatic fallback.
+
+(iii) `task_outcome_contract` intentionally differs from the parent: on this
+fork `pro-devspace` inherits the same policy as `devspace` — the caller chooses
+`legacy` or `v1` (dispatch uses `v1`; comprehensive uses `legacy` like every
+other stage) — because our comprehensive workflow binds every stage to the
+legacy contract. Only `pro-attachment-only` keeps the forced legacy
+`not_applicable` classification.
+
+(iv) Parent 1.13.1's long-running state-checkpoint change is not mirrored: the
+fork's existing structure — one overall `--browser-timeout` answer budget, the
+host watchdog's `attention_required` outcome, and monotonic exact-session
+ownership — already delivers the same user-visible result.
 
 ```powershell
 git fetch https://github.com/ventianima-lab/codex-web-gpt-automation main
@@ -112,11 +141,14 @@ the strict patch is applied; unknown bytes always fail closed.
 Oracle 0.17.3 treats GPT-5.6 Sol effort as a visible Power slider.
 Regular runs are the single supported `extra-high` tier and require the
 visible `Power 4 of 5` proof before send; misleading `Medium` or `High`
-aliases are rejected without silent downgrade.  Pro remains attachment-only
-with no DevSpace or app: it uses the same account-visible `gpt-5.6-sol` model
-with `heavy` (Oracle's internal token) and requires the full `Power 5 of 5`
-(`Pro`) proof including the hidden-stale-picker and Unicode-label handling
-from the donor.  A proven model-switcher, profile-flag, or effort
+aliases are rejected without silent downgrade.  Both Pro transports use the
+same account-visible `gpt-5.6-sol` model with `heavy` (Oracle's internal
+token) and require the full `Power 5 of 5` (`Pro`) proof including the
+hidden-stale-picker and Unicode-label handling from the donor.  The evidence
+route (`pro-attachment-only`) is attachment-only with no DevSpace or app; the
+qualified write route (`pro-devspace`) sends the DevSpace mention plus the
+mission path and adds no attachments.  A proven model-switcher, profile-flag,
+or effort
 selection-unverified failure settles only while the conversation URL and any
 durable output are absent, and monotonic exact-session authority is never
 regressed.

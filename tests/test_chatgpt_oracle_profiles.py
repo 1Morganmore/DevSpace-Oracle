@@ -33,6 +33,7 @@ def test_regular_modes_use_plain_devspace_handoff_and_high_only(tmp_path: Path, 
     assert contract["attachments"] == []
     assert contract["app_picker"] is False
     assert contract["app_settings_automation"] is False
+    assert contract["pro_selection_policy"] == "explicit-only"
     assert contract["composer_prompt"] == f"@DevSpace {mission}"
     assert "\n" not in contract["composer_prompt"]
 
@@ -96,15 +97,52 @@ def test_pro_is_oracle_attachment_only_and_manual_launches_nothing(tmp_path: Pat
     assert pro["attachments"] == [str(mission), str(packet)]
     assert pro["composer_prompt"] == "Read the attached prompt/instructions and all attached files, then complete the task."
     assert "@DevSpace" not in pro["composer_prompt"]
+    assert pro["pro_selection_policy"] == "explicit-only"
     assert manual["route"] == "manual-no-launch"
     assert manual["composer_prompt"] is None
     assert manual["oracle_launch"] is False
+    assert manual["pro_selection_policy"] == "explicit-only"
 
 
-def test_pro_includes_mission_once_and_regular_rejects_attachments(tmp_path: Path) -> None:
+def test_pro_without_attachments_routes_through_devspace_with_write_authority(tmp_path: Path) -> None:
     profiles = load_profiles()
     mission = (tmp_path / "prompt.txt").resolve()
-    pro = profiles.build_launch_contract("pro", mission_path=mission, attachment_paths=[])
+    pro = profiles.build_launch_contract("pro", mission_path=mission, project_root=tmp_path.resolve())
+    assert pro["route"] == "oracle-pro-devspace"
+    assert pro["app_policy"] == "prompt-mention-only"
+    assert pro["app_name"] == "DevSpace"
+    assert pro["devspace_required"] is True
+    assert pro["attachment_policy"] == "forbidden"
+    assert pro["attachments"] == []
+    assert pro["model"] == "gpt-5.6-sol"
+    assert pro["reasoning_level"] == "Pro"
+    assert pro["thinking_time"] == "heavy"
+    assert pro["mission_path"] == str(mission)
+    assert pro["pro_selection_policy"] == "explicit-only"
+    prompt = pro["composer_prompt"]
+    assert prompt.splitlines() == [prompt]
+    assert prompt.startswith(
+        f"@DevSpace Read and execute the mission file inside exact_project_root={tmp_path.resolve()}. "
+    )
+    assert "create, edit, and remove mission-owned files" in prompt
+    assert prompt.endswith(f"Mission file: {mission}")
+
+
+def test_pro_devspace_requires_the_exact_project_root(tmp_path: Path) -> None:
+    profiles = load_profiles()
+    mission = (tmp_path / "prompt.txt").resolve()
+    with pytest.raises(profiles.OracleProfileError) as excinfo:
+        profiles.build_launch_contract("pro", mission_path=mission)
+    assert excinfo.value.code == "PRO_DEVSPACE_PROJECT_ROOT_REQUIRED"
+
+
+def test_pro_attachment_paths_select_immutable_evidence_contract_and_regular_rejects_attachments(
+    tmp_path: Path,
+) -> None:
+    profiles = load_profiles()
+    mission = (tmp_path / "prompt.txt").resolve()
+    pro = profiles.build_launch_contract("pro", mission_path=mission, attachment_paths=[mission])
+    assert pro["route"] == "oracle-pro-attachment-only"
     assert pro["attachments"] == [str(mission)]
     with pytest.raises(profiles.OracleProfileError) as exc:
         profiles.build_launch_contract("review", mission_path=mission, attachment_paths=[mission])

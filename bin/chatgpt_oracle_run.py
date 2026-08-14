@@ -291,7 +291,7 @@ def preflight_run(
     )
     validate_oracle_attachment_sizes(config)
     validate_pro_context_preflight(config)
-    if config.transport == "pro-attachment-only" and devspace_hostname:
+    if STATE.is_attachment_transport(config.transport) and devspace_hostname:
         raise OracleRunError(
             "PRO_DEVSPACE_PREFLIGHT_FORBIDDEN",
             "Pro attachment-only preflight does not accept DevSpace endpoint options",
@@ -340,7 +340,7 @@ def preflight_run(
             "ready": False,
             "skipped": "oracle version was not validated",
         })
-    if config.transport == "devspace":
+    if config.transport in STATE.DEVSPACE_TRANSPORTS:
         readiness = assess_submission_readiness(
             config,
             mode="inspect",
@@ -374,24 +374,8 @@ def preflight_run(
     }
 
 
-def validate_oracle_attachment_sizes(config) -> None:
-    if config.transport != "pro-attachment-only":
-        return
-    oversized = [
-        {"path": str(path), "size_bytes": path.stat().st_size, "limit_bytes": ORACLE_PRO_ATTACHMENT_MAX_BYTES}
-        for path in config.attachments
-        if path.stat().st_size > ORACLE_PRO_ATTACHMENT_MAX_BYTES
-    ]
-    if oversized:
-        raise OracleRunError(
-            "ORACLE_ATTACHMENT_SIZE_PRELAUNCH_FAILED",
-            "Oracle Pro attachments must not exceed the tested 1 MiB per-file limit",
-            {"limit_bytes": ORACLE_PRO_ATTACHMENT_MAX_BYTES, "attachments": oversized},
-        )
-
-
 def validate_pro_context_preflight(config) -> dict[str, Any] | None:
-    if config.transport != "pro-attachment-only":
+    if not STATE.is_attachment_transport(config.transport):
         return None
     manifest_path = config.project_context_manifest_path
     expected_manifest_sha256 = config.project_context_manifest_sha256
@@ -494,7 +478,8 @@ def build_oracle_argv(
     # explicit, bounded original-session budget.  The 0.17.x compatibility
     # patch makes `--browser-timeout` one overall answer budget, including
     # recovery.  The old 20m upstream default was too short for heavy Extra
-    # High DevSpace lanes.  Pro keeps upstream timing.
+    # High DevSpace lanes.  Every transport, including both Pro routes, uses
+    # this same bounded budget unless the caller pinned `--browser-timeout`.
     answer_timeout_args = (
         []
         if any(
@@ -520,7 +505,7 @@ def build_oracle_argv(
         "--prompt", prompt,
         "--write-output", str(layout.output_path),
     ]
-    if config.transport == "pro-attachment-only":
+    if STATE.is_attachment_transport(config.transport):
         attachment_args: list[str] = []
         for path in config.attachments:
             attachment_args.extend(["--file", str(path)])
@@ -529,7 +514,7 @@ def build_oracle_argv(
         ]
     if config.copy_profile is not None:
         command[command.index("--slug"):command.index("--slug")] = ["--copy-profile", str(config.copy_profile)]
-    if config.transport != "pro-attachment-only" and any(
+    if not STATE.is_attachment_transport(config.transport) and any(
         item == "--file" or item.startswith("--file=") or item == "-f" for item in command
     ):
         raise OracleRunError("FILE_TRANSPORT_FORBIDDEN", "general GPT browser runs must not use --file")
@@ -546,7 +531,7 @@ ORACLE_0161_ATTACHMENT_MAX_BYTES = 1024 * 1024
 
 def validate_oracle_attachment_sizes(config) -> None:
     """Reject Pro attachments Oracle 0.16.1 cannot submit before any launch."""
-    if config.transport != "pro-attachment-only":
+    if not STATE.is_attachment_transport(config.transport):
         return
     oversized = [
         {"path": str(path), "size_bytes": path.stat().st_size, "limit_bytes": ORACLE_0161_ATTACHMENT_MAX_BYTES}
@@ -876,7 +861,7 @@ def pro_output_satisfies_required_schema(state: dict[str, Any], output_path: Pat
     ineligible for promotion. Both plain labels and labels wrapped in Markdown
     code ticks are accepted because the Pro response contract uses both forms.
     """
-    if str(state.get("transport") or "") != "pro-attachment-only":
+    if not STATE.is_attachment_transport(str(state.get("transport") or "")):
         return True
     mission = state.get("mission") if isinstance(state.get("mission"), dict) else {}
     mission_path = Path(str(mission.get("transport_path") or mission.get("path") or ""))
@@ -1063,7 +1048,7 @@ def execute_run(
             runtime_command=runtime_command,
         )
         watchdog_timeout_seconds = host_watchdog_timeout_seconds(config, argv)
-        if config.transport == "devspace":
+        if config.transport in STATE.DEVSPACE_TRANSPORTS:
             readiness = assess_submission_readiness(
                 config,
                 mode="prepare",
@@ -1168,7 +1153,7 @@ def execute_run(
                     except STATE.OracleStateError as exc:
                         raise OracleRunError(exc.code, str(exc), exc.evidence) from exc
                 validate_pro_context_preflight(config)
-                if config.transport == "devspace":
+                if config.transport in STATE.DEVSPACE_TRANSPORTS:
                     readiness = assess_submission_readiness(
                         config,
                         mode="inspect",

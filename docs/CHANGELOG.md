@@ -5,6 +5,36 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
 
 ## 현재 릴리스
 
+### 1.9.0 명시적 Pro 읽기·쓰기 정책
+
+- 부모 1.14.0의 명시적 Pro 읽기·쓰기 정책을 이식했습니다. 일반 웹 작업은
+  `gpt-5.6`의 지원 최상위 Pro 추론 등급 `extra-high`(보이는 `Power 4 of 5`)를
+  기본으로 사용하며 자동으로 Pro로 승격하지 않습니다. Pro는 일일 할당량
+  제한이 있으므로 사용자가 명시적으로 요청할 때만 선택됩니다.
+- 새 qualified Pro 실행은 `pro-devspace` transport를 사용합니다. `@DevSpace`
+  멘션과 절대 미션 경로만 전송하며, exact project root 안에서 미션이 지시한
+  파일 쓰기와 명령 실행을 수행할 수 있습니다. 저장소 안전성 규칙은 여전히
+  상위이며, 계정·ChatGPT 앱 설정·외부 상태 변경은 미션이 명시적으로 승인할
+  때만 허용됩니다.
+- 쓰기 경로에서도 exact root 경계(`DEVSPACE_APP_REQUIRED`,
+  `MISSION_OUTSIDE_PROJECT`, `HOST_STATE_OVERLAPS_PROJECT`), DevSpace
+  readiness preflight, 프로젝트 잠금·미션 해시 재검증, `Power 5 of 5` 증명이
+  그대로 유지됩니다.
+- `pro-attachment-only`는 별개의 명시적 불변 증거 경로로 남습니다. 기존 의미와
+  복구 계약은 100% 보존되며 자동 fallback이 아닙니다.
+- 표준 종합 워크플로는 manifest에 `allow_pro: true`가 있을 때만 plan의 Pro
+  전환을 허용합니다. 그 값은 사용자의 명시적 요청 이후에만 넣습니다.
+- `pro-devspace`에 첨부를 선언하면 `PRO_DEVSPACE_ATTACHMENTS_FORBIDDEN`,
+  미승인 plan→Pro 전환은 `PRO_EXPLICIT_OPT_IN_REQUIRED`로 차단합니다.
+- Pro 스킬(`chatgpt-pro-browser`) 자동 호출을 금지했습니다
+  (`allow_implicit_invocation: false`). Pro는 사용자가 명시적으로 스킬을
+  요청할 때만 실행됩니다.
+- 모든 launch 계약에 `pro_selection_policy: explicit-only`를 추가했고(manual
+  포함), transport 집합은 `devspace`/`pro-devspace`/`pro-attachment-only`
+  정확히 3개입니다. 설치 manifest routing과 릴리스를 1.9.0으로 갱신했습니다.
+
+## 이전 릴리스
+
 ### 1.8.1 Oracle 0.17.3 승격
 
 - 프로젝트 릴리스를 1.8.1로 올리고 신규 실행을 해시 검증한 Oracle
@@ -31,8 +61,6 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
   검증합니다. `bin/chatgpt_oracle_state.py`의 Oracle 버전·패키지 권위도
   정확한 최상위 문자열 리터럴 한 쌍으로만 인정하며, 검증 하나라도 실패하면
   Oracle readback을 내보내지 않습니다.
-
-## 이전 릴리스
 
 ### 1.8.0 상위 런타임 갱신
 
@@ -115,7 +143,9 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
 
 - 일반 GPT, 계획, 검토, 수정, 지휘, 심층 리서치, 종합모드와 Web
   Multi-GPT를 Oracle + DevSpace로 통일했습니다.
-- Pro는 Oracle 첨부 전용이며 DevSpace를 사용하지 않습니다.
+- Pro 증거 경로(`pro-attachment-only`)는 Oracle 첨부 전용이며 DevSpace를
+  사용하지 않습니다. qualified Pro(`pro-devspace`)는 DevSpace 멘션으로 exact
+  project root 안에서 미션 범위 쓰기를 수행합니다.
 - 신규 제출은 Oracle과 DevSpace 경로만 사용합니다.
 
 ### Windows 브라우저 실행 격리

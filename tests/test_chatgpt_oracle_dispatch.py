@@ -106,6 +106,14 @@ def test_context_manifest_is_required_for_pro_and_forbidden_for_regular_modes(tm
             output_path=tmp_path / "direct.json",
             context_manifest_path=context_manifest,
         )
+    with pytest.raises(ValueError, match="CONTEXT_MANIFEST_FORBIDDEN"):
+        module.compile_manifest(
+            mode="pro",
+            project_root=tmp_path,
+            mission_path=mission,
+            output_path=tmp_path / "pro-devspace.json",
+            context_manifest_path=context_manifest,
+        )
 
 
 def test_project_url_is_bound_into_a_regular_manifest(tmp_path: Path) -> None:
@@ -201,3 +209,91 @@ def test_live_dispatch_rejects_mission_change_after_preview(monkeypatch, capsys,
     assert "does not match the current Oracle manifest" in json.loads(
         capsys.readouterr().out
     )["error"]["message"]
+
+
+def test_attachment_free_pro_dry_run_is_pro_devspace_with_write_authority(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load()
+    mission = tmp_path / "mission.md"
+    mission.write_text("pro work", encoding="utf-8")
+    target = tmp_path / "pro-devspace.json"
+
+    assert module.main([
+        "--mode", "pro",
+        "--project-root", str(tmp_path),
+        "--mission-path", str(mission),
+        "--manifest-output", str(target),
+        "--dry-run",
+    ]) == 0
+    value = json.loads(capsys.readouterr().out)
+
+    assert value["contract"]["route"] == "oracle-pro-devspace"
+    assert value["contract"]["pro_selection_policy"] == "explicit-only"
+    run = value["run"]
+    assert run["status"] == "dry-run"
+    assert run["transport"] == "pro-devspace"
+    argv = run["argv"]
+    assert "--file" not in argv
+    assert "--browser-attachments" not in argv
+    assert run["contains_file_flag"] is False
+    assert argv[argv.index("--model") + 1] == "gpt-5.6-sol"
+    assert argv[argv.index("--browser-model-strategy") + 1] == "select"
+    assert argv[argv.index("--browser-thinking-time") + 1] == "heavy"
+    assert "--browser-hide-window" in argv
+
+    compiled = json.loads(target.read_text(encoding="utf-8"))
+    assert compiled["transport"] == "pro-devspace"
+    assert compiled["app_name"] == "DevSpace"
+    assert compiled["task_outcome_contract"] == "v1"
+    assert compiled["model"] == "gpt-5.6-sol"
+    assert compiled["thinking_time"] == "heavy"
+    assert "attachments" not in compiled
+    assert "attachment_sha256s" not in compiled
+    assert "project_context_manifest_path" not in compiled
+    assert "project_context_manifest_sha256" not in compiled
+
+    config = module.RUNNER.STATE.load_manifest(
+        target, expected_manifest_sha256=value["oracle_manifest_sha256"]
+    )
+    prompt = module.RUNNER.STATE.composer_prompt(config, config.mission_path)
+    assert prompt == (
+        f"@{module.PROFILES.DEVSPACE_APP_NAME} Read and execute the mission file inside "
+        f"exact_project_root={tmp_path.resolve()}. "
+        f"{module.PROFILES.PRO_DEVSPACE_WRITE_AUTHORITY} Mission file: {mission.resolve()}"
+    )
+    assert "create, edit, and remove mission-owned files" in prompt
+    assert prompt.splitlines() == [prompt]
+    assert run["prompt_first_line"] == prompt
+
+
+def test_unknown_launch_route_fails_closed(monkeypatch, tmp_path: Path) -> None:
+    module = load()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+
+    def unknown_route(mode, **kwargs):
+        return {
+            "mode": mode,
+            "task_kind": "direct",
+            "oracle_launch": True,
+            "devspace_required": True,
+            "research": False,
+            "route": "oracle-unknown-route",
+            "attachments": [],
+            "model": "gpt-5.6",
+            "thinking_time": "extra-high",
+            "mission_path": str(mission),
+            "composer_prompt": f"@DevSpace {mission}",
+        }
+
+    monkeypatch.setattr(module.PROFILES, "build_launch_contract", unknown_route)
+    with pytest.raises(ValueError, match="ORACLE_ROUTE_UNSUPPORTED"):
+        module.compile_manifest(
+            mode="direct",
+            project_root=tmp_path,
+            mission_path=mission,
+            output_path=tmp_path / "unknown.json",
+        )
+    assert not (tmp_path / "unknown.json").exists()

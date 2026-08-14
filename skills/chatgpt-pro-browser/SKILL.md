@@ -13,7 +13,10 @@ and stops. It never starts a review-to-implementation chain, authors a
 follow-on implementation stage, or invokes `chatgpt-pro-plan-handoff` on its
 own. If the user asks for comprehensive mode, use `chatgpt-pro-plan-handoff`
 instead; an optional Pro stage inside that workflow remains owned by the
-comprehensive runner.
+comprehensive runner. Qualified Pro (`pro-devspace`) is the companion write
+route for mission-scoped file writes and commands inside the exact project
+root; this skill is the explicit immutable-evidence route
+(`pro-attachment-only`) and never mentions DevSpace.
 
 Oracle is the only backend for a new Pro run. It owns model selection, exact
 file attachment, submission, durable output, exact-slug recovery, and one-shot
@@ -21,6 +24,13 @@ archive. There is no DevSpace, alternate app, in-app Browser, custom
 CDP/Playwright, or `@chrome` fallback.
 
 ## Non-negotiable Pro contract
+
+The contract below binds the explicit immutable-evidence route
+(`pro-attachment-only`). It runs only on an explicit user request; no route
+promotes itself to Pro automatically, and this evidence route is never an
+automatic fallback. Qualified Pro (`pro-devspace`) is governed by the DevSpace
+exact-root rules in `chatgpt-oracle-runtime` instead of the attachment rules
+below.
 
 - `task_kind: pro`.
 - Select `gpt-5.6-sol` with `heavy` through Oracle; never downgrade to a

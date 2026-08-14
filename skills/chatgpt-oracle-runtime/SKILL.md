@@ -1,12 +1,16 @@
 ---
 name: chatgpt-oracle-runtime
-description: "Current Oracle runtime path for new ChatGPT work: regular modes use the manually registered DevSpace app, Pro is attachment-only, and it includes recovery, comprehensive relay, and genuine multi-session Web Multi-GPT."
+description: "Current Oracle runtime path for new ChatGPT work: regular modes use the manually registered DevSpace app, qualified Pro uses the pro-devspace write transport, evidence Pro uses pro-attachment-only, and it includes recovery, comprehensive relay, and genuine multi-session Web Multi-GPT."
 ---
 
 # ChatGPT Oracle Runtime
 
-This is the only active browser path for all GPT work. Regular modes use DevSpace;
-Pro uses Oracle attachment transport without any app. New runs pin Oracle
+This is the only active browser path for all GPT work. Regular modes use
+DevSpace. Qualified Pro uses the `pro-devspace` transport — the DevSpace
+mention plus the absolute mission path, with mission-scoped file writes and
+command execution confined to the exact project root. Explicit
+immutable-evidence Pro uses the `pro-attachment-only` transport without any
+app. New runs pin Oracle
 `0.17.3`; Oracle `0.16.1`, `0.17.0`, `0.17.1`, and `0.17.2` are accepted only
 when recovering an exact run already persisted with that version.
 Oracle 0.17.3's upstream answer-placeholder bounding, manual-login reattach
@@ -24,8 +28,12 @@ path — no task body and no extra operational prose. The web GPT must use only
 the exact project root recorded in that mission, read the mission and applicable
 `AGENTS.md` completely first, and may retry that same root once after a timeout.
 It must not substitute a parent, child, active workspace, or shell boundary
-workaround. Pro selects `gpt-5.6-sol` with `heavy` and sends one short
-instruction plus exact attachment files; it never mentions DevSpace.
+workaround. Evidence Pro (`pro-attachment-only`) selects `gpt-5.6-sol` with
+`heavy` and sends one short
+instruction plus exact attachment files; it never mentions DevSpace. Qualified
+Pro (`pro-devspace`) selects the same model and effort, mentions DevSpace, and
+sends the absolute mission path with no attachments. Pro runs only on an
+explicit user request; no route promotes itself to Pro automatically.
 Regular routes use the single supported `extra-high` tier and require Oracle
 evidence for the visible `Extra High` (`Power 4 of 5`). Never invent xhigh,
 use `Medium`/`High`, or silently downgrade.
@@ -40,13 +48,20 @@ Require schema `codex.chatgpt.oracle-run/v1` with:
 - `mission_path` plus caller-pinned `mission_sha256`: absolute UTF-8 regular
   file inside the project and its exact bytes.
 - `app_name`: one-line app name, without a leading `@`, for regular routes.
-- `task_kind: pro` plus one or more exact `attachments`, ordered
-  `attachment_sha256s`, `project_context_manifest_path`, and
-  `project_context_manifest_sha256` for Pro.
+- `task_kind: pro` for Pro. The evidence route (`pro-attachment-only`) adds
+  one or more exact `attachments`, ordered `attachment_sha256s`,
+  `project_context_manifest_path`, and `project_context_manifest_sha256`; the
+  qualified route (`pro-devspace`) forbids attachments and
+  `project_context_manifest_*` fields
+  (`PRO_DEVSPACE_ATTACHMENTS_FORBIDDEN`).
 - `mode`: `browser`.
 - Optional `run_root`, `oracle_command`, `oracle_args`, `thinking_time`,
   hash-validated `copy_profile`, and mutex timeout.
-- Regular direct/orchestrator manifests use `task_outcome_contract: "v1"`.
+- Regular direct/orchestrator manifests use `task_outcome_contract: "v1"`;
+  qualified `pro-devspace` manifests follow the same caller-chosen `legacy` or
+  `v1` rule (dispatch uses `v1`, comprehensive uses `legacy`). Evidence
+  `pro-attachment-only` keeps the forced legacy contract with a
+  `not_applicable` classification.
 
 ## Run
 
@@ -106,7 +121,9 @@ Preflight is advisory evidence, not a reusable authorization. A DevSpace `run`
 repeats the volatile hostname, Funnel, and strict local/public `/healthz` checks
 inside the existing project submit mutex immediately before Oracle launch. A
 failure persists structured readiness evidence and settles as a proven
-pre-submit failure without opening a browser or conversation. Pro and exact-run
+pre-submit failure without opening a browser or conversation. Qualified Pro
+(`pro-devspace`) runs this DevSpace readiness path like regular DevSpace work.
+Evidence Pro and exact-run
 recovery do not use this DevSpace readiness path.
 
 Use `chatgpt_oracle_diagnose.py triage --run-dir <exact-run>` for a bounded next
