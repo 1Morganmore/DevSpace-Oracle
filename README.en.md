@@ -6,7 +6,7 @@ A Windows automation toolkit that delegates planning, research, review, code
 changes, and testing to web ChatGPT while keeping local Codex work focused on
 transport, recovery, identity, hashes, and the final deterministic gate.
 
-The current release is `1.8.0`.
+The current release is `1.8.1`.
 
 It connects two upstream tools:
 
@@ -105,10 +105,14 @@ backpressure queue: four by default, configurable from 1 through 20 with
 - An Oracle browser profile signed in to ChatGPT
 - One manually registered DevSpace app in ChatGPT Developer Mode
 
-The validated combination is Oracle `0.17.2` and DevSpace `1.0.7`. The installer
+The validated combination is Oracle `0.17.3` and DevSpace `1.0.7`. The installer
 applies Windows compatibility patches only when exact upstream file hashes
-match. Oracle `0.16.1`, `0.17.0`, and `0.17.1` remain available only for exact
-recovery of runs already persisted with those versions.
+match. Oracle 0.17.3's upstream answer-placeholder bounding, manual-login
+reattach cookie-sync opt-in, Japanese picker labels, and explicit headless
+handling are preserved under the local hash-gated patches; live browser
+validation is not yet performed. Oracle `0.16.1`, `0.17.0`, `0.17.1`, and
+`0.17.2` remain available only for exact recovery of runs already persisted
+with those versions.
 
 ## Install
 

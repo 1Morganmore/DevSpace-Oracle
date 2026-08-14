@@ -5,6 +5,27 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
 
 ## 현재 릴리스
 
+### 1.8.1 Oracle 0.17.3 승격
+
+- 프로젝트 릴리스를 1.8.1로 올리고 신규 실행을 해시 검증한 Oracle
+  `0.17.3`으로 승격했습니다. DevSpace `1.0.7`, Node.js `>=24 <27`, npm
+  의존성 없음은 그대로 유지합니다.
+- Oracle `0.17.2`는 정확 복구 전용으로 내려갑니다. 신규 실행은 `0.17.3`만
+  허용하고 복구는 `0.16.1`, `0.17.0`, `0.17.1`, `0.17.2`만 추가로
+  받습니다.
+- Oracle 0.17.3 상위 변경 네 가지—답변 placeholder 예측을 짧은 전체 문자열
+  browser chrome으로 제한, manual-login 재연결 시 upstream 명시 opt-in을
+  통해서만 쿠키 동기화, 일본어 Advanced/Effort 라벨 인식, 명시적
+  `--browser-headless` 준수—를 로컬 hash-gated 패치 아래 그대로
+  보존합니다. Power 증명·모델·transport·exact-session 의미는 바뀌지
+  않습니다. 아직 라이브 브라우저 검증은 하지 않았습니다.
+- 설치 manifest에 0.17.3 패치 에셋 8개를 추가하고 Oracle npm 무결성
+  sha512를 0.17.3 dist 값으로 갱신했습니다.
+- upstream-drift 워크플로의 `actions/upload-artifact`를 v7(Node 24)로
+  올렸습니다.
+
+## 이전 릴리스
+
 ### 1.8.0 상위 런타임 갱신
 
 - 지원 Node.js 범위를 `>=24 <27`로 올리고 프로젝트 릴리스를 1.8.0으로
@@ -70,8 +91,6 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
 - Tailscale status JSON은 Windows ANSI locale과 무관하게 UTF-8(strict)로만
   디코딩하므로 Unicode 장치명이 있어도 setup doctor가 중단되거나 출력이
   조용히 왜곡되지 않습니다.
-
-## 이전 릴리스
 
 ### 1.7.0 신뢰성·보안 보강
 

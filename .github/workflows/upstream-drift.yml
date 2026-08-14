@@ -19,7 +19,7 @@ jobs:
       - name: Summary
         if: always()
         run: cat upstream-drift.json >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: upstream-drift

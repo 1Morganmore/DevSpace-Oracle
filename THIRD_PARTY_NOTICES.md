@@ -2,14 +2,15 @@
 
 This repository ships no copy of the Oracle package, DevSpace, Codex, browser
 binaries, or account data. It ships narrow textual compatibility patches for
-the active hash-verified Oracle 0.17.2 and DevSpace 1.0.7 npm distributions.
-Oracle 0.16.1, 0.17.0, and 0.17.1 patch instructions remain only for exact
-recovery of runs persisted with those versions.
+the active hash-verified Oracle 0.17.3 and DevSpace 1.0.7 npm distributions.
+Oracle 0.16.1, 0.17.0, 0.17.1, and 0.17.2 patch instructions remain only for
+exact recovery of runs persisted with those versions.
 
 - `hehee9/multi-gpt@4f5e130` is MIT-licensed. Its attribution and the recorded `server.mjs` hash must be preserved when its upstream-compatible integration is changed.
 - `@steipete/oracle` is an external MIT-licensed browser automation package.
-  The active tested version is 0.17.2. Versions 0.16.1, 0.17.0, and 0.17.1 are
-  retained only to recover exact persisted runs. Its package source is not vendored.
+  The active tested version is 0.17.3. Versions 0.16.1, 0.17.0, 0.17.1, and
+  0.17.2 are retained only to recover exact persisted runs. Its package source
+  is not vendored.
   Files under `bin/oracle-compat` are derivative patch instructions and retain the
   following upstream MIT notice.
 - `@waishnav/devspace` is an external MIT-licensed MCP workspace server. The

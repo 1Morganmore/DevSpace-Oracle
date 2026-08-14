@@ -1,0 +1,30 @@
+diff --git a/dist/src/browser/chromeLifecycle.js b/dist/src/browser/chromeLifecycle.js
+index a68a7c1..1ae7cc1 100644
+--- a/dist/src/browser/chromeLifecycle.js
++++ b/dist/src/browser/chromeLifecycle.js
+@@ -41,8 +41,8 @@ export async function launchChrome(config, userDataDir, logger) {
+     return Object.assign(launcher, { host: connectHost ?? "127.0.0.1" });
+ }
+ export async function positionChromeWindowOffscreen(client, logger) {
+-    if (process.platform !== "darwin") {
+-        logger("Window hiding is only supported on macOS");
++    if (process.platform !== "darwin" && process.platform !== "win32") {
++        logger("Window hiding is only supported on macOS and Windows");
+         return;
+     }
+     try {
+@@ -560,10 +560,10 @@ function buildChromeFlags(headless, debugBindAddress, hideWindow = false) {
+     if (headless) {
+         flags.push("--headless=new");
+     }
+-    else if (hideWindow && process.platform === "darwin") {
+-        // Cmd-H stops macOS Chrome from compositing the page, which can swallow
+-        // trusted CDP clicks and retain the prompt as a draft. Keeping the window
+-        // off-screen avoids desktop disruption while preserving normal rendering.
++    else if (hideWindow && (process.platform === "darwin" || process.platform === "win32")) {
++        // Hiding/minimizing Chrome can stop compositing and swallow trusted CDP
++        // clicks. Keeping the window off-screen avoids desktop disruption while
++        // preserving normal rendering on macOS and Windows.
+         flags.push("--window-position=-32000,-32000");
+     }
+     // Opt-in only: container/CI Chromium often cannot use the sandbox. Callers must

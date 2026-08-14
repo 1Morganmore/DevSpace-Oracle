@@ -1,0 +1,51 @@
+diff --git a/dist/src/browser/index.js b/dist/src/browser/index.js
+index 3dab970..b3e65ec 100644
+--- a/dist/src/browser/index.js
++++ b/dist/src/browser/index.js
+@@ -671,6 +671,9 @@ export async function runBrowserMode(options) {
+         }
+         return runRemoteBrowserMode(promptText, attachments, config, logger, options);
+     }
++    if (usingCopiedProfile && config.manualLogin) {
++        config = { ...config, manualLogin: false, manualLoginProfileDir: null };
++    }
+     const manualLogin = Boolean(config.manualLogin);
+     if (manualLogin && usingCopiedProfile) {
+         throw new BrowserAutomationError("--copy-profile cannot be combined with --browser-manual-login: choose either a throwaway copied profile or the persistent manual-login profile.", { stage: "profile-config" });
+@@ -3088,6 +3091,7 @@ export function isWebSocketClosureError(error) {
+         message.includes("target closed"));
+ }
+ async function waitForAssistantResponseWithReload(Runtime, Page, timeoutMs, logger, minTurnIndex, expectedConversationId) {
++    const startedAt = Date.now();
+     try {
+         return await waitForAssistantResponse(Runtime, timeoutMs, logger, minTurnIndex, expectedConversationId);
+     }
+@@ -3099,14 +3103,26 @@ async function waitForAssistantResponseWithReload(Runtime, Page, timeoutMs, logg
+         if (!conversationUrl || !isConversationUrl(conversationUrl)) {
+             throw error;
+         }
++        let remainingMs = Math.max(0, timeoutMs - (Date.now() - startedAt));
++        if (remainingMs === 0) {
++            throw error;
++        }
+         logger("Assistant response stalled; reloading conversation and retrying once");
+         await Page.navigate({ url: conversationUrl });
+-        await waitForResumedConversationHydration(Runtime, timeoutMs, logger, {
++        remainingMs = Math.max(0, timeoutMs - (Date.now() - startedAt));
++        if (remainingMs === 0) {
++            throw error;
++        }
++        await waitForResumedConversationHydration(Runtime, remainingMs, logger, {
+             requirePriorTurns: true,
+             requirePromptReady: false,
+             expectedConversationUrl: conversationUrl,
+         });
+-        return await waitForAssistantResponse(Runtime, timeoutMs, logger, minTurnIndex, expectedConversationId);
++        remainingMs = Math.max(0, timeoutMs - (Date.now() - startedAt));
++        if (remainingMs === 0) {
++            throw error;
++        }
++        return await waitForAssistantResponse(Runtime, remainingMs, logger, minTurnIndex, expectedConversationId);
+     }
+ }
+ function shouldReloadAfterAssistantError(error) {

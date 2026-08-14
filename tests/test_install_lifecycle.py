@@ -996,9 +996,9 @@ def test_doctor_accepts_current_v3_install_receipt_schema() -> None:
         assert result.returncode == 0, result.stdout
         report = json.loads(result.stdout)
         assert report['status'] == 'PASS'
-        assert report['oracle']['package'] == '@steipete/oracle@0.17.2'
+        assert report['oracle']['package'] == '@steipete/oracle@0.17.3'
         assert report['devspace']['tested_version'] == '1.0.7'
-        assert 'npx -y @steipete/oracle@0.17.2 --version' in report['commands']
+        assert 'npx -y @steipete/oracle@0.17.3 --version' in report['commands']
         assert 'RECEIPT_INVALID' not in result.stdout
         assert 'unsupported install receipt schema' not in result.stdout
 
