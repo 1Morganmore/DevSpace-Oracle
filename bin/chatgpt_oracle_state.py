@@ -27,6 +27,18 @@ ORACLE_ACTIVE_VERSION = "0.17.3"
 ORACLE_RECOVERABLE_VERSIONS = ("0.16.1", "0.17.0", "0.17.1", "0.17.2", ORACLE_ACTIVE_VERSION)
 WAIT_CAPABLE_VERSIONS = {"0.17.0", "0.17.1", ORACLE_ACTIVE_VERSION}
 ORACLE_UI_FAILURE_SETTLEMENT_VERSIONS = {"0.17.1", "0.17.2", ORACLE_ACTIVE_VERSION}
+# Each strict pre-submit proof binds markers emitted by exactly two runtime
+# generations: 0.17.2 (the previous active runtime, now exact-recovery-only)
+# and the current active runtime.  These are explicit per-marker sets on
+# purpose — never an ORACLE_ACTIVE_VERSION alias, or promotion silently drops
+# stored 0.17.2 runs from settlement. Older runtimes remain deliberately
+# excluded because these marker-specific recovery proofs did not bind them
+# before the 0.17.3 promotion.
+ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
+ORACLE_THINKING_TIME_STRICT_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
+ORACLE_MODEL_SWITCHER_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
+ORACLE_COPY_PROFILE_MANUAL_LOGIN_CONFLICT_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
+ORACLE_PROFILE_COPY_RSYNC_MISSING_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
 ORACLE_PACKAGE = "@steipete/oracle"
 STATE_SCHEMA = "codex.chatgpt.oracle-run-state/v1"
 STATUSES = {"prepared", "running", "complete", "failed", "attention_required", "abandoned"}
@@ -1073,6 +1085,9 @@ def _comprehensive_no_submission_evidence(state_path: Path) -> dict[str, Any] | 
     only proves that the run is eligible for an explicit user adjudication: no
     output or conversation URL exists, Oracle reported an eligible composer
     failure, and exact recovery has neither a live tab nor a saved URL.
+    The APP_MENTION_ROUTE_UNCONFIRMED branch binds markers emitted by the
+    0.17.2 runtime (exact-recovery-only) and the active runtime; the plain
+    prompt-timeout message is version-agnostic.
     """
     state = load_state(state_path)
     authority = str(state.get("session_authority") or "")
@@ -1111,7 +1126,8 @@ def _comprehensive_no_submission_evidence(state_path: Path) -> dict[str, Any] | 
     app_route_unconfirmed = (
         str(state.get("transport") or "").casefold() == "devspace"
         and str(state.get("app_name") or "").casefold() == "devspace"
-        and normalize_oracle_version(oracle.get("resolved_version")) == ORACLE_ACTIVE_VERSION
+        and normalize_oracle_version(oracle.get("resolved_version"))
+        in ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_PROOF_VERSIONS
         and {
             f"ERROR: {ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER}",
             (
@@ -1471,7 +1487,12 @@ def _settlement_logs_have_conversation_url(state_path: Path) -> bool:
 
 
 def _direct_app_route_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
-    """Bind an exact direct pre-send app-route rejection to user adjudication."""
+    """Bind an exact direct pre-send app-route rejection to user adjudication.
+
+    The APP_MENTION_ROUTE_UNCONFIRMED marker is bound only for the 0.17.2
+    runtime (exact-recovery-only) and the active runtime; older runtimes stay
+    fail-closed because their promptComposer patches were never bound here.
+    """
     state = load_state(state_path)
     if (
         str(state.get("session_authority") or "") not in {"submitted_unknown", "pre_submit"}
@@ -1513,7 +1534,8 @@ def _direct_app_route_no_submission_evidence(state_path: Path) -> dict[str, Any]
     locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
     stdout_lines = {line.strip() for line in stdout_text.splitlines()}
     if (
-        normalize_oracle_version(oracle.get("resolved_version")) != ORACLE_ACTIVE_VERSION
+        normalize_oracle_version(oracle.get("resolved_version"))
+        not in ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_PROOF_VERSIONS
         or not locator
         or f"Session: {locator}" not in stdout_text
         or {
@@ -2172,11 +2194,13 @@ def proven_pre_submit_thinking_time_failure(state_path: Path) -> dict[str, Any] 
     """Prove the final strict Power-slider selector refused before send.
 
     Accepts only Oracle's exact selection-unverified/unknown-outcome
-    diagnostics from the active thinking-time patch, with the configured
+    diagnostics from the strict thinking-time patch, with the configured
     Oracle effort mapped to its exact visible Power tier, and only while the
     exact conversation URL and any durable output are absent. Anything else
     keeps submitted-unknown ownership and therefore the project lock
-    fail-closed.
+    fail-closed.  These markers are bound only for the 0.17.2 runtime
+    (exact-recovery-only) and the active runtime, which are the two
+    generations that shipped the strict patch.
     """
     state = load_state(state_path)
     if str(state.get("session_authority") or "") not in {"pre_submit", "submitted_unknown"}:
@@ -2220,7 +2244,11 @@ def proven_pre_submit_thinking_time_failure(state_path: Path) -> dict[str, Any] 
         return None
     oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
     locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
-    if not locator or normalize_oracle_version(oracle.get("resolved_version")) != ORACLE_ACTIVE_VERSION:
+    if (
+        not locator
+        or normalize_oracle_version(oracle.get("resolved_version"))
+        not in ORACLE_THINKING_TIME_STRICT_PROOF_VERSIONS
+    ):
         return None
     return {
         "schema": "codex.chatgpt.oracle-pre-submit-ui-failure/v1",
@@ -2242,6 +2270,8 @@ def proven_pre_submit_model_switcher_failure(state_path: Path) -> dict[str, Any]
     diagnostic, with both output and conversation evidence absent.  A generic
     browser error, a recorded conversation URL, or any durable output remains
     submitted-unknown and therefore keeps the project lock fail-closed.
+    The diagnostic is bound only for the 0.17.2 runtime (exact-recovery-only)
+    and the active runtime, which both ship the model-switcher error path.
     """
     state = load_state(state_path)
     if str(state.get("session_authority") or "") not in {"pre_submit", "submitted_unknown"}:
@@ -2263,7 +2293,11 @@ def proven_pre_submit_model_switcher_failure(state_path: Path) -> dict[str, Any]
         return None
     oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
     locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
-    if not locator or normalize_oracle_version(oracle.get("resolved_version")) != ORACLE_ACTIVE_VERSION:
+    if (
+        not locator
+        or normalize_oracle_version(oracle.get("resolved_version"))
+        not in ORACLE_MODEL_SWITCHER_PROOF_VERSIONS
+    ):
         return None
     return {
         "schema": "codex.chatgpt.oracle-pre-submit-ui-failure/v1",
@@ -2278,7 +2312,12 @@ def proven_pre_submit_model_switcher_failure(state_path: Path) -> dict[str, Any]
 
 
 def proven_pre_submit_copy_profile_manual_login_conflict(state_path: Path) -> dict[str, Any] | None:
-    """Prove Oracle rejected mutually exclusive profile modes before browser launch."""
+    """Prove Oracle rejected mutually exclusive profile modes before browser launch.
+
+    The conflict marker is bound only for the 0.17.2 runtime (exact-recovery-
+    only) and the active runtime, which both ship the browserIndex conflict
+    guard; older runtimes never emitted it.
+    """
     state = load_state(state_path)
     if str(state.get("session_authority") or "") not in {"pre_submit", "submitted_unknown"}:
         return None
@@ -2293,7 +2332,8 @@ def proven_pre_submit_copy_profile_manual_login_conflict(state_path: Path) -> di
     stderr_record = _artifact_bytes(state, "stderr")
     if (
         not copy_profile
-        or str(oracle.get("resolved_version") or "").removeprefix("oracle ").strip() != ORACLE_ACTIVE_VERSION
+        or normalize_oracle_version(oracle.get("resolved_version"))
+        not in ORACLE_COPY_PROFILE_MANUAL_LOGIN_CONFLICT_PROOF_VERSIONS
         or output_is_nonempty(output)
         or stdout_record is None
         or stderr_record is None
@@ -2319,7 +2359,12 @@ def proven_pre_submit_copy_profile_manual_login_conflict(state_path: Path) -> di
 
 
 def proven_pre_submit_profile_copy_rsync_missing(state_path: Path) -> dict[str, Any] | None:
-    """Prove profile copy failed before Chrome because Oracle invoked rsync."""
+    """Prove profile copy failed before Chrome because Oracle invoked rsync.
+
+    The rsync-spawn marker is bound only for the 0.17.2 runtime (exact-
+    recovery-only) and the active runtime, which both ship the profileCopy
+    rsync spawn; older runtimes never emitted it.
+    """
     state = load_state(state_path)
     if str(state.get("session_authority") or "") not in {"pre_submit", "submitted_unknown"}:
         return None
@@ -2334,7 +2379,8 @@ def proven_pre_submit_profile_copy_rsync_missing(state_path: Path) -> dict[str, 
     stderr_record = _artifact_bytes(state, "stderr")
     if (
         not copy_profile
-        or str(oracle.get("resolved_version") or "").removeprefix("oracle ").strip() != ORACLE_ACTIVE_VERSION
+        or normalize_oracle_version(oracle.get("resolved_version"))
+        not in ORACLE_PROFILE_COPY_RSYNC_MISSING_PROOF_VERSIONS
         or output_is_nonempty(output)
         or stdout_record is None
         or stderr_record is None

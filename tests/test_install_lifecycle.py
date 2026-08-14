@@ -91,6 +91,7 @@ def write_v3_receipt(
     name: str,
     *,
     previous_receipt: Path | None = None,
+    manifest_version: str = '1.8.0',
 ) -> Path:
     relative = installed.relative_to(home).as_posix()
     digest = hashlib.sha256(installed.read_bytes()).hexdigest()
@@ -114,18 +115,105 @@ def write_v3_receipt(
     }
     wal.write_text(json.dumps({
         'schema': 'codexpro.install-wal/v2', 'transaction_id': transaction,
-        'manifest_version': '1.8.0', 'status': 'COMPLETE', 'backup': str(backup),
+        'manifest_version': manifest_version, 'status': 'COMPLETE', 'backup': str(backup),
         'receipt': str(receipt), 'wal_path': str(wal), 'files': [record],
     }), encoding='utf-8')
     receipt_value = {
         'schema': 'codexpro.install-receipt/v3', 'transaction_id': transaction,
-        'manifest_version': '1.8.0', 'backup': str(backup), 'wal': str(wal),
+        'manifest_version': manifest_version, 'backup': str(backup), 'wal': str(wal),
         'files': [{k: record[k] for k in ('path', 'action', 'installed_sha256', 'backup_sha256')}],
         'dependency': {'mode': 'skipped'},
     }
     if previous_receipt is not None:
         receipt_value['previous_receipt'] = str(previous_receipt)
     receipt.write_text(json.dumps(receipt_value), encoding='utf-8')
+    return receipt
+
+
+def expand_manifest_files(manifest: dict) -> list[str]:
+    """Mirror install.ps1 Get-ManifestFiles: expand include patterns against ROOT."""
+    import fnmatch
+    import re
+    files: list[str] = []
+    for pattern in manifest['include']:
+        assert isinstance(pattern, str) and pattern, 'manifest include pattern must be a nonempty string'
+        assert not re.search(r'(^|/)\.{1,2}(/|$)', pattern), f'unsafe manifest pattern: {pattern}'
+        assert not os.path.isabs(pattern), f'unsafe manifest pattern: {pattern}'
+        prefix = next((
+            p for p in ('bin/', 'skills/', 'mcp_servers/', 'scripts/', 'contracts/', 'tests/fixtures/')
+            if pattern.startswith(p)
+        ), None)
+        assert prefix is not None, f'unsupported manifest root: {pattern}'
+        matched = []
+        for item in (ROOT / prefix.rstrip('/')).rglob('*'):
+            if not item.is_file():
+                continue
+            assert not item.is_symlink(), f'manifest refuses symlink: {item}'
+            relative = item.relative_to(ROOT).as_posix()
+            if fnmatch.fnmatchcase(relative, pattern):
+                matched.append(relative)
+        assert matched, f'manifest pattern matched no files: {pattern}'
+        files.extend(matched)
+    return sorted(set(files))
+
+
+def install_v4_fixture(
+    home: Path,
+    name: str,
+    *,
+    manifest_version: str | None = None,
+    state_module_text: str | None = None,
+) -> Path:
+    """Copy current manifest-expanded files into home and write a fully bound v4
+    receipt + COMPLETE v3 WAL in install.ps1's exact shapes (no install.ps1 run).
+    Returns the receipt path. Mutate one dimension after building to fail doctor."""
+    manifest = json.loads((ROOT / 'install-manifest.json').read_text(encoding='utf-8'))
+    version = manifest['version'] if manifest_version is None else manifest_version
+    transaction = hashlib.md5(name.encode(), usedforsecurity=False).hexdigest()
+    backup = home / 'backups' / name
+    wal = backup / 'install.wal.json'
+    receipt = home / 'receipts' / f'codexpro-automation-{name}.json'
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    (backup / 'steps').mkdir(parents=True)
+    records = []
+    receipt_files = []
+    for index, relative in enumerate(expand_manifest_files(manifest)):
+        destination = home / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if relative == 'bin/chatgpt_oracle_state.py' and state_module_text is not None:
+            destination.write_text(state_module_text, encoding='utf-8')
+        else:
+            shutil.copy2(ROOT / relative, destination)
+        digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+        replacement = backup / 'steps' / str(index) / 'replacement.json'
+        replacement.parent.mkdir(parents=True)
+        replacement.write_text(json.dumps({
+            'schema': 'codexpro.install-replacement/v1', 'path': relative,
+            'action': 'created', 'installed_sha256': digest, 'backup_sha256': None,
+        }), encoding='utf-8')
+        record = {
+            'sequence_number': index, 'path': relative, 'action': 'created',
+            'installed_sha256': digest, 'backup_sha256': None, 'phase': 'COMPLETE',
+            'transitions': ['INTENT', 'BACKUP_DURABLE', 'MUTATED', 'VERIFIED',
+                            'REPLACEMENT_RECEIPT_DURABLE', 'COMPLETE'],
+            'replacement': str(replacement),
+        }
+        records.append(record)
+        receipt_files.append({
+            k: record[k] for k in ('path', 'action', 'installed_sha256', 'backup_sha256')
+        })
+    wal.write_text(json.dumps({
+        'schema': 'codexpro.install-wal/v3', 'transaction_id': transaction,
+        'manifest_version': version, 'status': 'COMPLETE', 'backup': str(backup),
+        'receipt': str(receipt), 'wal_path': str(wal), 'created_at': '2026-08-14T00:00:00.0000000Z',
+        'completed_at': '2026-08-14T00:00:00.0000000Z', 'files': records,
+    }), encoding='utf-8')
+    receipt.write_text(json.dumps({
+        'schema': 'codexpro.install-receipt/v4', 'transaction_id': transaction,
+        'installed_at': '2026-08-14T00:00:00.0000000Z', 'manifest_version': version,
+        'backup': str(backup), 'files': receipt_files, 'previous_receipt': None,
+        'wal': str(wal),
+    }), encoding='utf-8')
     return receipt
 
 
@@ -976,57 +1064,177 @@ def test_wal_v2_missing_overwritten_destination_is_a_conflict() -> None:
         assert json.loads(wal.read_text(encoding='utf-8'))['status'] == 'ACTIVE'
 
 
-def test_doctor_accepts_current_v3_install_receipt_schema() -> None:
-    with tempfile.TemporaryDirectory() as home:
-        root = Path(home)
-        receipt = root / 'receipts' / 'codexpro-automation-current.json'
-        receipt.parent.mkdir(parents=True)
-        receipt.write_text(
-            json.dumps({
-                'schema': 'codexpro.install-receipt/v3',
-                'backup': str(root / 'backups' / 'owned'),
-                'files': [],
-                'dependency': {'mode': 'skipped'},
-            }),
-            encoding='utf-8',
-        )
 
-        result = run_powershell('-File', str(ROOT / 'doctor.ps1'), '-CodexHome', home)
+def test_doctor_rejects_stale_manifest_version_receipt(tmp_path: Path) -> None:
+    home = tmp_path / 'home'
+    manifest = json.loads((ROOT / 'install-manifest.json').read_text(encoding='utf-8'))
+    install_v4_fixture(home, 'stale-1-8-0', manifest_version='1.8.0')
 
-        assert result.returncode == 0, result.stdout
-        report = json.loads(result.stdout)
-        assert report['status'] == 'PASS'
-        assert report['oracle']['package'] == '@steipete/oracle@0.17.3'
-        assert report['devspace']['tested_version'] == '1.0.7'
-        assert 'npx -y @steipete/oracle@0.17.3 --version' in report['commands']
-        assert 'RECEIPT_INVALID' not in result.stdout
-        assert 'unsupported install receipt schema' not in result.stdout
+    result = run_powershell('-File', str(ROOT / 'doctor.ps1'), '-CodexHome', str(home))
+
+    assert result.returncode != 0
+    report = json.loads(result.stdout)
+    assert report['status'] == 'FAIL'
+    assert report['manifest_version'] == manifest['version']
+    mismatch = next(
+        issue for issue in report['issues']
+        if issue['code'] == 'RECEIPT_MANIFEST_VERSION_MISMATCH'
+    )
+    assert mismatch['receipt'] == '1.8.0'
+    assert mismatch['current'] == manifest['version']
+    assert report['oracle'] is None
 
 
-def test_doctor_rejects_compatibility_module_with_unreceipted_patch_asset() -> None:
-    with tempfile.TemporaryDirectory() as home:
-        codex_home = Path(home)
-        installed = run_powershell(
-            '-File', str(ROOT / 'install.ps1'), '-CodexHome', home, '-SkipDependencyInstall',
-        )
-        assert installed.returncode == 0, installed.stderr
-        readback = run_powershell('-File', str(ROOT / 'doctor.ps1'), '-CodexHome', home)
-        assert readback.returncode == 0, readback.stdout
-        receipt = next((codex_home / 'receipts').glob('codexpro-automation-*.json'))
-        value = json.loads(receipt.read_text(encoding='utf-8-sig'))
-        missing = 'bin/oracle-compat/0.17.1/assistantResponse.patch'
-        value['files'] = [record for record in value['files'] if record['path'] != missing]
-        (codex_home / missing).unlink()
-        receipt.write_text(json.dumps(value), encoding='utf-8')
+def test_doctor_rejects_installed_oracle_active_version_mismatch(tmp_path: Path) -> None:
+    home = tmp_path / 'home'
+    manifest = json.loads((ROOT / 'install-manifest.json').read_text(encoding='utf-8'))
+    tested = manifest['external']['oracle']['tested_version']
+    source = (ROOT / 'bin' / 'chatgpt_oracle_state.py').read_text(encoding='utf-8')
+    state_module_text = source.replace(
+        f'ORACLE_ACTIVE_VERSION = "{tested}"',
+        'ORACLE_ACTIVE_VERSION = "9.9.9"',
+    )
+    install_v4_fixture(home, 'active-map-mismatch', state_module_text=state_module_text)
 
-        result = run_powershell('-File', str(ROOT / 'doctor.ps1'), '-CodexHome', home)
+    result = run_powershell('-File', str(ROOT / 'doctor.ps1'), '-CodexHome', str(home))
 
-        assert result.returncode != 0
-        report = json.loads(result.stdout)
-        assert [
-            issue['path'] for issue in report['issues']
-            if issue['code'] == 'COMPAT_PATCH_ASSET_MISSING'
-        ] == [missing]
+    assert result.returncode != 0
+    report = json.loads(result.stdout)
+    assert report['status'] == 'FAIL'
+    mismatch = next(
+        issue for issue in report['issues']
+        if issue['code'] == 'ORACLE_ACTIVE_VERSION_MISMATCH'
+    )
+    assert mismatch['installed'] == '9.9.9'
+    assert mismatch['expected'] == tested
+    assert report['oracle'] is None
+
+
+def test_doctor_rejects_compatibility_module_with_unreceipted_patch_asset(tmp_path: Path) -> None:
+    home = tmp_path / 'home'
+    install_v4_fixture(home, 'current')
+    missing = 'bin/oracle-compat/0.17.1/assistantResponse.patch'
+    (home / missing).unlink()
+
+    result = run_powershell('-File', str(ROOT / 'doctor.ps1'), '-CodexHome', str(home))
+
+    assert result.returncode != 0
+    report = json.loads(result.stdout)
+    assert [
+        issue['path'] for issue in report['issues']
+        if issue['code'] == 'COMPAT_PATCH_ASSET_MISSING'
+    ] == [missing]
+
+
+def test_doctor_rejects_truncated_receipt_with_null_oracle(tmp_path: Path) -> None:
+    home = tmp_path / 'home'
+    receipt = install_v4_fixture(home, 'truncated')
+    receipt.write_text('{"schema": "codexpro.install-receipt/v4"', encoding='utf-8')
+
+    result = run_powershell('-File', str(ROOT / 'doctor.ps1'), '-CodexHome', str(home))
+
+    assert result.returncode != 0
+    report = json.loads(result.stdout)
+    assert report['status'] == 'FAIL'
+    assert any(issue['code'] == 'RECEIPT_INVALID' for issue in report['issues'])
+    assert report['oracle'] is None
+
+
+def test_doctor_rejects_tampered_state_module_hash_with_null_oracle(tmp_path: Path) -> None:
+    home = tmp_path / 'home'
+    install_v4_fixture(home, 'tampered')
+    state_module = home / 'bin' / 'chatgpt_oracle_state.py'
+    state_module.write_text(
+        state_module.read_text(encoding='utf-8') + '\n# user tampered after install\n',
+        encoding='utf-8',
+    )
+
+    result = run_powershell('-File', str(ROOT / 'doctor.ps1'), '-CodexHome', str(home))
+
+    assert result.returncode != 0
+    report = json.loads(result.stdout)
+    assert report['status'] == 'FAIL'
+    assert any(
+        issue['code'] == 'HASH_MISMATCH' and issue['path'] == 'bin/chatgpt_oracle_state.py'
+        for issue in report['issues']
+    )
+    assert report['oracle'] is None
+
+
+def test_doctor_rejects_exact_case_package_mismatch(tmp_path: Path) -> None:
+    home = tmp_path / 'home'
+    manifest = json.loads((ROOT / 'install-manifest.json').read_text(encoding='utf-8'))
+    package = manifest['external']['oracle']['package']
+    source = (ROOT / 'bin' / 'chatgpt_oracle_state.py').read_text(encoding='utf-8')
+    state_module_text = source.replace(
+        f'ORACLE_PACKAGE = "{package}"',
+        f'ORACLE_PACKAGE = "{package.upper()}"',
+    )
+    install_v4_fixture(home, 'case-package', state_module_text=state_module_text)
+
+    result = run_powershell('-File', str(ROOT / 'doctor.ps1'), '-CodexHome', str(home))
+
+    assert result.returncode != 0
+    report = json.loads(result.stdout)
+    assert report['status'] == 'FAIL'
+    mismatch = next(
+        issue for issue in report['issues']
+        if issue['code'] == 'ORACLE_PACKAGE_MISMATCH'
+    )
+    assert mismatch['installed'] == package.upper()
+    assert mismatch['expected'] == package
+    assert report['oracle'] is None
+
+
+@pytest.mark.parametrize('mutation, fragment', [
+    (
+        lambda source: source + '\nORACLE_ACTIVE_VERSION = "0.17.3"\n',
+        'DUPLICATE:ORACLE_ACTIVE_VERSION',
+    ),
+    (
+        lambda source: source.replace(
+            'ORACLE_ACTIVE_VERSION = "0.17.3"',
+            'ORACLE_ACTIVE_VERSION = REGULAR_MODEL',
+        ),
+        'NONLITERAL:ORACLE_ACTIVE_VERSION',
+    ),
+    (
+        lambda source: source + '\nORACLE_PACKAGE: str = "@steipete/oracle"\n',
+        'ANNASSIGN:ORACLE_PACKAGE',
+    ),
+    (
+        lambda source: source + '\nORACLE_ACTIVE_VERSION += ""\n',
+        'AUGASSIGN:ORACLE_ACTIVE_VERSION',
+    ),
+    (
+        lambda source: source + '\ndel ORACLE_ACTIVE_VERSION\n',
+        'DELETE:ORACLE_ACTIVE_VERSION',
+    ),
+    (
+        lambda source: source + '\ndef _rebind():\n    ORACLE_ACTIVE_VERSION = "0.17.3"\n',
+        'NESTED:ORACLE_ACTIVE_VERSION',
+    ),
+    (
+        lambda source: source + '\n(ORACLE_ACTIVE_VERSION := "9.9.9")\n',
+        'REBIND:ORACLE_ACTIVE_VERSION',
+    ),
+])
+def test_doctor_rejects_state_authority_rebinding(tmp_path: Path, mutation, fragment) -> None:
+    home = tmp_path / 'home'
+    source = (ROOT / 'bin' / 'chatgpt_oracle_state.py').read_text(encoding='utf-8')
+    install_v4_fixture(home, 'rebinding', state_module_text=mutation(source))
+
+    result = run_powershell('-File', str(ROOT / 'doctor.ps1'), '-CodexHome', str(home))
+
+    assert result.returncode != 0
+    report = json.loads(result.stdout)
+    assert report['status'] == 'FAIL'
+    invalid = next(
+        issue for issue in report['issues']
+        if issue['code'] == 'ORACLE_STATE_INVALID'
+    )
+    assert fragment in invalid['detail']
+    assert report['oracle'] is None
 
 
 def test_uninstall_and_rollback_require_receipt_ownership() -> None:
@@ -1078,6 +1286,22 @@ def test_temp_codex_home_install_and_rollback_is_exact_inverse() -> None:
         assert b'allow_implicit_invocation: true' in installed_pro_metadata.read_bytes()
         assert installed_oracle_patch.is_file()
         assert installed_devspace_patch.is_file()
+
+        manifest = json.loads((ROOT / 'install-manifest.json').read_text(encoding='utf-8'))
+        oracle_contract = manifest['external']['oracle']
+        doctor = run_powershell('-File', str(ROOT / 'doctor.ps1'), '-CodexHome', home)
+        assert doctor.returncode == 0, doctor.stdout
+        report = json.loads(doctor.stdout)
+        assert report['status'] == 'PASS'
+        assert report['manifest_version'] == manifest['version']
+        assert report['oracle']['package'] == (
+            f"{oracle_contract['package']}@{oracle_contract['tested_version']}"
+        )
+        assert report['oracle']['tested_version'] == oracle_contract['tested_version']
+        assert report['oracle']['command'] == oracle_contract['installation']
+        assert str(created) in report['oracle']['evidence']
+        assert report['devspace']['tested_version'] == manifest['external']['devspace']['tested_version']
+        assert f"{oracle_contract['installation']} --version" in report['commands']
 
         rolled_back = run_powershell(
             '-File', str(ROOT / 'rollback.ps1'),

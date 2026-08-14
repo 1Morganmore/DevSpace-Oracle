@@ -2001,6 +2001,118 @@ def test_strict_power_failure_with_wrong_tier_keeps_exact_session_locked(
         )
     ) == 1
 
+
+@pytest.mark.parametrize(
+    ("pro_mode", "status"),
+    [
+        (pro_mode, status)
+        for pro_mode in (False, True)
+        for status in ("selection unverified", "unknown outcome selecting")
+    ],
+)
+def test_recovery_settles_0172_strict_thinking_time_failure_and_releases_project(
+    tmp_path: Path,
+    pro_mode: bool,
+    status: str,
+) -> None:
+    """A stored 0.17.2 run keeps its exact strict-thinking-time settlement.
+
+    The strict thinking-time patch shipped in both the 0.17.2 (now
+    exact-recovery-only) and the active runtime, so recovery must still prove
+    the marker and release the project after the 0.17.3 promotion.
+    """
+    runner = load_runner()
+    manifest_path = pro_manifest(tmp_path) if pro_mode else manifest(tmp_path)
+    requested = "Heavy" if pro_mode else "Extra-high"
+    required = "Power 5 of 5 (Pro)" if pro_mode else "Power 4 of 5 (Extra High)"
+    if status == "unknown outcome selecting":
+        marker = f"Thinking time: {status} {requested}; refusing to submit without confirmed {required}."
+    else:
+        marker = f"Thinking time: {status} (requested {requested}); refusing to submit without confirmed {required}."
+    initial = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=popen_for(4, None, {}, {}),
+    )
+    run_dir = Path(initial["run_dir"])
+    state_path = run_dir / "state.json"
+    state = runner.STATE.load_state(state_path)
+    state["session_authority"] = "submitted_unknown"
+    state["oracle"]["resolved_version"] = "oracle 0.17.2"
+    state.pop("pre_submit_failure", None)
+    runner.STATE.write_json_atomic(state_path, state)
+    locator = state["oracle"]["slug"]
+    (run_dir / "stdout.log").write_text(
+        f"Session: {locator}\n"
+        f"ERROR: {marker}\n"
+        f"User error (browser-automation): {marker}\n",
+        encoding="utf-8",
+    )
+    (run_dir / "stderr.log").write_text("", encoding="utf-8")
+
+    recovered = recover_run(runner, run_dir, action="harvest", dry_run=True)
+    recovered_state = runner.STATE.load_state(state_path)
+
+    assert recovered["status"] == "pre_submit_failed"
+    assert recovered["safe_for_fresh_run"] is True
+    assert recovered_state["session_authority"] == "pre_submit"
+    assert recovered_state["task_outcome"] == "not_executed"
+    assert recovered_state["pre_submit_failure"]["code"] == (
+        "ORACLE_THINKING_TIME_PRE_SUBMIT_FAILED"
+    )
+    assert runner.STATE.unresolved_project_sessions(
+        runner.STATE.load_manifest(manifest_path).run_root,
+        tmp_path,
+    ) == []
+
+
+@pytest.mark.parametrize("stored_version", ["0.17.0", "0.17.1"])
+def test_recovery_keeps_lock_when_strict_thinking_time_marker_carries_non_contract_version(
+    tmp_path: Path,
+    stored_version: str,
+) -> None:
+    """Runtimes older than the strict proof contract never settle its markers."""
+    runner = load_runner()
+    manifest_path = manifest(tmp_path)
+    marker = (
+        "Thinking time: selection unverified (requested Extra-high); "
+        "refusing to submit without confirmed Power 4 of 5 (Extra High)."
+    )
+    initial = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=popen_for(4, None, {}, {}),
+    )
+    run_dir = Path(initial["run_dir"])
+    state_path = run_dir / "state.json"
+    state = runner.STATE.load_state(state_path)
+    state["oracle"]["resolved_version"] = f"oracle {stored_version}"
+    state["session_authority"] = "submitted_unknown"
+    state.pop("pre_submit_failure", None)
+    runner.STATE.write_json_atomic(state_path, state)
+    locator = state["oracle"]["slug"]
+    (run_dir / "stdout.log").write_text(
+        f"Session: {locator}\n"
+        f"ERROR: {marker}\n"
+        f"User error (browser-automation): {marker}\n",
+        encoding="utf-8",
+    )
+    (run_dir / "stderr.log").write_text("", encoding="utf-8")
+
+    recovered = recover_run(runner, run_dir, action="harvest", dry_run=True)
+    recovered_state = runner.STATE.load_state(state_path)
+
+    assert recovered["status"] == "dry-run"
+    assert "pre_submit_failure" not in recovered_state
+    assert len(
+        runner.STATE.unresolved_project_sessions(
+            runner.STATE.load_manifest(manifest_path).run_root,
+            tmp_path,
+        )
+    ) == 1
+
 def test_model_switcher_failure_is_proven_pre_submit_not_executed_and_releases_project(
     tmp_path: Path,
 ) -> None:
@@ -2073,6 +2185,108 @@ def test_model_switcher_failure_with_a_conversation_url_does_not_release_lock(
     assert runner.STATE.load_state(state_path)["session_authority"] == "submitted_unknown"
 
 
+def test_recovery_settles_0172_model_switcher_failure_and_releases_project(
+    tmp_path: Path,
+) -> None:
+    """A stored 0.17.2 run keeps its exact model-switcher settlement.
+
+    The model-switcher/no-cookie diagnostic shipped in both the 0.17.2 (now
+    exact-recovery-only) and the active runtime, so recovery must still prove
+    the marker and release the project after the 0.17.3 promotion.
+    """
+    runner = load_runner()
+    manifest_path = pro_manifest(tmp_path, run_id="f" * 32)
+    marker = (
+        'Unable to find model option matching "Pro" in the model switcher. '
+        "Available: Advanced, ModelGPT-5.6 Sol, EffortHigh. "
+        "No cookies were applied; log in to ChatGPT in Chrome or provide inline cookies."
+    )
+    initial = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=popen_for(4, None, {}, {}),
+    )
+    run_dir = Path(initial["run_dir"])
+    state_path = run_dir / "state.json"
+    state = runner.STATE.load_state(state_path)
+    state["session_authority"] = "submitted_unknown"
+    state["oracle"]["resolved_version"] = "oracle 0.17.2"
+    state.pop("pre_submit_failure", None)
+    runner.STATE.write_json_atomic(state_path, state)
+    locator = state["oracle"]["slug"]
+    (run_dir / "stdout.log").write_text(
+        f"Session: {locator}\n"
+        f"ERROR: {marker}\n"
+        f"User error (browser-automation): {marker}\n",
+        encoding="utf-8",
+    )
+    (run_dir / "stderr.log").write_text("", encoding="utf-8")
+
+    recovered = recover_run(runner, run_dir, action="harvest", dry_run=True)
+    recovered_state = runner.STATE.load_state(state_path)
+
+    assert recovered["status"] == "pre_submit_failed"
+    assert recovered["safe_for_fresh_run"] is True
+    assert recovered_state["session_authority"] == "pre_submit"
+    assert recovered_state["transport_status"] == "failed_pre_submit"
+    assert recovered_state["task_outcome"] == "not_executed"
+    assert recovered_state["pre_submit_failure"]["code"] == (
+        "ORACLE_MODEL_SWITCHER_PRE_SUBMIT_FAILED"
+    )
+    assert runner.STATE.unresolved_project_sessions(
+        runner.STATE.load_manifest(pro_manifest(tmp_path)).run_root,
+        tmp_path,
+    ) == []
+
+
+@pytest.mark.parametrize("stored_version", ["0.17.0", "0.17.1"])
+def test_recovery_keeps_lock_when_model_switcher_marker_carries_non_contract_version(
+    tmp_path: Path,
+    stored_version: str,
+) -> None:
+    """Runtimes older than the model-switcher proof contract never settle it."""
+    runner = load_runner()
+    manifest_path = pro_manifest(tmp_path, run_id="e" * 32)
+    marker = (
+        'Unable to find model option matching "Pro" in the model switcher. '
+        "No cookies were applied; log in to ChatGPT in Chrome or provide inline cookies."
+    )
+    initial = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=popen_for(4, None, {}, {}),
+    )
+    run_dir = Path(initial["run_dir"])
+    state_path = run_dir / "state.json"
+    state = runner.STATE.load_state(state_path)
+    state["oracle"]["resolved_version"] = f"oracle {stored_version}"
+    state["session_authority"] = "submitted_unknown"
+    state.pop("pre_submit_failure", None)
+    runner.STATE.write_json_atomic(state_path, state)
+    locator = state["oracle"]["slug"]
+    (run_dir / "stdout.log").write_text(
+        f"Session: {locator}\n"
+        f"ERROR: {marker}\n"
+        f"User error (browser-automation): {marker}\n",
+        encoding="utf-8",
+    )
+    (run_dir / "stderr.log").write_text("", encoding="utf-8")
+
+    recovered = recover_run(runner, run_dir, action="harvest", dry_run=True)
+    recovered_state = runner.STATE.load_state(state_path)
+
+    assert recovered["status"] == "dry-run"
+    assert "pre_submit_failure" not in recovered_state
+    assert len(
+        runner.STATE.unresolved_project_sessions(
+            runner.STATE.load_manifest(pro_manifest(tmp_path)).run_root,
+            tmp_path,
+        )
+    ) == 1
+
+
 def test_profile_copy_ebusy_is_proven_pre_submit_and_releases_project(tmp_path: Path) -> None:
     runner = load_runner()
     seed = tmp_path.parent / f"{tmp_path.name}-profile"
@@ -2133,6 +2347,122 @@ def test_recovery_repairs_legacy_profile_copy_ebusy_without_oracle_call(tmp_path
     assert settled["session_authority"] == "pre_submit"
     assert settled["task_outcome"] == "not_executed"
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("marker", "failure_code"),
+    [
+        (
+            "--copy-profile cannot be combined with --browser-manual-login: choose either a "
+            "throwaway copied profile or the persistent manual-login profile.",
+            "ORACLE_LAUNCH_FLAGS_MUTUALLY_EXCLUSIVE_PRELAUNCH_FAILED",
+        ),
+        (
+            "--copy-profile requires rsync on PATH (spawn failed): spawn rsync ENOENT",
+            "ORACLE_PROFILE_COPY_RSYNC_PRELAUNCH_FAILED",
+        ),
+    ],
+    ids=("manual-login-conflict", "rsync-missing"),
+)
+def test_recovery_settles_0172_copy_profile_host_failure_and_releases_project(
+    tmp_path: Path,
+    marker: str,
+    failure_code: str,
+) -> None:
+    """Stored 0.17.2 runs keep exact host-failure settlement after promotion.
+
+    The copy-profile conflict and rsync-spawn diagnostics shipped in both the
+    0.17.2 (now exact-recovery-only) and the active runtime, so recovery must
+    still prove either host failure and release the project.
+    """
+    runner = load_runner()
+    seed = tmp_path.parent / f"{tmp_path.name}-profile"
+    cookies = seed / "Default" / "Network" / "Cookies"
+    cookies.parent.mkdir(parents=True)
+    cookies.write_text("seed", encoding="utf-8")
+    manifest_path = pro_manifest(tmp_path, run_id="d" * 32, copy_profile=str(seed))
+    initial = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=popen_for(4, None, {}, {}),
+    )
+    run_dir = Path(initial["run_dir"])
+    state_path = run_dir / "state.json"
+    state = runner.STATE.load_state(state_path)
+    state["session_authority"] = "submitted_unknown"
+    state["oracle"]["resolved_version"] = "oracle 0.17.2"
+    state.pop("pre_submit_failure", None)
+    runner.STATE.write_json_atomic(state_path, state)
+    (run_dir / "stdout.log").write_text(f"ERROR: {marker}\n", encoding="utf-8")
+    (run_dir / "stderr.log").write_text("", encoding="utf-8")
+
+    recovered = recover_run(runner, run_dir, action="harvest", dry_run=True)
+    recovered_state = runner.STATE.load_state(state_path)
+
+    assert recovered["status"] == "pre_submit_failed"
+    assert recovered["safe_for_fresh_run"] is True
+    assert recovered_state["session_authority"] == "pre_submit"
+    assert recovered_state["transport_status"] == "failed_pre_submit"
+    assert recovered_state["task_outcome"] == "not_executed"
+    assert recovered_state["pre_submit_failure"]["code"] == failure_code
+    assert runner.STATE.unresolved_project_sessions(
+        runner.STATE.load_manifest(pro_manifest(tmp_path)).run_root,
+        tmp_path,
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("marker", "stored_version"),
+    [
+        (marker, stored_version)
+        for marker in (
+            "--copy-profile cannot be combined with --browser-manual-login: choose either a "
+            "throwaway copied profile or the persistent manual-login profile.",
+            "--copy-profile requires rsync on PATH (spawn failed): spawn rsync ENOENT",
+        )
+        for stored_version in ("0.17.0", "0.17.1")
+    ],
+)
+def test_recovery_keeps_lock_when_copy_profile_host_failure_carries_non_contract_version(
+    tmp_path: Path,
+    marker: str,
+    stored_version: str,
+) -> None:
+    """Runtimes older than the host-failure proof contract never settle it."""
+    runner = load_runner()
+    seed = tmp_path.parent / f"{tmp_path.name}-profile"
+    cookies = seed / "Default" / "Network" / "Cookies"
+    cookies.parent.mkdir(parents=True)
+    cookies.write_text("seed", encoding="utf-8")
+    manifest_path = pro_manifest(tmp_path, run_id="9" * 32, copy_profile=str(seed))
+    initial = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=popen_for(4, None, {}, {}),
+    )
+    run_dir = Path(initial["run_dir"])
+    state_path = run_dir / "state.json"
+    state = runner.STATE.load_state(state_path)
+    state["oracle"]["resolved_version"] = f"oracle {stored_version}"
+    state["session_authority"] = "submitted_unknown"
+    state.pop("pre_submit_failure", None)
+    runner.STATE.write_json_atomic(state_path, state)
+    (run_dir / "stdout.log").write_text(f"ERROR: {marker}\n", encoding="utf-8")
+    (run_dir / "stderr.log").write_text("", encoding="utf-8")
+
+    recovered = recover_run(runner, run_dir, action="harvest", dry_run=True)
+    recovered_state = runner.STATE.load_state(state_path)
+
+    assert recovered["status"] == "dry-run"
+    assert "pre_submit_failure" not in recovered_state
+    assert len(
+        runner.STATE.unresolved_project_sessions(
+            runner.STATE.load_manifest(pro_manifest(tmp_path)).run_root,
+            tmp_path,
+        )
+    ) == 1
 
 
 def test_manual_login_profile_uninitialized_is_proven_pre_submit_and_releases_project(
@@ -2691,6 +3021,195 @@ def test_direct_app_route_unconfirmed_can_be_user_settled_without_recovery(
     assert runner.STATE.proven_user_confirmed_no_submission(run_dir / "state.json") is None
     manifest_path.write_bytes(manifest_bytes)
     assert runner.STATE.proven_user_confirmed_no_submission(run_dir / "state.json") is not None
+
+
+def test_direct_app_route_unconfirmed_with_stored_0172_settles_and_releases_project(
+    tmp_path: Path,
+) -> None:
+    """A stored 0.17.2 run stays eligible for direct app-route adjudication.
+
+    The APP_MENTION_ROUTE_UNCONFIRMED marker shipped in both the 0.17.2 (now
+    exact-recovery-only) and the active runtime, so user settlement of a
+    stored 0.17.2 direct run must still work after the 0.17.3 promotion.
+    """
+    runner = load_runner()
+    manifest_path = manifest(tmp_path)
+
+    def app_route_unconfirmed(command, **kwargs):
+        slug = command[command.index("--slug") + 1]
+        kwargs["stdout"].write(
+            (
+                f"Session: {slug}\n"
+                "ERROR: APP_MENTION_ROUTE_UNCONFIRMED\n"
+                "User error (browser-automation): APP_MENTION_ROUTE_UNCONFIRMED\n"
+            ).encode()
+        )
+        kwargs["stdout"].flush()
+        return Process(1, [])
+
+    failed = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=app_route_unconfirmed,
+    )
+    run_dir = Path(failed["run_dir"])
+    state_path = run_dir / "state.json"
+    state = runner.STATE.load_state(state_path)
+    state["oracle"]["resolved_version"] = "oracle 0.17.2"
+    runner.STATE.write_json_atomic(state_path, state)
+    settled = runner.settle_user_confirmed_no_submission(
+        run_dir,
+        confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION,
+        reason="user confirmed the exact 0.17.2 direct run was not submitted",
+    )
+    proof = runner.STATE.proven_user_confirmed_no_submission(state_path)
+
+    assert settled["ok"] is True
+    assert settled["safe_for_fresh_run"] is True
+    assert settled["result"]["session_authority"] == "pre_submit"
+    assert settled["result"]["task_outcome_reason"] == (
+        "user-confirmed-no-submission-after-app-route-unconfirmed"
+    )
+    assert proof is not None
+    assert proof["settlement_eligibility"] == "oracle-direct-app-route-unconfirmed/v1"
+
+
+@pytest.mark.parametrize("stored_version", ["0.16.1", "0.17.0", "0.17.1"])
+def test_direct_app_route_unconfirmed_with_non_contract_version_is_fail_closed(
+    tmp_path: Path,
+    stored_version: str,
+) -> None:
+    """Runtimes outside the app-route proof contract never become settleable."""
+    runner = load_runner()
+    manifest_path = manifest(tmp_path)
+
+    def app_route_unconfirmed(command, **kwargs):
+        slug = command[command.index("--slug") + 1]
+        kwargs["stdout"].write(
+            (
+                f"Session: {slug}\n"
+                "ERROR: APP_MENTION_ROUTE_UNCONFIRMED\n"
+                "User error (browser-automation): APP_MENTION_ROUTE_UNCONFIRMED\n"
+            ).encode()
+        )
+        kwargs["stdout"].flush()
+        return Process(1, [])
+
+    failed = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=app_route_unconfirmed,
+    )
+    run_dir = Path(failed["run_dir"])
+    state_path = run_dir / "state.json"
+    state = runner.STATE.load_state(state_path)
+    state["oracle"]["resolved_version"] = stored_version
+    runner.STATE.write_json_atomic(state_path, state)
+
+    with pytest.raises(runner.STATE.OracleStateError) as exc:
+        runner.settle_user_confirmed_no_submission(
+            run_dir,
+            confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION,
+            reason="user said no submission",
+        )
+    assert exc.value.code == "NO_SUBMISSION_EVIDENCE_INCOMPLETE"
+
+
+def test_comprehensive_app_route_unconfirmed_with_stored_0172_is_user_settleable(
+    tmp_path: Path,
+) -> None:
+    """A stored 0.17.2 comprehensive run stays app-route settleable.
+
+    The comprehensive HOST_STAGE_CONTRACT path binds the same
+    APP_MENTION_ROUTE_UNCONFIRMED marker for the 0.17.2 (exact-recovery-only)
+    and active runtimes; a stored 0.17.2 run must stay user-adjudicable.
+    """
+    runner = load_runner()
+    run_id = "b" * 32
+    workflow_id = "4d8b1c12-6f2e-4c9a-b3e4-9f2d1c7a5b31"
+    parallel_parent_id = hashlib.sha256(workflow_id.encode("utf-8")).hexdigest()
+    manifest_path = manifest(
+        tmp_path,
+        run_id=run_id,
+        parallel_parent_id=parallel_parent_id,
+    )
+    input_mission = tmp_path / "input.md"
+    input_mission.write_text("bound input", encoding="utf-8")
+    input_sha = hashlib.sha256(input_mission.read_bytes()).hexdigest()
+    (tmp_path / "mission.md").write_text(
+        "\n".join((
+            "mission body",
+            "",
+            "[HOST_STAGE_CONTRACT]",
+            f"workflow_id={workflow_id}",
+            "stage=implementation",
+            f"attempt_id={run_id}",
+            f"input_mission_sha256={input_sha}",
+            f"exact_project_root={tmp_path.resolve()}",
+            f"exact_input_mission_path={input_mission.resolve()}",
+            f"Write the small UTF-8 stage receipt to: {(tmp_path / 'stage-result.json').resolve()}",
+            "",
+            "[DEVSPACE_WORKSPACE_ENTRY_CONTRACT]",
+            "workspace body",
+            "",
+        )),
+        encoding="utf-8",
+    )
+    rebind_manifest_mission(manifest_path)
+
+    def app_route_unconfirmed(command, **kwargs):
+        slug = command[command.index("--slug") + 1]
+        kwargs["stdout"].write(
+            (
+                f"Session: {slug}\n"
+                "ERROR: APP_MENTION_ROUTE_UNCONFIRMED\n"
+                "User error (browser-automation): APP_MENTION_ROUTE_UNCONFIRMED\n"
+            ).encode()
+        )
+        kwargs["stdout"].flush()
+        return Process(1, [])
+
+    failed = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=app_route_unconfirmed,
+    )
+    run_dir = Path(failed["run_dir"])
+    state_path = run_dir / "state.json"
+    state = runner.STATE.load_state(state_path)
+    slug = state["oracle"]["slug"]
+    (run_dir / "recovery-harvest-stdout.log").write_text(
+        f'No live ChatGPT tab matched session "{slug}". Attempting recovery.\n',
+        encoding="utf-8",
+    )
+    (run_dir / "recovery-harvest-stderr.log").write_text(
+        "Cannot recover conversation: session metadata has no recoverable ChatGPT conversation URL.\n",
+        encoding="utf-8",
+    )
+    state["oracle"]["resolved_version"] = "oracle 0.17.2"
+    runner.STATE.write_json_atomic(state_path, state)
+
+    settled = runner.settle_user_confirmed_no_submission(
+        run_dir,
+        confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION,
+        reason="user inspected the exact 0.17.2 comprehensive run and confirmed no submission",
+    )
+    proof = runner.STATE.proven_user_confirmed_no_submission(state_path)
+
+    assert settled["ok"] is True
+    assert settled["safe_for_fresh_run"] is True
+    assert settled["result"]["session_authority"] == "pre_submit"
+    assert settled["result"]["task_outcome_reason"] == (
+        "user-confirmed-no-submission-after-app-route-unconfirmed"
+    )
+    assert proof is not None
+    assert proof["workflow_id"] == workflow_id
+    assert proof["stage"] == "implementation"
+    assert proof["attempt_id"] == run_id
+    assert proof["input_mission_sha256"] == input_sha
 
 
 def test_direct_web_multi_child_no_submission_settlement_is_hash_bound(tmp_path: Path) -> None:
