@@ -1299,7 +1299,7 @@ def test_temp_codex_home_install_and_rollback_is_exact_inverse() -> None:
         )
         assert report['oracle']['tested_version'] == oracle_contract['tested_version']
         assert report['oracle']['command'] == oracle_contract['installation']
-        assert str(created) in report['oracle']['evidence']
+        assert Path(report['oracle']['evidence']).samefile(created)
         assert report['devspace']['tested_version'] == manifest['external']['devspace']['tested_version']
         assert f"{oracle_contract['installation']} --version" in report['commands']
 
