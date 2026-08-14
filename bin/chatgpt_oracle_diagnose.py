@@ -82,6 +82,18 @@ SIGNATURE_RULES: tuple[tuple[str, str, str], ...] = (
     ),
 )
 
+# Every eligible pre-submit family gets its own signature and settlement reason
+# so the report, the settlement receipt, and the audit trail cannot disagree.
+ELIGIBILITY_SIGNATURES = {
+    "oracle-chatgpt-session-absent/v1": "session-absent",
+    "oracle-direct-app-route-unconfirmed/v1": "app-route-unconfirmed",
+    "oracle-web-multi-child/v1": "web-multi-child",
+}
+ELIGIBILITY_SETTLEMENT_REASONS = {
+    "oracle-chatgpt-session-absent/v1": "user-confirmed-no-submission-after-session-absent",
+    "oracle-direct-app-route-unconfirmed/v1": "user-confirmed-no-submission-after-app-route-unconfirmed",
+    "oracle-web-multi-child/v1": "user-confirmed-no-submission-after-prompt-timeout",
+}
 REMEDIATION = {
     PRE_SUBMIT_HOST: "Fix the local launch contract; no web submission occurred, so a fresh run is safe.",
     PRE_SUBMIT_UI: "Relax or realign the ChatGPT UI contract; no web submission occurred, so a fresh run is safe.",
@@ -119,12 +131,18 @@ def classify_run(
     transcript_text: str = "",
     user_confirmed_no_submission: bool = False,
     pre_submit_host_failure: dict[str, Any] | None = None,
+    submission_authority: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Return the bucket and signature for one persisted run.
 
     Ordering matters more than breadth here.  Local exit codes and local
     status never outrank durable evidence, and a pre-submit signature always
-    wins over a post-submit interpretation.
+    wins over a post-submit interpretation.  The single submission-authority
+    verdict from ``STATE.classify_submission_authority`` is binding when it is
+    provided: a run the authority layer proved was never submitted must never
+    be reported as an uncertain live session, and an eligible-but-unconfirmed
+    pre-submit refusal stays a host-side decision awaiting explicit user
+    confirmation.  No bucket beyond those two guarantees is re-derived here.
     """
     outcome = str(state.get("task_outcome") or "")
     # Single authority source, shared with the runner, so the report and the
@@ -132,6 +150,24 @@ def classify_run(
     verdict = STATE.resolve_lifecycle(state, output_is_present=has_output)
     lifecycle = str(verdict["lifecycle"])
     source = str(verdict["authority_source"])
+
+    authority_class = str((submission_authority or {}).get("class") or "")
+    settlement_eligibility = (submission_authority or {}).get("settlement_eligibility")
+    requires_user_confirmation = bool((submission_authority or {}).get("requires_user_confirmation"))
+    if authority_class == "SUBMITTED_UNKNOWN" and requires_user_confirmation:
+        # The authority layer bound exact eligible pre-submit evidence: nothing
+        # was sent, but only an explicit user confirmation may release the
+        # project lock.  This outranks the lifecycle-running fallback below so
+        # an exited login-refusal run can never read as a live exact session.
+        # The signature names the exact eligibility so this report, the
+        # settlement receipt, and the audit trail cannot disagree.
+        return {
+            "bucket": PRE_SUBMIT_HOST,
+            "signature": (
+                f"{ELIGIBILITY_SIGNATURES.get(str(settlement_eligibility), 'pre-submit')}"
+                "-awaiting-user-confirmation"
+            ),
+        }
 
     pre_submit_failure = state.get("pre_submit_failure")
     host_failure = pre_submit_failure if isinstance(pre_submit_failure, dict) else pre_submit_host_failure
@@ -172,6 +208,14 @@ def classify_run(
     if outcome == "not_executed" and has_output:
         return {"bucket": TASK_NOT_EXECUTED, "signature": "durable-output-reports-no-execution"}
     if user_confirmed_no_submission:
+        if (
+            str(state.get("task_outcome_reason") or "")
+            == "user-confirmed-no-submission-after-session-absent"
+        ):
+            return {
+                "bucket": PRE_SUBMIT_UI,
+                "signature": "user-confirmed-no-submission-after-session-absent",
+            }
         return {
             "bucket": PRE_SUBMIT_UI,
             "signature": (
@@ -190,7 +234,7 @@ def classify_run(
         if needle in stdout_text:
             return {"bucket": bucket, "signature": signature}
 
-    if lifecycle == "running":
+    if lifecycle == "running" and authority_class != "PRE_SUBMIT_PROVEN":
         return {"bucket": ACTIVE, "signature": f"lifecycle-running-via-{source}"}
     if has_output:
         return {"bucket": PROVIDER_INCOMPLETE, "signature": "output-present-without-terminal-settlement"}
@@ -235,11 +279,15 @@ def _exact_run_dir(state_root: Path, value: Path) -> Path:
 
 def _run_record(run_dir: Path) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     state_path = run_dir / "state.json"
+    authority = STATE.classify_submission_authority(run_dir)
     try:
         state = STATE.load_state(state_path)
     except Exception as exc:  # noqa: BLE001 - corrupt state must remain actionable
         return None, {
             "run_dir": str(run_dir),
+            "authority_class": str(authority.get("class") or ""),
+            "settlement_eligibility": authority.get("settlement_eligibility"),
+            "requires_user_confirmation": bool(authority.get("requires_user_confirmation")),
             "bucket": UNCLASSIFIED,
             "signature": "state-unreadable",
             "detail": type(exc).__name__,
@@ -256,6 +304,7 @@ def _run_record(run_dir: Path) -> tuple[dict[str, Any] | None, dict[str, Any]]:
             STATE.proven_user_confirmed_no_submission(state_path) is not None
         ),
         pre_submit_host_failure=STATE.proven_pre_submit_host_failure(state_path),
+        submission_authority=authority,
     )
     return state, {
         "run_dir": str(run_dir),
@@ -264,6 +313,9 @@ def _run_record(run_dir: Path) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         "session_authority": str(state.get("session_authority") or ""),
         "lifecycle": str(lifecycle["lifecycle"]),
         "authority_source": str(lifecycle["authority_source"]),
+        "authority_class": str(authority.get("class") or ""),
+        "settlement_eligibility": authority.get("settlement_eligibility"),
+        "requires_user_confirmation": bool(authority.get("requires_user_confirmation")),
         "output_path": str(output_path),
         **verdict,
     }
@@ -298,6 +350,33 @@ def _next_action(
         action.update({
             "kind": "report_incident",
             "argv": _argv("chatgpt_oracle_incident.py", "report", "--run-dir", str(run_dir)),
+        })
+    elif (
+        str(record.get("authority_class") or "") == "SUBMITTED_UNKNOWN"
+        and record.get("requires_user_confirmation")
+    ):
+        # The authority layer bound an eligible pre-submit refusal.  Nothing was
+        # sent, but the project lock may only be released by an explicit user
+        # confirmation; never by a fresh run or state editing.
+        action.update({
+            "kind": "settle_no_submission",
+            "reason": (
+                "Exact pre-send refusal with no conversation URL; only an explicit "
+                "user confirmation may release the project lock."
+            ),
+            "argv": _argv(
+                "chatgpt_oracle_run.py",
+                "settle-no-submission",
+                "--run-dir",
+                str(run_dir),
+                "--confirmation",
+                STATE.USER_CONFIRMED_NO_SUBMISSION,
+                "--reason",
+                ELIGIBILITY_SETTLEMENT_REASONS.get(
+                    str(record.get("settlement_eligibility") or ""),
+                    "user-confirmed-no-submission",
+                ),
+            ),
         })
     elif lifecycle == "running":
         action.update({
@@ -448,13 +527,18 @@ def diagnose(state_root: Path | None = None) -> dict[str, Any]:
         try:
             state = STATE.load_state(run_dir / "state.json")
         except Exception as exc:  # noqa: BLE001 - a corrupt run must stay visible
+            authority = STATE.classify_submission_authority(run_dir)
             runs.append({
                 "run_dir": str(run_dir),
+                "authority_class": str(authority.get("class") or ""),
+                "settlement_eligibility": authority.get("settlement_eligibility"),
+                "requires_user_confirmation": bool(authority.get("requires_user_confirmation")),
                 "bucket": UNCLASSIFIED,
                 "signature": "state-unreadable",
                 "detail": type(exc).__name__,
             })
             continue
+        authority = STATE.classify_submission_authority(run_dir)
         artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
         output_path = Path(str(artifacts.get("output") or (run_dir / "output.md")))
         verdict = classify_run(
@@ -466,12 +550,16 @@ def diagnose(state_root: Path | None = None) -> dict[str, Any]:
                 STATE.proven_user_confirmed_no_submission(run_dir / "state.json") is not None
             ),
             pre_submit_host_failure=STATE.proven_pre_submit_host_failure(run_dir / "state.json"),
+            submission_authority=authority,
         )
         runs.append({
             "run_dir": str(run_dir),
             "project_root": str(state.get("project_root") or ""),
             "status": str(state.get("status") or ""),
             "session_authority": str(state.get("session_authority") or ""),
+            "authority_class": str(authority.get("class") or ""),
+            "settlement_eligibility": authority.get("settlement_eligibility"),
+            "requires_user_confirmation": bool(authority.get("requires_user_confirmation")),
             **verdict,
         })
 
@@ -479,25 +567,62 @@ def diagnose(state_root: Path | None = None) -> dict[str, Any]:
     for run in runs:
         counts[str(run["bucket"])] = counts.get(str(run["bucket"]), 0) + 1
     unresolved = [run for run in runs if run["bucket"] not in {COMPLETE, ACTIVE}]
+    # A bucket is only fresh-run-safe when no run inside it still owns its
+    # project.  An eligible pre-submit refusal awaiting explicit user
+    # confirmation keeps its lock, so its bucket must not be advertised as safe.
+    locked_buckets = {
+        str(run["bucket"]) for run in runs if run.get("requires_user_confirmation")
+    }
+    safe_buckets = [
+        bucket for bucket in (PRE_SUBMIT_HOST, PRE_SUBMIT_UI)
+        if counts.get(bucket) and bucket not in locked_buckets
+    ]
     return {
         "schema": SCHEMA,
         "state_root": str(root),
         "total_runs": len(runs),
         "bucket_counts": {name: count for name, count in counts.items() if count},
         "top_buckets": [
-            {"bucket": name, "count": count, "remediation": REMEDIATION.get(name, "")}
+            {
+                "bucket": name,
+                "count": count,
+                "remediation": (
+                    REMEDIATION.get(name, "")
+                    if name not in locked_buckets
+                    else "A run in this bucket still owns its project: settle it with an "
+                    "explicit user no-submission confirmation before any fresh run."
+                ),
+            }
             for name, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
             if count
         ],
-        "safe_for_fresh_run_buckets": [PRE_SUBMIT_HOST, PRE_SUBMIT_UI],
+        "safe_for_fresh_run_buckets": safe_buckets,
         "unresolved_runs": unresolved,
     }
+
+
+# `--summary-only` belongs to the aggregate no-subcommand report only.
+# `triage` and `watch` are single-run forms and reject the flag; the rejection
+# message spells out the exact usage so operators never conflate the two forms.
+SUMMARY_ONLY_USAGE = (
+    "SUMMARY_ONLY_FOR_AGGREGATE_DIAGNOSIS: `--summary-only` is accepted only by "
+    "the aggregate no-subcommand report, e.g. "
+    "`chatgpt_oracle_diagnose.py --summary-only`. `triage` and `watch` already "
+    "target one exact run and reject `--summary-only`; call them without it."
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only Oracle failure-signature report.")
     parser.add_argument("--state-root", type=Path, default=None)
-    parser.add_argument("--summary-only", action="store_true")
+    parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help=(
+            "Aggregate-only: omit the per-run detail list from the no-subcommand "
+            "report. Rejected with triage/watch, which are single-run forms."
+        ),
+    )
     commands = parser.add_subparsers(dest="command")
     triage_parser = commands.add_parser("triage", help="Classify one exact run or project and show safe next actions.")
     triage_selector = triage_parser.add_mutually_exclusive_group(required=True)
@@ -515,7 +640,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "watch":
             if args.summary_only:
-                raise ValueError("SUMMARY_ONLY_FOR_AGGREGATE_DIAGNOSIS")
+                raise ValueError(SUMMARY_ONLY_USAGE)
             return watch(
                 args.run_dir,
                 state_root=args.state_root,
@@ -524,7 +649,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.command == "triage":
             if args.summary_only:
-                raise ValueError("SUMMARY_ONLY_FOR_AGGREGATE_DIAGNOSIS")
+                raise ValueError(SUMMARY_ONLY_USAGE)
             report = triage(
                 state_root=args.state_root,
                 project_root=args.project_root,

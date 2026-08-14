@@ -44,12 +44,20 @@ instead of the layer that failed.
   `python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_incident.py" report --run-dir <exact-run-dir>`.
   The packet carries the exact run directory, the classified bucket, the
   lifecycle verdict with its authority source, and existing evidence paths.
-- Classify before repairing. Run
+- Classify before repairing. Run the aggregate report (no subcommand)
   `python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_diagnose.py" --summary-only`
-  and fix the largest bucket rather than the newest report. A `pre-submit-*`
-  bucket proves no web submission occurred and is safe to retry; a
-  `post-submit-*` bucket requires exact-slug recovery and never a replacement
-  submission.
+  and fix the largest bucket rather than the newest report. `--summary-only`
+  belongs to that aggregate form only: it omits the per-run `unresolved_runs`
+  detail. `triage --run-dir <exact-run>` is the single-run form for one bounded
+  next action and `watch --run-dir <exact-run>` streams one run's lifecycle;
+  both reject `--summary-only`, so never combine the flag with a subcommand. A
+  `pre-submit-*` bucket proves no web submission occurred and is safe to retry;
+  a `post-submit-*` bucket requires exact-slug recovery and never a replacement
+  submission. A `session-absent-awaiting-user-confirmation` run is provably
+  pre-submit but still owns the project: release it only through the returned
+  settle command
+  (`chatgpt_oracle_run.py settle-no-submission --run-dir <exact-run> --confirmation user-confirmed-no-submission --reason <reason>`)
+  after the operator confirms, never by editing state.
 - Treat `safe_for_fresh_run: false` as binding. Do not resubmit, stop, or close
   another session's work while repairing code.
 
