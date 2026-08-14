@@ -1367,6 +1367,20 @@ def execute_run(
             ),
             "result": state,
         }
+    # A user-confirmable pre-submit refusal (e.g. the exact login-screen
+    # session-absent exit) is never auto-settled here. Surface the authority
+    # classification so callers can see the run still owns the project and
+    # requires an explicit user confirmation before it can be released.
+    authority = STATE.classify_submission_authority(layout.run_dir)
+    if authority["requires_user_confirmation"]:
+        return {
+            "ok": status == "complete",
+            "run_dir": str(layout.run_dir),
+            "result": state,
+            "authority_class": authority["class"],
+            "settlement_eligibility": authority["settlement_eligibility"],
+            "requires_user_confirmation": authority["requires_user_confirmation"],
+        }
     return {"ok": status == "complete", "run_dir": str(layout.run_dir), "result": state}
 
 
@@ -1944,7 +1958,7 @@ def recover_run(
             and settle_timeout_seconds > 0
             and result.get("status") in {"session_live", "terminal_settle_disagreement"}
         ):
-            return {
+            result = {
                 **result,
                 "status": "live_settle_timeout",
                 "settle_timeout_seconds": settle_timeout_seconds,
@@ -1953,7 +1967,13 @@ def recover_run(
                     "preserve this session and do not relaunch, replace, or resubmit"
                 ),
             }
-        return result
+        authority = STATE.classify_submission_authority(directory)
+        return {
+            **result,
+            "authority_class": authority["class"],
+            "settlement_eligibility": authority["settlement_eligibility"],
+            "requires_user_confirmation": authority["requires_user_confirmation"],
+        }
 
 
 def build_parser() -> argparse.ArgumentParser:

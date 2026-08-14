@@ -2400,6 +2400,397 @@ def test_profile_copy_ebusy_is_proven_pre_submit_and_releases_project(tmp_path: 
     ) == []
 
 
+CHATGPT_SESSION_ABSENT_MARKER = (
+    "ChatGPT session not detected. Login button detected on page. No ChatGPT cookies were "
+    "applied; sign in to chatgpt.com in Chrome or pass inline cookies "
+    "(--browser-inline-cookies[(-file)] / ORACLE_BROWSER_COOKIES_JSON)."
+)
+
+
+def chatgpt_session_absent_popen(command, **kwargs):
+    """Reproduce Oracle 0.17.3 refusing before send on an expired seed profile."""
+    slug = command[command.index("--slug") + 1]
+    kwargs["stdout"].write(
+        (
+            f"Session: {slug}\n"
+            f"ERROR: {CHATGPT_SESSION_ABSENT_MARKER}\n"
+            f"User error (browser-automation): {CHATGPT_SESSION_ABSENT_MARKER}\n"
+        ).encode()
+    )
+    kwargs["stdout"].flush()
+    return Process(1, [])
+
+
+def post_submit_disconnect_popen(command, **kwargs):
+    """Reproduce a browser disconnect after a visible post-submit response stream."""
+    slug = command[command.index("--slug") + 1]
+    kwargs["stdout"].write(
+        (
+            f"Session: {slug}\n"
+            "prompt submitted; response streaming\n"
+            "URL: https://chatgpt.com/c/aaaaaaaaaaaaaaaa\n"
+            "browser disconnected before response completion\n"
+        ).encode()
+    )
+    kwargs["stdout"].flush()
+    return Process(1, [])
+
+
+def _no_mutation(runner, run_dir, manifest_path):
+    return None
+
+
+def _mutate_conversation_url_present(runner, run_dir, manifest_path):
+    state_path = run_dir / "state.json"
+    state = runner.STATE.load_state(state_path)
+    state["oracle"]["conversation_url"] = "https://chatgpt.com/c/blocked-12345678"
+    runner.STATE.write_json_atomic(state_path, state)
+
+
+def _mutate_answer_marker_present(runner, run_dir, manifest_path):
+    stdout = run_dir / "stdout.log"
+    transcript = run_dir / "transcript.md"
+    marker = b"\nAnswer: delivered assistant response before disconnect\n"
+    stdout.write_bytes(stdout.read_bytes() + marker)
+    transcript.write_bytes(transcript.read_bytes() + marker)
+
+
+def _mutate_output_present(runner, run_dir, manifest_path):
+    (run_dir / "output.md").write_text("partial work product before disconnect", encoding="utf-8")
+
+
+def _mutate_provider_progress(runner, run_dir, manifest_path):
+    stdout = run_dir / "stdout.log"
+    transcript = run_dir / "transcript.md"
+    marker = ("\n" + runner.STATE.ORACLE_PROMPT_NOT_OBSERVED_MARKER + "\n").encode("utf-8")
+    stdout.write_bytes(stdout.read_bytes() + marker)
+    transcript.write_bytes(transcript.read_bytes() + marker)
+
+
+def _mutate_process_survival(runner, run_dir, manifest_path):
+    state_path = run_dir / "state.json"
+    state = runner.STATE.load_state(state_path)
+    state["host_watchdog"] = {
+        "status": "armed",
+        "timeout_seconds": 5430,
+        "oracle_process_pid": 1234,
+        "process_action": "preserve",
+    }
+    runner.STATE.write_json_atomic(state_path, state)
+
+
+def _mutate_utf8_decode_failure(runner, run_dir, manifest_path):
+    stdout = run_dir / "stdout.log"
+    transcript = run_dir / "transcript.md"
+    stdout.write_bytes(stdout.read_bytes() + b"\xff\xfe")
+    transcript.write_bytes(transcript.read_bytes() + b"\xff\xfe")
+
+
+def _mutate_mission_hash_changed(runner, run_dir, manifest_path):
+    state = runner.STATE.load_state(run_dir / "state.json")
+    mission_path = Path(state["mission"]["path"])
+    mission_path.write_bytes(mission_path.read_bytes() + b"\nmutated after launch")
+
+
+def _mutate_manifest_hash_changed(runner, run_dir, manifest_path):
+    manifest_path.write_bytes(manifest_path.read_bytes() + b"\n")
+
+
+def test_chatgpt_session_absent_user_confirmation_releases_the_lock_and_allows_a_fresh_run(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: a login-screen refusal stays locked until user confirmation.
+
+    The removed auto-settlement must never release the project again: the run
+    is exposed as SUBMITTED_UNKNOWN with the exact session-absent eligibility,
+    the lock survives until settle_user_confirmed_no_submission succeeds, and
+    only then may a fresh run proceed on the same project.
+    """
+    runner = load_runner()
+    manifest_path = pro_devspace_manifest(tmp_path)
+    result = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=chatgpt_session_absent_popen,
+    )
+    run_dir = Path(result["run_dir"])
+    state_path = run_dir / "state.json"
+
+    # At the submission point the failure is exposed as user-confirmable and
+    # the project lock is still held (no auto-settlement happened).
+    assert result["ok"] is False
+    assert result["authority_class"] == "SUBMITTED_UNKNOWN"
+    assert result["settlement_eligibility"] == "oracle-chatgpt-session-absent/v1"
+    assert result["requires_user_confirmation"] is True
+    assert result["result"]["status"] == "attention_required"
+
+    authority = runner.STATE.classify_submission_authority(run_dir)
+    assert authority["schema"] == "codex.chatgpt.oracle-submission-authority/v1"
+    assert authority["class"] == "SUBMITTED_UNKNOWN"
+    assert authority["owns_project"] is True
+    assert authority["settlement_eligibility"] == "oracle-chatgpt-session-absent/v1"
+    assert authority["requires_user_confirmation"] is True
+    assert authority["session_authority"] == "submitted_unknown"
+    assert authority["evidence"]["output_present"] is False
+    assert authority["evidence"]["conversation_url_present"] is False
+    assert authority["evidence"]["process_exited"] is True
+    assert authority["evidence"]["proven_pre_submit"] is None
+    assert authority["evidence"]["user_confirmed"] is False
+
+    state = runner.STATE.load_state(state_path)
+    assert state["session_authority"] == "submitted_unknown"
+    assert state["transport_status"] == "failed"
+    assert state["task_outcome"] == "pending"
+    assert "pre_submit_failure" not in state
+    assert "user_confirmed_no_submission" not in state
+
+    owners = runner.STATE.unresolved_project_sessions(run_dir.parent, tmp_path)
+    assert len(owners) == 1
+    assert owners[0]["authority_class"] == "SUBMITTED_UNKNOWN"
+
+    # Recovery exposes the same classification without changing its semantics.
+    recovered = recover_run(runner, run_dir, action="harvest", dry_run=True)
+    assert recovered["status"] == "dry-run"
+    assert recovered["authority_class"] == "SUBMITTED_UNKNOWN"
+    assert recovered["settlement_eligibility"] == "oracle-chatgpt-session-absent/v1"
+    assert recovered["requires_user_confirmation"] is True
+
+    # Without the exact confirmation token the settlement is refused.
+    with pytest.raises(runner.STATE.OracleStateError) as caught:
+        runner.settle_user_confirmed_no_submission(
+            run_dir,
+            confirmation="not-the-exact-user-confirmation",
+            reason="user confirmed the exact run was not submitted",
+        )
+    assert caught.value.code == "NO_SUBMISSION_CONFIRMATION_REQUIRED"
+    assert runner.STATE.unresolved_project_sessions(run_dir.parent, tmp_path) != []
+
+    # The exact confirmation settles the run as not executed.
+    settled = runner.settle_user_confirmed_no_submission(
+        run_dir,
+        confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION,
+        reason="user confirmed the exact run was not submitted",
+    )
+    assert settled["ok"] is True
+    assert settled["status"] == "pre_submit_user_confirmed"
+    assert settled["safe_for_fresh_run"] is True
+    assert settled["result"]["session_authority"] == "pre_submit"
+    assert settled["result"]["transport_status"] == "not_submitted_user_confirmed"
+    assert settled["result"]["task_outcome"] == "not_executed"
+    assert settled["result"]["task_outcome_reason"] == (
+        "user-confirmed-no-submission-after-session-absent"
+    )
+
+    proof = runner.STATE.proven_user_confirmed_no_submission(state_path)
+    assert proof is not None
+    assert proof["settlement_eligibility"] == "oracle-chatgpt-session-absent/v1"
+    assert proof["output_absent"] is True
+    assert proof["conversation_url_absent"] is True
+
+    # The settlement is hash-bound: changing the mission revokes it.
+    mission_path = Path(runner.STATE.load_state(state_path)["mission"]["path"])
+    mission_bytes = mission_path.read_bytes()
+    mission_path.write_bytes(mission_bytes + b"\nmutated")
+    assert runner.STATE.proven_user_confirmed_no_submission(state_path) is None
+    assert runner.STATE.unresolved_project_sessions(run_dir.parent, tmp_path) != []
+    mission_path.write_bytes(mission_bytes)
+    assert runner.STATE.proven_user_confirmed_no_submission(state_path) is not None
+
+    # After settlement the run is proven pre-submit and owns nothing.
+    authority = runner.STATE.classify_submission_authority(run_dir)
+    assert authority["class"] == "PRE_SUBMIT_PROVEN"
+    assert authority["owns_project"] is False
+    assert authority["reason"] == "user-confirmed-no-submission"
+    assert authority["settlement_eligibility"] is None
+    assert runner.STATE.unresolved_project_sessions(run_dir.parent, tmp_path) == []
+
+    # A fresh run on the same project proceeds without a lock error.
+    second = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=popen_for(0, b"answer\nTASK_OUTCOME: EXECUTED\n", {}, []),
+    )
+    assert second["ok"] is True
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_class", "expected_eligibility", "settlement_rejected"),
+    [
+        pytest.param(
+            _mutate_conversation_url_present,
+            "SUBMITTED_BOUND",
+            None,
+            True,
+            id="conversation-url-present",
+        ),
+        pytest.param(
+            _mutate_answer_marker_present,
+            "SUBMITTED_UNKNOWN",
+            None,
+            True,
+            id="prompt-submitted-answer-marker",
+        ),
+        pytest.param(
+            _mutate_output_present,
+            "SUBMITTED_UNKNOWN",
+            None,
+            True,
+            id="partial-output-present",
+        ),
+        pytest.param(
+            _mutate_provider_progress,
+            "SUBMITTED_UNKNOWN",
+            None,
+            True,
+            id="provider-execution-progress",
+        ),
+        pytest.param(
+            _mutate_process_survival,
+            "SUBMITTED_UNKNOWN",
+            None,
+            True,
+            id="process-survival-indication",
+        ),
+        pytest.param(
+            _mutate_utf8_decode_failure,
+            "SUBMITTED_BOUND",
+            None,
+            True,
+            id="log-truncation-utf8-decode-failure",
+        ),
+        pytest.param(
+            _mutate_mission_hash_changed,
+            "SUBMITTED_UNKNOWN",
+            None,
+            True,
+            id="mission-hash-changed",
+        ),
+        pytest.param(
+            _mutate_manifest_hash_changed,
+            "SUBMITTED_UNKNOWN",
+            None,
+            True,
+            id="manifest-hash-changed",
+        ),
+        pytest.param(
+            _no_mutation,
+            "SUBMITTED_UNKNOWN",
+            "oracle-chatgpt-session-absent/v1",
+            False,
+            id="user-confirmation-absent",
+        ),
+    ],
+)
+def test_chatgpt_session_absent_without_user_confirmation_keeps_the_project_lock(
+    tmp_path: Path,
+    mutation,
+    expected_class: str,
+    expected_eligibility: str | None,
+    settlement_rejected: bool,
+) -> None:
+    """A login-screen refusal is never auto-settled: only user adjudication releases it.
+
+    Each parameter breaks one evidence bound so the run stays locked and the
+    settlement is refused. The unmuted run is eligible but still requires the
+    exact user confirmation; without it nothing is settled (the removed
+    auto-settlement regression).
+    """
+    runner = load_runner()
+    manifest_path = pro_devspace_manifest(tmp_path)
+    result = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=chatgpt_session_absent_popen,
+    )
+    run_dir = Path(result["run_dir"])
+    state_path = run_dir / "state.json"
+    mutation(runner, run_dir, manifest_path)
+
+    authority = runner.STATE.classify_submission_authority(run_dir)
+    assert authority["class"] == expected_class
+    assert authority["settlement_eligibility"] == expected_eligibility
+    assert authority["owns_project"] is True
+    assert authority["requires_user_confirmation"] is (expected_eligibility is not None)
+    assert authority["session_authority"] == "submitted_unknown"
+
+    state = runner.STATE.load_state(state_path)
+    assert state["session_authority"] == "submitted_unknown"
+    assert state["task_outcome"] == "pending"
+    assert "pre_submit_failure" not in state
+    assert "user_confirmed_no_submission" not in state
+
+    owners = runner.STATE.unresolved_project_sessions(run_dir.parent, tmp_path)
+    assert len(owners) == 1
+    assert owners[0]["authority_class"] == expected_class
+
+    if settlement_rejected:
+        with pytest.raises(runner.STATE.OracleStateError) as caught:
+            runner.settle_user_confirmed_no_submission(
+                run_dir,
+                confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION,
+                reason="user confirmed the exact run was not submitted",
+            )
+        assert caught.value.code == "NO_SUBMISSION_EVIDENCE_INCOMPLETE"
+    else:
+        with pytest.raises(runner.STATE.OracleStateError) as caught:
+            runner.settle_user_confirmed_no_submission(
+                run_dir,
+                confirmation="not-the-exact-user-confirmation",
+                reason="user confirmed the exact run was not submitted",
+            )
+        assert caught.value.code == "NO_SUBMISSION_CONFIRMATION_REQUIRED"
+    assert runner.STATE.unresolved_project_sessions(run_dir.parent, tmp_path) != []
+
+
+def test_post_submit_browser_disconnect_keeps_lock_and_refuses_settlement(
+    tmp_path: Path,
+) -> None:
+    """A browser disconnect after a visible send is exact-session evidence.
+
+    The exact conversation URL was recorded, so the run is SUBMITTED_BOUND and
+    never eligible for no-submission adjudication; only exact-slug recovery of
+    that conversation may resolve it.
+    """
+    runner = load_runner()
+    result = execute_run(
+        runner,
+        pro_devspace_manifest(tmp_path),
+        run_factory=version_runner,
+        popen_factory=post_submit_disconnect_popen,
+    )
+    run_dir = Path(result["run_dir"])
+    state_path = run_dir / "state.json"
+
+    authority = runner.STATE.classify_submission_authority(run_dir)
+    assert authority["class"] == "SUBMITTED_BOUND"
+    assert authority["owns_project"] is True
+    assert authority["settlement_eligibility"] is None
+    assert authority["requires_user_confirmation"] is False
+    assert authority["session_authority"] == "submitted_unknown"
+
+    state = runner.STATE.load_state(state_path)
+    assert state["session_authority"] == "submitted_unknown"
+    assert state["task_outcome"] == "pending"
+    assert "pre_submit_failure" not in state
+    assert "user_confirmed_no_submission" not in state
+
+    owners = runner.STATE.unresolved_project_sessions(run_dir.parent, tmp_path)
+    assert len(owners) == 1
+    assert owners[0]["authority_class"] == "SUBMITTED_BOUND"
+
+    with pytest.raises(runner.STATE.OracleStateError) as caught:
+        runner.settle_user_confirmed_no_submission(
+            run_dir,
+            confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION,
+            reason="user confirmed the exact run was not submitted",
+        )
+    assert caught.value.code == "NO_SUBMISSION_EVIDENCE_INCOMPLETE"
+    assert runner.STATE.unresolved_project_sessions(run_dir.parent, tmp_path) != []
+
+
 def test_recovery_repairs_legacy_profile_copy_ebusy_without_oracle_call(tmp_path: Path) -> None:
     runner = load_runner()
     seed = tmp_path.parent / f"{tmp_path.name}-profile"

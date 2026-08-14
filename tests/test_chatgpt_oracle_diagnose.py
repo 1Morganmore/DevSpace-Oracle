@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -598,3 +599,230 @@ def test_watch_timeout_emits_one_snapshot_and_timeout(tmp_path: Path) -> None:
 
     assert code == 3
     assert [event["event"] for event in events] == ["snapshot", "timeout"]
+
+
+def write_session_absent_run(
+    state_root: Path,
+    run_id: str,
+    *,
+    project_root: Path,
+    user_confirmed: bool = False,
+) -> Path:
+    """Persist an exact bound Oracle session-absent refusal run.
+
+    Mirrors the artifacts the runner records for a run that exited on Oracle's
+    paired pre-send refusal (login button detected, no cookies applied): no
+    output, no conversation URL, no submission markers, hash-bound mission and
+    manifest, on a proof-version Oracle runtime.  With ``user_confirmed`` it
+    also persists the exact settlement artifact and state that
+    ``settle-no-submission --confirmation user-confirmed-no-submission`` writes
+    for the ``oracle-chatgpt-session-absent/v1`` eligibility.
+    """
+    project_root = project_root.resolve()
+    run_dir = state_root / "projects" / "projectkey" / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    locator = "c-" + "a" * 24
+    refusal = (
+        "ERROR: ChatGPT session not detected. Login button detected on page. "
+        "No ChatGPT cookies were applied; sign in to chatgpt.com in Chrome or pass "
+        "inline cookies (--browser-inline-cookies[(-file)] / ORACLE_BROWSER_COOKIES_JSON).\n"
+        "User error (browser-automation): ChatGPT session not detected. Login button "
+        "detected on page. No ChatGPT cookies were applied; sign in to chatgpt.com "
+        "in Chrome or pass inline cookies (--browser-inline-cookies[(-file)] / "
+        "ORACLE_BROWSER_COOKIES_JSON).\n"
+    )
+    stdout_path = run_dir / "stdout.log"
+    stderr_path = run_dir / "stderr.log"
+    transcript_path = run_dir / "transcript.md"
+    mission_path = run_dir / "mission.md"
+    stdout_path.write_text(f"Session: {locator}\n" + refusal, encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
+    transcript_path.write_text("", encoding="utf-8")
+    project_root.mkdir(parents=True, exist_ok=True)
+    source_mission = project_root / "oracle-job.txt"
+    mission_bytes = f"mission sha256 bound qualified-Pro send\nrun_id={run_id}\n".encode("utf-8")
+    source_mission.write_bytes(mission_bytes)
+    mission_path.write_bytes(mission_bytes)
+    manifest = project_root / "oracle-manifest.json"
+    manifest_bytes = json.dumps({
+        "schema": "codex.chatgpt.oracle-manifest/v1",
+        "run_id": run_id,
+        "transport": "pro-devspace",
+    }, sort_keys=True).encode("utf-8")
+    manifest.write_bytes(manifest_bytes)
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    state = {
+        "schema": "codex.chatgpt.oracle-run-state/v1",
+        "status": "attention_required",
+        "run_id": run_id,
+        "project_root": str(project_root),
+        "session_authority": "submitted_unknown",
+        "terminal_harvested": False,
+        "exit_code": 1,
+        "mode": "browser",
+        "transport": "pro-devspace",
+        "app_name": "DevSpace",
+        "task_outcome": "pending",
+        "oracle": {
+            "resolved_version": "0.17.3",
+            "session_locator": locator,
+        },
+        "artifacts": {
+            "output": str(run_dir / "output.md"),
+            "stdout": str(stdout_path),
+            "stderr": str(stderr_path),
+            "transcript": str(transcript_path),
+        },
+        "mission": {
+            "path": str(source_mission),
+            "transport_path": str(mission_path),
+            "sha256": hashlib.sha256(mission_bytes).hexdigest(),
+        },
+        "manifest": {
+            "path": str(manifest),
+            "actual_sha256": manifest_sha256,
+            "expected_sha256": manifest_sha256,
+        },
+    }
+    if user_confirmed:
+        evidence = {
+            "settlement_eligibility": "oracle-chatgpt-session-absent/v1",
+            "project_root": str(project_root),
+            "run_id": run_id,
+            "mission_sha256": hashlib.sha256(mission_bytes).hexdigest(),
+            "oracle_locator": locator,
+            "stdout_sha256": hashlib.sha256(stdout_path.read_bytes()).hexdigest(),
+            "stderr_sha256": hashlib.sha256(stderr_path.read_bytes()).hexdigest(),
+            "recovery_evidence": [],
+            "output_absent": True,
+            "conversation_url_absent": True,
+            "process_exited": True,
+            "source_mission_path": str(source_mission),
+            "source_mission_sha256": hashlib.sha256(mission_bytes).hexdigest(),
+            "transport_mission_path": str(mission_path),
+            "transport_mission_sha256": hashlib.sha256(mission_bytes).hexdigest(),
+            "manifest_path": str(manifest),
+            "manifest_sha256": manifest_sha256,
+            "transcript_sha256": hashlib.sha256(transcript_path.read_bytes()).hexdigest(),
+        }
+        recorded = {
+            "schema": "codex.chatgpt.oracle-user-confirmed-no-submission/v1",
+            "code": "ORACLE_USER_CONFIRMED_NO_SUBMISSION",
+            "confirmation": "user-confirmed-no-submission",
+            "reason": "user-confirmed-no-submission-after-session-absent",
+            **evidence,
+        }
+        settlement_path = run_dir / "user-confirmed-no-submission.json"
+        settlement_path.write_text(
+            json.dumps(recorded, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        state.update({
+            "session_authority": "pre_submit",
+            "transport_status": "not_submitted_user_confirmed",
+            "task_outcome": "not_executed",
+            "task_outcome_reason": "user-confirmed-no-submission-after-session-absent",
+            "user_confirmed_no_submission": {
+                "schema": "codex.chatgpt.oracle-settlement-reference/v1",
+                "path": str(settlement_path),
+                "sha256": hashlib.sha256(settlement_path.read_bytes()).hexdigest(),
+            },
+        })
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    return run_dir
+
+
+def test_session_absent_unsettled_run_waits_for_user_confirmation(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    project = tmp_path / "project"
+    run_dir = write_session_absent_run(state_root, "g" * 8, project_root=project)
+
+    record = module.triage(state_root=state_root, run_dir=run_dir)["runs"][0]
+
+    assert record["authority_class"] == "SUBMITTED_UNKNOWN"
+    assert record["settlement_eligibility"] == "oracle-chatgpt-session-absent/v1"
+    assert record["requires_user_confirmation"] is True
+    assert record["bucket"] == "pre-submit-host-environment"
+    assert record["signature"] == "session-absent-awaiting-user-confirmation"
+    action = record["next_action"]
+    assert action["kind"] == "settle_no_submission"
+    assert action["safe_for_fresh_run"] is False
+    argv = " ".join(action["argv"] or [])
+    assert "settle-no-submission" in argv
+    assert "--confirmation" in argv
+    assert "user-confirmed-no-submission" in argv
+    assert "--run-dir" in argv
+
+    aggregate = module.diagnose(state_root)
+    assert aggregate["unresolved_runs"][0]["signature"] == "session-absent-awaiting-user-confirmation"
+    assert "active-or-uncertain" not in aggregate["bucket_counts"]
+
+
+def test_session_absent_user_confirmed_run_is_proven_pre_submit_and_released(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    project = tmp_path / "project"
+    run_dir = write_session_absent_run(
+        state_root, "h" * 8, project_root=project, user_confirmed=True
+    )
+
+    record = module.triage(state_root=state_root, run_dir=run_dir)["runs"][0]
+
+    assert record["authority_class"] == "PRE_SUBMIT_PROVEN"
+    assert "lifecycle-running" not in record["signature"]
+    assert record["next_action"]["unresolved_owners"] == []
+
+
+def test_conversation_url_run_is_bound_and_never_offers_settlement(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    run_dir = write_run(
+        state_root,
+        "i" * 8,
+        status="attention_required",
+        session_authority="submitted_unknown",
+    )
+    state_path = run_dir / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["conversation_url"] = "https://chatgpt.com/c/abc123"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    record = module.triage(state_root=state_root, run_dir=run_dir)["runs"][0]
+
+    assert record["authority_class"] == "SUBMITTED_BOUND"
+    assert record["settlement_eligibility"] is None
+    action = record["next_action"]
+    assert action["kind"] != "settle_no_submission"
+    assert "settle-no-submission" not in " ".join(action["argv"] or [])
+
+
+def test_summary_only_is_aggregate_only_and_rejects_triage_with_usage(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    write_run(state_root, "s" * 8, status="failed")
+
+    assert module.main(["--state-root", str(state_root), "--summary-only"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["schema"] == "codex.chatgpt.oracle-diagnosis/v1"
+    assert "unresolved_runs" not in report
+
+    run_dir = state_root / "projects" / "projectkey" / "runs" / ("s" * 8)
+    assert module.main([
+        "--state-root",
+        str(state_root),
+        "--summary-only",
+        "triage",
+        "--run-dir",
+        str(run_dir),
+    ]) == 1
+    error = json.loads(capsys.readouterr().out)
+    assert error["ok"] is False
+    assert error["error"]["code"] == "ORACLE_DIAGNOSE_FAILED"
+    message = error["error"]["message"]
+    assert "--summary-only" in message
+    assert "triage" in message
+    assert "aggregate" in message

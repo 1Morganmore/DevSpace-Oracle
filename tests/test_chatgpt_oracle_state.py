@@ -1366,3 +1366,378 @@ def test_pro_devspace_proof_additions_leave_version_sets_unchanged() -> None:
     assert state.ORACLE_MODEL_SWITCHER_PROOF_VERSIONS == {"0.17.2", "0.17.3"}
     assert state.ORACLE_COPY_PROFILE_MANUAL_LOGIN_CONFLICT_PROOF_VERSIONS == {"0.17.2", "0.17.3"}
     assert state.ORACLE_PROFILE_COPY_RSYNC_MISSING_PROOF_VERSIONS == {"0.17.2", "0.17.3"}
+
+
+def test_submission_authority_class_vocabulary_is_fixed() -> None:
+    state = load_state()
+
+    assert state.SUBMISSION_AUTHORITY_CLASSES == (
+        "PRE_SUBMIT_PROVEN",
+        "SUBMITTED_BOUND",
+        "SUBMITTED_UNKNOWN",
+        "TERMINAL",
+        "INVALID_EVIDENCE",
+    )
+    assert state.SUBMISSION_AUTHORITY_SCHEMA == "codex.chatgpt.oracle-submission-authority/v1"
+
+
+def session_absent_state(tmp_path: Path, run_name: str = "run", **mutations) -> Path:
+    state = load_state()
+    run_dir = tmp_path / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("output.md", "stdout.log", "stderr.log", "transcript.md"):
+        (run_dir / name).write_text("", encoding="utf-8")
+    mission_path = tmp_path / f"{run_name}-mission-source.md"
+    mission_path.write_text("work", encoding="utf-8")
+    mission_bytes = mission_path.read_bytes()
+    transport_path = run_dir / "mission.md"
+    transport_path.write_bytes(mission_bytes)
+    manifest_path = tmp_path / f"{run_name}-oracle-manifest.json"
+    manifest_path.write_text('{"schema": "codex.chatgpt.oracle-run/v1"}', encoding="utf-8")
+    manifest_bytes = manifest_path.read_bytes()
+    locator = "oracle-test-run-a3aeba967d"
+    (run_dir / "stdout.log").write_text(
+        f"Session: {locator}\n"
+        "ERROR: ChatGPT session not detected. Login button detected on page. "
+        "No ChatGPT cookies were applied; sign in to chatgpt.com in Chrome or pass inline cookies\n"
+        "User error (browser-automation): ChatGPT session not detected. Login button detected on page. "
+        "No ChatGPT cookies were applied; sign in to chatgpt.com in Chrome or pass inline cookies\n",
+        encoding="utf-8",
+    )
+    payload = {
+        "schema": state.STATE_SCHEMA,
+        "run_id": "20260814T120000Z-a3aeba967d99",
+        "project_root": str(tmp_path.resolve()),
+        "mode": "browser",
+        "transport": "pro-devspace",
+        "app_name": "DevSpace",
+        "session_authority": "submitted_unknown",
+        "terminal_harvested": False,
+        "status": "attention_required",
+        "exit_code": 1,
+        "host_watchdog": {
+            "status": "process-exited",
+            "timeout_seconds": 5400,
+            "oracle_process_pid": 4242,
+        },
+        "task_outcome": "pending",
+        "profile": {
+            "model": "gpt-5.6-sol",
+            "model_strategy": "select",
+            "thinking_time": "heavy",
+        },
+        "oracle": {
+            "resolved_version": "oracle 0.17.3",
+            "session_locator": locator,
+        },
+        "mission": {
+            "path": str(mission_path),
+            "transport_path": str(transport_path),
+            "sha256": hashlib.sha256(mission_bytes).hexdigest(),
+        },
+        "manifest": {
+            "path": str(manifest_path),
+            "actual_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+            "expected_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        },
+        "artifacts": {
+            "output": str(run_dir / "output.md"),
+            "stdout": str(run_dir / "stdout.log"),
+            "stderr": str(run_dir / "stderr.log"),
+            "transcript": str(run_dir / "transcript.md"),
+        },
+    }
+    payload.update(mutations)
+    state_path = run_dir / "state.json"
+    state.write_json_atomic(state_path, payload)
+    return state_path
+
+
+def test_session_absent_login_refusal_is_confirmable_but_keeps_ownership(tmp_path: Path) -> None:
+    state = load_state()
+    state_path = session_absent_state(tmp_path)
+    locator = "oracle-test-run-a3aeba967d"
+
+    evidence = state._user_confirmable_no_submission_evidence(state_path)
+
+    assert evidence is not None
+    assert evidence["settlement_eligibility"] == "oracle-chatgpt-session-absent/v1"
+    assert evidence["_task_outcome_reason"] == "user-confirmed-no-submission-after-session-absent"
+    assert evidence["process_exited"] is True
+
+    verdict = state.classify_submission_authority(state_path.parent)
+
+    assert verdict["schema"] == state.SUBMISSION_AUTHORITY_SCHEMA
+    assert verdict["class"] == "SUBMITTED_UNKNOWN"
+    assert verdict["reason"] == "user-confirmable-no-submission"
+    assert verdict["run_id"] == "20260814T120000Z-a3aeba967d99"
+    assert verdict["project_root"] == str(tmp_path.resolve())
+    assert verdict["session_authority"] == "submitted_unknown"
+    assert verdict["owns_project"] is True
+    assert verdict["settlement_eligibility"] == "oracle-chatgpt-session-absent/v1"
+    assert verdict["requires_user_confirmation"] is True
+    assert verdict["evidence"]["output_present"] is False
+    assert verdict["evidence"]["conversation_url_present"] is False
+    assert verdict["evidence"]["process_exited"] is True
+    assert verdict["evidence"]["proven_pre_submit"] is None
+    assert verdict["evidence"]["user_confirmed"] is False
+
+
+def test_session_absent_user_confirmation_releases_ownership(tmp_path: Path) -> None:
+    state = load_state()
+    state_path = session_absent_state(tmp_path)
+
+    settled = state.settle_user_confirmed_no_submission(
+        state_path,
+        confirmation="user-confirmed-no-submission",
+        reason="login page refusal before send",
+    )
+
+    assert settled["task_outcome"] == "not_executed"
+    assert settled["task_outcome_reason"] == "user-confirmed-no-submission-after-session-absent"
+    assert settled["session_authority"] == "pre_submit"
+    assert settled["transport_status"] == "not_submitted_user_confirmed"
+    assert state.proven_user_confirmed_no_submission(state_path) is not None
+
+    verdict = state.classify_submission_authority(state_path.parent)
+
+    assert verdict["class"] == "PRE_SUBMIT_PROVEN"
+    assert verdict["reason"] == "user-confirmed-no-submission"
+    assert verdict["owns_project"] is False
+    assert verdict["settlement_eligibility"] is None
+    assert verdict["requires_user_confirmation"] is False
+    assert verdict["evidence"]["user_confirmed"] is True
+
+
+def test_conversation_url_binds_run_against_settlement(tmp_path: Path) -> None:
+    state = load_state()
+    locator = "oracle-test-run-a3aeba967d"
+    state_path = session_absent_state(
+        tmp_path,
+        oracle={
+            "resolved_version": "oracle 0.17.3",
+            "session_locator": locator,
+            "conversation_url": "https://chatgpt.com/c/AbC123xyz_89",
+        },
+    )
+
+    verdict = state.classify_submission_authority(state_path.parent)
+
+    assert verdict["class"] == "SUBMITTED_BOUND"
+    assert verdict["reason"] == "conversation-url-bound"
+    assert verdict["owns_project"] is True
+    assert verdict["settlement_eligibility"] is None
+    assert verdict["requires_user_confirmation"] is False
+    assert verdict["evidence"]["conversation_url_present"] is True
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"terminal_harvested": True},
+        {"session_authority": "terminal"},
+    ],
+)
+def test_terminal_evidence_releases_ownership(tmp_path: Path, mutation: dict) -> None:
+    state = load_state()
+    state_path = session_absent_state(tmp_path, **mutation)
+
+    verdict = state.classify_submission_authority(state_path.parent)
+
+    assert verdict["class"] == "TERMINAL"
+    assert verdict["owns_project"] is False
+    assert verdict["settlement_eligibility"] is None
+
+
+def test_bare_local_ledger_complete_keeps_ownership(tmp_path: Path) -> None:
+    """A local `status: complete` is the weakest authority there is.
+
+    `resolve_lifecycle` refuses to let it assert completion, so the classifier
+    must not release the project lock on it either: without an exact harvest the
+    web session may still be live.
+    """
+    state = load_state()
+    state_path = session_absent_state(tmp_path, status="complete")
+
+    verdict = state.classify_submission_authority(state_path.parent)
+
+    assert verdict["class"] != "TERMINAL"
+    assert verdict["owns_project"] is True
+
+
+def test_missing_state_is_invalid_evidence_and_keeps_ownership(tmp_path: Path) -> None:
+    state = load_state()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    verdict = state.classify_submission_authority(run_dir)
+
+    assert verdict["class"] == "INVALID_EVIDENCE"
+    assert verdict["reason"] == "state-missing"
+    assert verdict["owns_project"] is True
+    assert verdict["requires_user_confirmation"] is False
+
+
+def test_schema_mismatched_state_is_invalid_evidence(tmp_path: Path) -> None:
+    state = load_state()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "state.json").write_text(
+        '{"schema": "codex.chatgpt.oracle-run-state/v9"}', encoding="utf-8"
+    )
+
+    verdict = state.classify_submission_authority(run_dir)
+
+    assert verdict["class"] == "INVALID_EVIDENCE"
+    assert verdict["reason"] == "state-schema-mismatch"
+    assert verdict["owns_project"] is True
+
+
+def test_malformed_state_json_is_invalid_evidence(tmp_path: Path) -> None:
+    state = load_state()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "state.json").write_text("{", encoding="utf-8")
+
+    verdict = state.classify_submission_authority(run_dir)
+
+    assert verdict["class"] == "INVALID_EVIDENCE"
+    assert verdict["reason"] == "state-unreadable"
+    assert verdict["owns_project"] is True
+
+
+def test_symlinked_state_is_invalid_evidence(tmp_path: Path) -> None:
+    state = load_state()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "target-state.json"
+    target.write_text('{"schema": "codex.chatgpt.oracle-run-state/v1"}', encoding="utf-8")
+    try:
+        (run_dir / "state.json").symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    verdict = state.classify_submission_authority(run_dir)
+
+    assert verdict["class"] == "INVALID_EVIDENCE"
+    assert verdict["reason"] == "state-symlink"
+    assert verdict["owns_project"] is True
+
+
+def test_unresolved_project_sessions_matches_submission_classification(tmp_path: Path) -> None:
+    state = load_state()
+    locator = "oracle-test-run-a3aeba967d"
+    session_absent_state(tmp_path, "run-a")
+    state_path_b = session_absent_state(
+        tmp_path,
+        "run-b",
+        run_id="20260814T120000Z-bbbbbbbbbbbb",
+    )
+    state.settle_user_confirmed_no_submission(
+        state_path_b,
+        confirmation="user-confirmed-no-submission",
+        reason="login page refusal before send",
+    )
+    session_absent_state(
+        tmp_path,
+        "run-c",
+        run_id="20260814T120000Z-cccccccccccc",
+        oracle={
+            "resolved_version": "oracle 0.17.3",
+            "session_locator": locator,
+            "conversation_url": "https://chatgpt.com/c/AbC123xyz_89",
+        },
+    )
+    session_absent_state(
+        tmp_path,
+        "run-d",
+        run_id="20260814T120000Z-dddddddddddd",
+        terminal_harvested=True,
+    )
+    run_dir_e = tmp_path / "run-e"
+    run_dir_e.mkdir(parents=True, exist_ok=True)
+    (run_dir_e / "state.json").write_text(
+        '{"schema": "codex.chatgpt.oracle-run-state/v9"}', encoding="utf-8"
+    )
+
+    owners = state.unresolved_project_sessions(tmp_path, tmp_path.resolve())
+
+    by_run = {owner["run_id"]: owner for owner in owners}
+    assert set(by_run) == {"20260814T120000Z-a3aeba967d99", "20260814T120000Z-cccccccccccc"}
+    assert by_run["20260814T120000Z-a3aeba967d99"]["authority_class"] == "SUBMITTED_UNKNOWN"
+    assert by_run["20260814T120000Z-a3aeba967d99"]["session_locator"] == locator
+    assert by_run["20260814T120000Z-a3aeba967d99"]["session_authority"] == "submitted_unknown"
+    assert by_run["20260814T120000Z-cccccccccccc"]["authority_class"] == "SUBMITTED_BOUND"
+    assert all(owner["state_path"] for owner in owners)
+
+
+def test_session_absent_refusal_is_no_longer_auto_settled(tmp_path: Path) -> None:
+    state = load_state()
+    state_path = session_absent_state(tmp_path)
+
+    assert not hasattr(state, "proven_pre_submit_chatgpt_session_absent")
+    assert state.settle_proven_pre_submit_failure(state_path) is None
+    payload = state.load_state(state_path)
+    assert payload["session_authority"] == "submitted_unknown"
+    assert payload["status"] == "attention_required"
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "single-prefix",
+        "answer-line",
+        "prompt-marker",
+        "stale-version",
+        "watchdog-armed",
+        "no-exit",
+    ],
+)
+def test_session_absent_refusal_stays_fail_closed(tmp_path: Path, variant: str) -> None:
+    state = load_state()
+    locator = "oracle-test-run-a3aeba967d"
+    refusal = (
+        "ERROR: ChatGPT session not detected. Login button detected on page. "
+        "No ChatGPT cookies were applied; sign in to chatgpt.com in Chrome or pass inline cookies"
+    )
+    user_error = (
+        "User error (browser-automation): ChatGPT session not detected. Login button detected on page. "
+        "No ChatGPT cookies were applied; sign in to chatgpt.com in Chrome or pass inline cookies"
+    )
+    if variant == "single-prefix":
+        state_path = session_absent_state(tmp_path)
+        (state_path.parent / "stdout.log").write_text(
+            f"Session: {locator}\n{refusal}\n", encoding="utf-8"
+        )
+    elif variant == "answer-line":
+        state_path = session_absent_state(tmp_path)
+        (state_path.parent / "stdout.log").write_text(
+            f"Session: {locator}\n{refusal}\n{user_error}\nAnswer: hello\n", encoding="utf-8"
+        )
+    elif variant == "prompt-marker":
+        state_path = session_absent_state(tmp_path)
+        (state_path.parent / "stdout.log").write_text(
+            f"Session: {locator}\n{refusal}\n{user_error}\n{state.ORACLE_PROMPT_NOT_OBSERVED_MARKER}\n",
+            encoding="utf-8",
+        )
+    elif variant == "stale-version":
+        state_path = session_absent_state(
+            tmp_path,
+            oracle={"resolved_version": "oracle 0.17.1", "session_locator": locator},
+        )
+    elif variant == "watchdog-armed":
+        state_path = session_absent_state(
+            tmp_path,
+            host_watchdog={"status": "armed", "timeout_seconds": 5400, "oracle_process_pid": 4242},
+        )
+    else:
+        state_path = session_absent_state(tmp_path, exit_code=None)
+
+    assert state._user_confirmable_no_submission_evidence(state_path) is None
+
+    verdict = state.classify_submission_authority(state_path.parent)
+
+    assert verdict["class"] == "SUBMITTED_UNKNOWN"
+    assert verdict["owns_project"] is True
+    assert verdict["settlement_eligibility"] is None
+    assert verdict["requires_user_confirmation"] is False

@@ -81,6 +81,7 @@ def build_packet(run_dir: Path, *, reporter_role: str = REPORTER_ROLE) -> dict[s
     state = STATE.load_state(state_path)
     artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
     output_path = Path(str(artifacts.get("output") or (directory / "output.md")))
+    submission_authority = STATE.classify_submission_authority(directory)
     verdict = DIAGNOSE.classify_run(
         state,
         stdout_text=DIAGNOSE._read_text(directory / "stdout.log"),
@@ -90,6 +91,7 @@ def build_packet(run_dir: Path, *, reporter_role: str = REPORTER_ROLE) -> dict[s
             STATE.proven_user_confirmed_no_submission(state_path) is not None
         ),
         pre_submit_host_failure=STATE.proven_pre_submit_host_failure(state_path),
+        submission_authority=submission_authority,
     )
     lifecycle = STATE.resolve_lifecycle(
         state, output_is_present=DIAGNOSE._output_is_nonempty(output_path)
@@ -109,6 +111,9 @@ def build_packet(run_dir: Path, *, reporter_role: str = REPORTER_ROLE) -> dict[s
         "signature": str(verdict["signature"]),
         "lifecycle": str(lifecycle["lifecycle"]),
         "authority_source": str(lifecycle["authority_source"]),
+        "authority_class": str(submission_authority.get("class") or ""),
+        "settlement_eligibility": submission_authority.get("settlement_eligibility"),
+        "requires_user_confirmation": bool(submission_authority.get("requires_user_confirmation")),
         "conversation_url": str((state.get("oracle") or {}).get("conversation_url") or "")
         if isinstance(state.get("oracle"), dict)
         else "",

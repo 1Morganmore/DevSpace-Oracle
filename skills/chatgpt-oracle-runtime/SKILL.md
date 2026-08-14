@@ -129,7 +129,14 @@ recovery do not use this DevSpace readiness path.
 Use `chatgpt_oracle_diagnose.py triage --run-dir <exact-run>` for a bounded next
 action and `watch --run-dir <exact-run>` for read-only NDJSON lifecycle changes.
 Only execute the returned exact recovery argv when triage identifies that action;
-an active session is watched, never recovered or replaced.
+an active session is watched, never recovered or replaced. The aggregate bucket
+overview is `chatgpt_oracle_diagnose.py --summary-only` (no subcommand); that
+flag is rejected with `triage`/`watch`, which are single-run forms. An unsettled
+Oracle `session not detected` refusal that exited before send is reported by
+triage as `session-absent-awaiting-user-confirmation` with a
+`settle_no_submission` argv: run that exact settle command
+(`chatgpt_oracle_run.py settle-no-submission --run-dir <exact-run> --confirmation user-confirmed-no-submission --reason <reason>`)
+only after the operator explicitly confirms the run was never submitted.
 
 ## Recovery
 

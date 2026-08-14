@@ -62,6 +62,7 @@ ORACLE_THINKING_TIME_STRICT_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
 ORACLE_MODEL_SWITCHER_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
 ORACLE_COPY_PROFILE_MANUAL_LOGIN_CONFLICT_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
 ORACLE_PROFILE_COPY_RSYNC_MISSING_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
+ORACLE_CHATGPT_SESSION_ABSENT_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
 ORACLE_PACKAGE = "@steipete/oracle"
 STATE_SCHEMA = "codex.chatgpt.oracle-run-state/v1"
 STATUSES = {"prepared", "running", "complete", "failed", "attention_required", "abandoned"}
@@ -170,11 +171,56 @@ ORACLE_MANUAL_LOGIN_PROFILE_UNINITIALIZED_RE = re.compile(
     r"Browser mode is using Oracle's private Chrome profile at (?P<profile>[^,\r\n]+), "
     r"separate from your normal Chrome profile\. Run first-time setup, sign in there, then retry:"
 )
+# Oracle 0.17.3 stopped copying cookies from a live Chrome profile by default,
+# so a stale signed-in seed profile now refuses before the composer is opened.
+# Both the plain and the `User error (browser-automation)` line must be present:
+# that pair is Oracle's own terminal pre-send refusal for a missing session.
+ORACLE_CHATGPT_SESSION_ABSENT_RE = re.compile(
+    r"(?m)^(?P<prefix>ERROR|User error \(browser-automation\)):\s+"
+    r"ChatGPT session not detected\. Login button detected on page\. "
+    r"No ChatGPT cookies were applied; sign in to chatgpt\.com in Chrome or pass "
+    r"inline cookies"
+)
 ORACLE_NO_LIVE_TAB_MARKER = "No live ChatGPT tab matched session"
 ORACLE_NO_RECOVERABLE_URL_MARKER = (
     "session metadata has no recoverable ChatGPT conversation URL"
 )
 USER_CONFIRMED_NO_SUBMISSION = "user-confirmed-no-submission"
+SUBMISSION_AUTHORITY_SCHEMA = "codex.chatgpt.oracle-submission-authority/v1"
+# One bounded submission-authority vocabulary.  Every consumer (lock checks,
+# settlement, diagnosis) classifies through `classify_submission_authority`
+# instead of re-deriving its own string rules; that duplication is what left a
+# proven pre-submit run locked forever while diagnosis called it running.
+SUBMISSION_AUTHORITY_CLASSES = (
+    "PRE_SUBMIT_PROVEN",
+    "SUBMITTED_BOUND",
+    "SUBMITTED_UNKNOWN",
+    "TERMINAL",
+    "INVALID_EVIDENCE",
+)
+# The task_outcome_reason values written by `settle_user_confirmed_no_submission`
+# for each user-confirmable no-submission eligibility.  A pre_submit record that
+# carries one of these reasons but no longer revalidates is a tampered or lost
+# settlement and must fall back to fail-closed ownership.
+USER_CONFIRMED_NO_SUBMISSION_REASONS = (
+    "user-confirmed-no-submission-after-prompt-timeout",
+    "user-confirmed-no-submission-after-app-route-unconfirmed",
+    "user-confirmed-no-submission-after-session-absent",
+)
+# Only these persisted authorities describe a session that may still be live on
+# the web.  `pre_submit` never submitted, `terminal` is harvested, and a legacy
+# ledger row without an authority is not evidence of a live session.
+ACTIVE_SESSION_AUTHORITIES = frozenset(("submitted_unknown", "live", "terminal_observed"))
+# A persisted `pre_submit` authority is only believable when the independently
+# written transport status agrees that nothing was sent.  Requiring both fields
+# means a single edited field can never release a live submitted run.
+PRE_SUBMIT_TRANSPORT_STATUSES = frozenset((
+    "prepared",
+    "rejected_pre_submit",
+    "failed_pre_submit",
+    "not_submitted",
+    "not_submitted_user_confirmed",
+))
 ORACLE_RECOVERY_STATE_RE = re.compile(r"(?im)^\s*State:\s*[a-z][a-z0-9_-]*\s*$")
 ORACLE_PROFILE_COPY_EBUSY_RE = re.compile(
     r"(?im)^(?:ERROR:\s*|User error \(browser-automation\):\s*)?"
@@ -1576,39 +1622,19 @@ def _settlement_logs_have_conversation_url(state_path: Path) -> bool:
     return False
 
 
-def _direct_app_route_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
-    """Bind an exact direct pre-send app-route rejection to user adjudication.
+def _bind_pre_send_no_submission_artifacts(state: dict[str, Any], run_dir: Path) -> dict[str, Any] | None:
+    """Bind the shared pre-send no-submission artifact contract.
 
-    The APP_MENTION_ROUTE_UNCONFIRMED marker is bound only for the 0.17.2
-    runtime (exact-recovery-only) and the active runtime; older runtimes stay
-    fail-closed because their promptComposer patches were never bound here.
+    Every direct pre-send rejection proof (app-route unconfirmed, chatgpt
+    session absent) must bind the same durable evidence before it may be
+    presented for user adjudication: the output artifact is absent, all three
+    logs sit at their exact canonical paths, none is a symlink, all decode as
+    strict UTF-8, none carries a ChatGPT conversation URL, the transport
+    mission bytes equal the bound source bytes, and the mission and manifest
+    SHA-256 digests still match the persisted values.  Returns the bound values
+    (log texts under underscore keys so they can never be persisted into a
+    settlement artifact) or None on any mismatch.
     """
-    state = load_state(state_path)
-    profile = state.get("profile") if isinstance(state.get("profile"), dict) else {}
-    # Both DevSpace-family routes mention the same app, so both can be refused
-    # before send with the same marker.  The qualified Pro route is additionally
-    # bound to its exact Pro profile so no other shape can settle through it.
-    app_route_contract = (
-        str(state.get("app_name") or "").casefold() == DEVSPACE_APP_NAME.casefold()
-        and (
-            str(state.get("transport") or "").casefold() == "devspace"
-            or (
-                is_pro_devspace_transport(state.get("transport"))
-                and str(profile.get("model") or "").casefold() == "gpt-5.6-sol"
-                and str(profile.get("thinking_time") or "").casefold() == "heavy"
-            )
-        )
-    )
-    if (
-        str(state.get("session_authority") or "") not in {"submitted_unknown", "pre_submit"}
-        or state.get("parallel_parent_id") not in {None, ""}
-        or state.get("terminal_harvested") is True
-        or _state_has_conversation_url(state)
-        or str(state.get("mode") or "").casefold() != "browser"
-        or not app_route_contract
-    ):
-        return None
-    run_dir = state_path.parent
     artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
     output = Path(str(artifacts.get("output") or ""))
     if output.resolve() != (run_dir / "output.md").resolve() or output.is_symlink() or output_is_nonempty(output):
@@ -1636,17 +1662,7 @@ def _direct_app_route_no_submission_evidence(state_path: Path) -> dict[str, Any]
         return None
     oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
     locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
-    stdout_lines = {line.strip() for line in stdout_text.splitlines()}
-    if (
-        normalize_oracle_version(oracle.get("resolved_version"))
-        not in ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_PROOF_VERSIONS
-        or not locator
-        or f"Session: {locator}" not in stdout_text
-        or {
-            f"ERROR: {ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER}",
-            f"User error (browser-automation): {ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER}",
-        }.issubset(stdout_lines) is False
-    ):
+    if not locator or f"Session: {locator}" not in stdout_text:
         return None
     mission = state.get("mission") if isinstance(state.get("mission"), dict) else {}
     manifest = state.get("manifest") if isinstance(state.get("manifest"), dict) else {}
@@ -1686,9 +1702,7 @@ def _direct_app_route_no_submission_evidence(state_path: Path) -> dict[str, Any]
     ):
         return None
     return {
-        "settlement_eligibility": "oracle-direct-app-route-unconfirmed/v1",
         "project_root": str(project_root),
-        "run_id": str(state.get("run_id") or ""),
         "source_mission_path": str(source_path),
         "source_mission_sha256": mission_sha256,
         "transport_mission_path": str(transport_path),
@@ -1700,10 +1714,159 @@ def _direct_app_route_no_submission_evidence(state_path: Path) -> dict[str, Any]
         "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
         "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
         "transcript_sha256": hashlib.sha256(transcript_bytes).hexdigest(),
+        "output_absent": True,
+        "conversation_url_absent": True,
+        "_stdout_text": stdout_text,
+        "_stderr_text": stderr_text,
+        "_transcript_text": transcript_text,
+    }
+
+
+def _direct_app_route_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
+    """Bind an exact direct pre-send app-route rejection to user adjudication.
+
+    The APP_MENTION_ROUTE_UNCONFIRMED marker is bound only for the 0.17.2
+    runtime (exact-recovery-only) and the active runtime; older runtimes stay
+    fail-closed because their promptComposer patches were never bound here.
+    """
+    state = load_state(state_path)
+    profile = state.get("profile") if isinstance(state.get("profile"), dict) else {}
+    # Both DevSpace-family routes mention the same app, so both can be refused
+    # before send with the same marker.  The qualified Pro route is additionally
+    # bound to its exact Pro profile so no other shape can settle through it.
+    app_route_contract = (
+        str(state.get("app_name") or "").casefold() == DEVSPACE_APP_NAME.casefold()
+        and (
+            str(state.get("transport") or "").casefold() == "devspace"
+            or (
+                is_pro_devspace_transport(state.get("transport"))
+                and str(profile.get("model") or "").casefold() == "gpt-5.6-sol"
+                and str(profile.get("thinking_time") or "").casefold() == "heavy"
+            )
+        )
+    )
+    if (
+        str(state.get("session_authority") or "") not in {"submitted_unknown", "pre_submit"}
+        or state.get("parallel_parent_id") not in {None, ""}
+        or state.get("terminal_harvested") is True
+        or _state_has_conversation_url(state)
+        or str(state.get("mode") or "").casefold() != "browser"
+        or not app_route_contract
+    ):
+        return None
+    bound = _bind_pre_send_no_submission_artifacts(state, state_path.parent)
+    if bound is None:
+        return None
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    stdout_lines = {line.strip() for line in bound["_stdout_text"].splitlines()}
+    if (
+        normalize_oracle_version(oracle.get("resolved_version"))
+        not in ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_PROOF_VERSIONS
+        or {
+            f"ERROR: {ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER}",
+            f"User error (browser-automation): {ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER}",
+        }.issubset(stdout_lines) is False
+    ):
+        return None
+    return {
+        "settlement_eligibility": "oracle-direct-app-route-unconfirmed/v1",
+        "project_root": bound["project_root"],
+        "run_id": str(state.get("run_id") or ""),
+        "source_mission_path": bound["source_mission_path"],
+        "source_mission_sha256": bound["source_mission_sha256"],
+        "transport_mission_path": bound["transport_mission_path"],
+        "transport_mission_sha256": bound["transport_mission_sha256"],
+        "manifest_path": bound["manifest_path"],
+        "manifest_sha256": bound["manifest_sha256"],
+        "mission_sha256": bound["mission_sha256"],
+        "oracle_locator": bound["oracle_locator"],
+        "stdout_sha256": bound["stdout_sha256"],
+        "stderr_sha256": bound["stderr_sha256"],
+        "transcript_sha256": bound["transcript_sha256"],
         "recovery_evidence": [],
         "output_absent": True,
         "conversation_url_absent": True,
         "_task_outcome_reason": "user-confirmed-no-submission-after-app-route-unconfirmed",
+    }
+
+
+def _chatgpt_session_absent_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
+    """Bind Oracle's exact pre-send session-absent refusal to user adjudication.
+
+    Oracle 0.17.3 no longer copies cookies out of a live Chrome profile, so an
+    expired signed-in seed profile makes Oracle refuse on the login page before
+    anything is composed or sent.  The paired refusal lines are accepted only
+    for the runtimes that ship them, together with the full pre-send artifact
+    contract shared with the app-route rejection.  This evidence is exactly as
+    strong as the direct app-route rejection, but it only makes the run
+    eligible for an explicit user no-submission confirmation — it never
+    releases the project lock on its own.
+    """
+    state = load_state(state_path)
+    if (
+        str(state.get("session_authority") or "") not in {"submitted_unknown", "pre_submit"}
+        or state.get("parallel_parent_id") not in {None, ""}
+        or state.get("terminal_harvested") is True
+        or _state_has_conversation_url(state)
+        or str(state.get("mode") or "").casefold() != "browser"
+    ):
+        return None
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    if (
+        normalize_oracle_version(oracle.get("resolved_version"))
+        not in ORACLE_CHATGPT_SESSION_ABSENT_PROOF_VERSIONS
+    ):
+        return None
+    # A completed local exit is required, and the host watchdog must not still
+    # be preserving a live process: armed or wall-clock-expired processes may
+    # yet act on the exact session, so they can never be adjudicated as absent.
+    host_watchdog = state.get("host_watchdog") if isinstance(state.get("host_watchdog"), dict) else {}
+    if state.get("exit_code") is None or str(host_watchdog.get("status") or "") in {"armed", "expired"}:
+        return None
+    bound = _bind_pre_send_no_submission_artifacts(state, state_path.parent)
+    if bound is None:
+        return None
+    stdout_text = bound["_stdout_text"]
+    stderr_text = bound["_stderr_text"]
+    transcript_text = bound["_transcript_text"]
+    # No submission may have been observed: neither an `Answer:` line nor the
+    # prompt-timeout marker may appear anywhere in the run's logs.
+    if (
+        "Answer:" in stdout_text
+        or "Answer:" in stderr_text
+        or "Answer:" in transcript_text
+        or ORACLE_PROMPT_NOT_OBSERVED_MARKER in stdout_text
+        or ORACLE_PROMPT_NOT_OBSERVED_MARKER in stderr_text
+        or ORACLE_PROMPT_NOT_OBSERVED_MARKER in transcript_text
+    ):
+        return None
+    prefixes = {
+        match.group("prefix")
+        for text in (stdout_text, stderr_text)
+        for match in ORACLE_CHATGPT_SESSION_ABSENT_RE.finditer(text)
+    }
+    if prefixes != {"ERROR", "User error (browser-automation)"}:
+        return None
+    return {
+        "settlement_eligibility": "oracle-chatgpt-session-absent/v1",
+        "project_root": bound["project_root"],
+        "run_id": str(state.get("run_id") or ""),
+        "source_mission_path": bound["source_mission_path"],
+        "source_mission_sha256": bound["source_mission_sha256"],
+        "transport_mission_path": bound["transport_mission_path"],
+        "transport_mission_sha256": bound["transport_mission_sha256"],
+        "manifest_path": bound["manifest_path"],
+        "manifest_sha256": bound["manifest_sha256"],
+        "mission_sha256": bound["mission_sha256"],
+        "oracle_locator": bound["oracle_locator"],
+        "stdout_sha256": bound["stdout_sha256"],
+        "stderr_sha256": bound["stderr_sha256"],
+        "transcript_sha256": bound["transcript_sha256"],
+        "recovery_evidence": [],
+        "output_absent": True,
+        "conversation_url_absent": True,
+        "process_exited": True,
+        "_task_outcome_reason": "user-confirmed-no-submission-after-session-absent",
     }
 
 
@@ -1724,6 +1887,9 @@ def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any]
     direct = _direct_app_route_no_submission_evidence(state_path)
     if direct is not None:
         return direct
+    session_absent = _chatgpt_session_absent_no_submission_evidence(state_path)
+    if session_absent is not None:
+        return session_absent
     return _web_multi_child_no_submission_evidence(state_path)
 
 
@@ -1775,6 +1941,12 @@ def proven_user_confirmed_no_submission(state_path: Path) -> dict[str, Any] | No
             "settlement_eligibility", "source_mission_path", "source_mission_sha256",
             "transport_mission_path", "transport_mission_sha256", "manifest_path",
             "manifest_sha256", "transcript_sha256",
+        )
+    elif current.get("settlement_eligibility") == "oracle-chatgpt-session-absent/v1":
+        required = (
+            "settlement_eligibility", "source_mission_path", "source_mission_sha256",
+            "transport_mission_path", "transport_mission_sha256", "manifest_path",
+            "manifest_sha256", "transcript_sha256", "process_exited",
         )
     elif current.get("settlement_eligibility") == "oracle-web-multi-child/v1":
         required = (
@@ -1845,7 +2017,11 @@ def settle_user_confirmed_no_submission(
         "terminal_harvested": False,
         "artifact_sha256": None,
         "transport_status": "not_submitted_user_confirmed",
-        "task_outcome": "pending",
+        "task_outcome": (
+            "not_executed"
+            if evidence.get("settlement_eligibility") == "oracle-chatgpt-session-absent/v1"
+            else "pending"
+        ),
         "task_outcome_reason": evidence["_task_outcome_reason"],
         "user_confirmed_no_submission": {
             "schema": "codex.chatgpt.oracle-settlement-reference/v1",
@@ -2770,6 +2946,213 @@ def classify_task_outcome(path: Path, *, contract: str, transport: str) -> str:
     return "unknown" if contract == "v1" else "legacy_unclassified"
 
 
+def _run_logs_show_answer(state: dict[str, Any]) -> bool:
+    """Report whether the run's own logs recorded a delivered ChatGPT answer.
+
+    An observed answer means the prompt reached the web session, so no stored
+    authority string may downgrade that run to "never submitted".
+    """
+    for name in ("stdout", "stderr", "transcript"):
+        record = _artifact_bytes(state, name)
+        if record is None:
+            continue
+        try:
+            text = record[1].decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return True
+        if "Answer:" in text:
+            return True
+    return False
+
+
+def classify_submission_authority(run_dir: Path) -> dict[str, Any]:
+    """Classify one run's submission authority from durable evidence only.
+
+    Pure read-only classification: it never mutates state, artifacts, or
+    locks, and it never re-derives authority from per-consumer string rules.
+    Ownership is fail-closed: a run keeps owning the project until exact
+    terminal evidence, a revalidated automatic pre-submit proof, or a
+    revalidated explicit user confirmation proves otherwise.  The one
+    deliberate exception is persisted ``pre_submit`` authority itself: the
+    settle paths only ever write it after proof, so honoring it here without
+    duplicating that proof is what keeps settled runs from resurrecting
+    project locks.  A pre_submit record that still carries user-confirmation
+    markers but no longer revalidates them is a tampered or lost settlement
+    and falls through to fail-closed ownership instead.
+    """
+    run_dir = run_dir.expanduser().resolve()
+    state_path = run_dir / "state.json"
+    evidence: dict[str, Any] = {
+        "output_present": False,
+        "conversation_url_present": False,
+        "process_exited": False,
+        "proven_pre_submit": None,
+        "user_confirmed": False,
+    }
+
+    def invalid(reason: str) -> dict[str, Any]:
+        return {
+            "schema": SUBMISSION_AUTHORITY_SCHEMA,
+            "class": "INVALID_EVIDENCE",
+            "reason": reason,
+            "run_id": "",
+            "project_root": "",
+            "session_authority": "",
+            "owns_project": True,
+            "settlement_eligibility": None,
+            "requires_user_confirmation": False,
+            "evidence": evidence,
+        }
+
+    if state_path.is_symlink():
+        return invalid("state-symlink")
+    if not state_path.is_file():
+        return invalid("state-missing")
+    try:
+        state = load_state(state_path)
+    except OracleStateError as exc:
+        return invalid({
+            "STATE_SCHEMA_INVALID": "state-schema-mismatch",
+            "STATE_JSON_INVALID": "state-unreadable",
+            "UTF8_REQUIRED": "state-unreadable",
+        }.get(exc.code, "state-unreadable"))
+
+    def verdict(
+        class_name: str,
+        reason: str,
+        *,
+        owns: bool,
+        eligibility: str | None = None,
+        requires_confirmation: bool = False,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        return {
+            "schema": SUBMISSION_AUTHORITY_SCHEMA,
+            "class": class_name,
+            "reason": reason,
+            "run_id": str(state.get("run_id") or ""),
+            "project_root": str(state.get("project_root") or ""),
+            "session_authority": str(state.get("session_authority") or ""),
+            "owns_project": owns,
+            "settlement_eligibility": eligibility,
+            "requires_user_confirmation": requires_confirmation,
+            "evidence": {**evidence, **extra},
+        }
+
+    # Normalize exactly like the legacy lock check did: a non-canonical stored
+    # string must never be read as "not an active owner".
+    session_authority = str(state.get("session_authority") or "").strip().casefold()
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    output_path = Path(str(artifacts.get("output") or ""))
+    evidence["output_present"] = bool(str(output_path)) and output_is_nonempty(output_path)
+    evidence["process_exited"] = state.get("exit_code") is not None
+    # Any persisted or logged conversation URL binds the run to its exact web
+    # conversation: only exact-slug recovery may end it.
+    evidence["conversation_url_present"] = (
+        _state_has_conversation_url(state)
+        or _settlement_logs_have_conversation_url(state_path)
+    )
+    # 1. Exact terminal web evidence outranks everything.  Two deliberate
+    #    exclusions keep this as strict as `resolve_lifecycle`: `terminal_observed`
+    #    means an observer saw a finished session but nothing durable was
+    #    harvested, and a bare local-ledger `status == "complete"` is the weakest
+    #    authority there is.  Both keep owning the project until an exact harvest
+    #    or a proven settlement ends the run.
+    if state.get("terminal_harvested") is True or session_authority == "terminal":
+        return verdict("TERMINAL", "terminal-harvested", owns=False)
+    # 2. A run that claims a user no-submission settlement but fails
+    #    revalidation is tampered evidence and must fail closed before any
+    #    mechanical proof can release it.
+    settlement_markers = (
+        "user_confirmed_no_submission" in state
+        or str(state.get("transport_status") or "") == "not_submitted_user_confirmed"
+        or str(state.get("task_outcome_reason") or "") in USER_CONFIRMED_NO_SUBMISSION_REASONS
+        or (state_path.parent / "user-confirmed-no-submission.json").exists()
+    )
+    confirmed = proven_user_confirmed_no_submission(state_path)
+    if settlement_markers and confirmed is None:
+        return verdict("SUBMITTED_UNKNOWN", "tampered-user-confirmation", owns=True)
+    # 3. A persisted or logged conversation URL binds the run to its exact web
+    #    conversation: only exact-slug recovery may end it.
+    if evidence["conversation_url_present"]:
+        return verdict("SUBMITTED_BOUND", "conversation-url-bound", owns=True)
+    # 3b. Durable output means the run got past the composer, and every
+    #     pre-submit family requires an absent output, so no proof or eligibility
+    #     can apply.  Deciding this here keeps ownership checks — which run before
+    #     every submission — from hashing artifacts for finished runs.
+    if evidence["output_present"] and session_authority in ACTIVE_SESSION_AUTHORITIES:
+        return verdict(
+            "SUBMITTED_UNKNOWN",
+            "durable-output-without-terminal-settlement",
+            owns=True,
+        )
+    # 4. A revalidated explicit user confirmation proves non-submission.
+    if confirmed is not None:
+        return verdict(
+            "PRE_SUBMIT_PROVEN",
+            "user-confirmed-no-submission",
+            owns=False,
+            user_confirmed=True,
+        )
+    # 5. A persisted `pre_submit` record never submitted anything.  This is
+    #    decided before the proof chains because it needs no artifact hashing:
+    #    every settled or prepared pre-submit run reaches the same verdict either
+    #    way, and ownership checks run on every submission.
+    #    Two independently written fields must agree and the run's own logs may
+    #    not show a delivered answer, so a single edited field can never release
+    #    a live submitted run.
+    if session_authority == "pre_submit":
+        transport_status = str(state.get("transport_status") or "").strip().casefold()
+        if transport_status and transport_status not in PRE_SUBMIT_TRANSPORT_STATUSES:
+            return verdict(
+                "SUBMITTED_UNKNOWN",
+                "pre-submit-claim-contradicts-transport-status",
+                owns=True,
+            )
+        if _run_logs_show_answer(state):
+            return verdict("SUBMITTED_UNKNOWN", "answer-observed-despite-pre-submit", owns=True)
+        return verdict("PRE_SUBMIT_PROVEN", "session-authority-pre-submit", owns=False)
+    # 6. Automatic pre-submit proof.  The user-confirmed branch inside
+    #    `proven_pre_submit_failure` belongs to step 4 and cannot win here.
+    automatic = proven_pre_submit_failure(state_path)
+    if automatic is not None and automatic.get("code") != "ORACLE_USER_CONFIRMED_NO_SUBMISSION":
+        return verdict(
+            "PRE_SUBMIT_PROVEN",
+            "mechanical-pre-submit-proof",
+            owns=False,
+            proven_pre_submit=str(automatic.get("code") or ""),
+        )
+    # 7. Runs eligible for an explicit user no-submission adjudication keep
+    #    owning the project until the user confirms.  `requires_user_confirmation`
+    #    is the single field every consumer gates on: one eligible family (the
+    #    comprehensive stage evidence) carries no eligibility label, so a label
+    #    must never decide behaviour.
+    confirmable = _user_confirmable_no_submission_evidence(state_path)
+    if confirmable is not None:
+        return verdict(
+            "SUBMITTED_UNKNOWN",
+            "user-confirmable-no-submission",
+            owns=True,
+            eligibility=str(confirmable.get("settlement_eligibility") or "") or None,
+            requires_confirmation=True,
+        )
+    # 8. A legacy ledger row without any recorded authority is not a live owner:
+    #    locking on absence of evidence would strand every project forever.
+    if session_authority not in ACTIVE_SESSION_AUTHORITIES:
+        # Legacy running records fail closed because the provider may still be
+        # active.  Legacy attention-required records predate explicit session
+        # authority and must not become permanent project locks.
+        if not session_authority and str(state.get("status") or "").casefold() == "running":
+            return verdict("SUBMITTED_UNKNOWN", "legacy-running-without-authority", owns=True)
+        return verdict(
+            "SUBMITTED_UNKNOWN",
+            "legacy-ledger-without-active-authority",
+            owns=False,
+        )
+    # 8. Fail-closed fallback: an active authority without proof keeps the lock.
+    return verdict("SUBMITTED_UNKNOWN", "unproven-active-authority", owns=True)
+
+
 def unresolved_project_sessions(
     run_root: Path,
     project_root: Path,
@@ -2779,63 +3162,64 @@ def unresolved_project_sessions(
 ) -> list[dict[str, str]]:
     """Return exact submitted sessions that still own this project.
 
-    A local Oracle exit is not web-terminal authority.  Ownership therefore
-    survives ``running``/``attention_required`` host states until exact-session
-    recovery records terminal completion.  Parallel children from the same
-    persisted parent are allowed to coexist; a different parent is not.
+    Ownership is decided by the single submission-authority classifier; this
+    function never re-derives authority from its own string rules.  A local
+    Oracle exit is not web-terminal authority, so ownership survives running/
+    attention_required host states until exact-session recovery records
+    terminal completion or a proven pre-submit settlement releases it.
+    Parallel children from the same persisted parent are allowed to coexist; a
+    different parent is not.
     """
-    root = run_root.expanduser().resolve()
+    # The scanned ledger is the host-authored `run_root` for this project.  That
+    # field, the Oracle state root environment and every run record share one
+    # trust boundary: whoever can author them can author any host state, so this
+    # function deliberately does not go looking for extra ledgers.  Widening the
+    # scan to ambient roots would make one project's lock depend on unrelated
+    # host state instead of on this project's exact evidence.
     expected_project = str(project_root.expanduser().resolve()).casefold()
+    root = run_root.expanduser().resolve()
     expected_parent = str(parallel_parent_id or "").strip().casefold()
-    active_authorities = {"submitted_unknown", "live", "terminal_observed"}
     owners: list[dict[str, str]] = []
     if not root.is_dir():
         return owners
     for candidate in sorted(root.glob("*/state.json"), key=lambda item: str(item)):
+        verdict = classify_submission_authority(candidate.parent)
+        run_id = str(verdict.get("run_id") or "")
+        if run_id == exclude_run_id:
+            continue
+        # Compare canonical paths: a cosmetically different spelling of the same
+        # project root must never hide an owner from the lock.  An unresolvable
+        # stored root (embedded NUL, symlink loop) is kept as an owner instead of
+        # being skipped, so broken evidence can never widen the release.
+        raw_owner_project = str(verdict.get("project_root") or "")
+        try:
+            owner_project = str(Path(raw_owner_project).expanduser().resolve()).casefold()
+        except (OSError, ValueError, RuntimeError):
+            owner_project = None
+        if owner_project is not None and owner_project != expected_project:
+            continue
+        if not verdict.get("owns_project"):
+            continue
         try:
             payload = load_state(candidate)
         except (OSError, OracleStateError):
-            continue
-        run_id = str(payload.get("run_id") or "")
-        if run_id == exclude_run_id or str(payload.get("project_root") or "").casefold() != expected_project:
-            continue
-        authority = str(payload.get("session_authority") or "").strip().casefold()
-        settlement_artifact = candidate.parent / "user-confirmed-no-submission.json"
-        settlement_derived = (
-            "user_confirmed_no_submission" in payload
-            or str(payload.get("transport_status") or "") == "not_submitted_user_confirmed"
-            or str(payload.get("task_outcome_reason") or "") in {
-                "user-confirmed-no-submission-after-prompt-timeout",
-                "user-confirmed-no-submission-after-app-route-unconfirmed",
-            }
-            or settlement_artifact.exists()
-        )
-        invalid_settlement = False
-        if (
-            authority == "pre_submit"
-            and settlement_derived
-            and proven_user_confirmed_no_submission(candidate) is None
-        ):
-            # A missing or changed settlement artifact revokes the release and
-            # restores fail-closed ownership before any new submission.
-            authority = "submitted_unknown"
-            invalid_settlement = True
-        # Legacy running records fail closed because the provider may still be
-        # active. Legacy attention-required records predate explicit session
-        # authority and must not become permanent project locks; new runs
-        # persist submitted_unknown/live explicitly before reaching attention.
-        if not authority and str(payload.get("status") or "").casefold() == "running":
-            authority = "submitted_unknown"
-        if authority not in active_authorities:
-            continue
+            payload = {}
         owner_parent = str(payload.get("parallel_parent_id") or "").strip().casefold()
-        if expected_parent and owner_parent == expected_parent and not invalid_settlement:
+        # A revoked settlement restores fail-closed ownership even for a
+        # persisted parallel child, so a tampered release can never let a new
+        # submission start beside it.
+        if (
+            expected_parent
+            and owner_parent == expected_parent
+            and str(verdict.get("reason") or "") != "tampered-user-confirmation"
+        ):
             continue
         owners.append({
             "run_id": run_id,
             "session_locator": str((payload.get("oracle") or {}).get("session_locator") or ""),
-            "session_authority": authority,
+            "session_authority": str(verdict.get("session_authority") or ""),
             "state_path": str(candidate),
+            "authority_class": str(verdict.get("class") or ""),
         })
     return owners
 
