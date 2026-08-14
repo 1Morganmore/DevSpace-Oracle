@@ -46,10 +46,10 @@ def test_exact_external_versions_integrities_and_source_authority() -> None:
     external = values()[0]["external"]
     assert external["oracle"] == {
         "package": "@steipete/oracle",
-        "tested_version": "0.17.2",
+        "tested_version": "0.17.3",
         "license": "MIT",
-        "integrity": "sha512-Y2I/sTML2YPZrmYaw1QbpNd7bt6so9ld1pTjRP/MiEKTWanYjoICkmCpWBplPXq+KzHiVsgyPqUZpwxxOpa2Jg==",
-        "installation": "npx -y @steipete/oracle@0.17.2",
+        "integrity": "sha512-xoziw8brto9rEtOROHcMr4vHu70DDGQJ41bwMHpkJgA77MIZ11B+IQtGqKpZ48WkihmHkEUVEvWsf+eDwxtwgg==",
+        "installation": "npx -y @steipete/oracle@0.17.3",
         "repository": "steipete/oracle",
         "release_tag_convention": "v{version}",
     }
@@ -89,7 +89,7 @@ def test_package_metadata_is_publishable_and_lockfile_matches() -> None:
     lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
     assert package["private"] is False
     assert package["name"] == lock["name"] == lock["packages"][""]["name"]
-    assert package["version"] == lock["version"] == lock["packages"][""]["version"] == "1.8.0"
+    assert package["version"] == lock["version"] == lock["packages"][""]["version"] == "1.8.1"
     assert package["engines"]["node"] == lock["packages"][""]["engines"]["node"] == ">=24 <27"
     assert package["repository"]["url"] == "git+https://github.com/1Morganmore/DevSpace-Oracle.git"
 
@@ -106,12 +106,13 @@ def test_workflows_use_current_node24_action_majors() -> None:
     workflows = "\n".join(
         path.read_text(encoding="utf-8") for path in (ROOT / ".github/workflows").glob("*.yml")
     )
-    for action in ("actions/checkout", "actions/setup-python", "actions/setup-node"):
+    for action in ("actions/checkout", "actions/setup-python", "actions/setup-node", "actions/upload-artifact"):
         if action in workflows:
             assert f"{action}@v7" in workflows
     assert "actions/checkout@v4" not in workflows
     assert "actions/setup-python@v5" not in workflows
     assert "actions/setup-node@v4" not in workflows
+    assert "actions/upload-artifact@v4" not in workflows
 
 
 def test_upstream_drift_workflow_is_separate_read_only_and_non_required() -> None:
@@ -159,8 +160,8 @@ def test_upstream_typescript_source_change_impacts_compiled_patch_target(monkeyp
     def fake_fetch(url: str) -> dict:
         if "registry.npmjs.org" in url:
             return {
-                "dist-tags": {"latest": "0.17.3"},
-                "versions": {"0.17.2": {"dist": {"integrity": integrity}}},
+                "dist-tags": {"latest": "0.18.0"},
+                "versions": {"0.17.3": {"dist": {"integrity": integrity}}},
             }
         return {"files": [{"filename": "src/browser/actions/thinkingTime.ts"}]}
 
@@ -168,7 +169,7 @@ def test_upstream_typescript_source_change_impacts_compiled_patch_target(monkeyp
     monkeypatch.setitem(
         check.__globals__,
         "latest_tag",
-        lambda _repository: "v0.17.3",
+        lambda _repository: "v0.18.0",
     )
 
     result = check(
@@ -176,7 +177,7 @@ def test_upstream_typescript_source_change_impacts_compiled_patch_target(monkeyp
         {
             "package": "@steipete/oracle",
             "repository": "steipete/oracle",
-            "tested_version": "0.17.2",
+            "tested_version": "0.17.3",
             "integrity": integrity,
             "release_tag_convention": "v{version}",
         },
@@ -186,6 +187,17 @@ def test_upstream_typescript_source_change_impacts_compiled_patch_target(monkeyp
     assert result["impacted_patch_targets"] == [
         "dist/src/browser/actions/thinkingTime.js"
     ]
+
+
+def test_upstream_drift_tracks_the_active_oracle_patch_map() -> None:
+    module = runpy.run_path(str(ROOT / "scripts/check_upstream.py"))
+    compat = runpy.run_path(str(ROOT / "bin/chatgpt_oracle_compat.py"))
+    expected = set(compat["VERSION_PATCHES"][compat["SUPPORTED_VERSION"]])
+    assignment = "PATCHES_" + compat["SUPPORTED_VERSION"].replace(".", "")
+    assert module["patch_targets"](
+        ROOT / "bin/chatgpt_oracle_compat.py", assignment
+    ) == expected
+    assert expected == set(compat["PATCHES"])
 
 
 def test_public_notices_and_no_vendoring() -> None:

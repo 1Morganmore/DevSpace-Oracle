@@ -35,8 +35,9 @@ sends plain `@DevSpace` plus the absolute mission path. It never attaches files,
 opens ChatGPT settings, inspects/selects/deletes an app, or falls back to
 another backend, Playwright, in-app Browser, or Chrome.
 
-New runs pin Oracle `0.17.2`. Oracle `0.16.1`, `0.17.0`, and `0.17.1` are available
-only for exact recovery of a run already persisted with that version.
+New runs pin Oracle `0.17.3`. Oracle `0.16.1`, `0.17.0`, `0.17.1`, and
+`0.17.2` are available only for exact recovery of a run already persisted with
+that version.
 
 `orchestrator` is a single web submission that carries the orchestrator
 ownership contract: that one GPT session owns delegated exploration, code
@@ -59,7 +60,7 @@ regular or failed run into Web Multi automatically.
 Never probe, register, repair, or select an alternate app or backend.
 
 Oracle explicitly selects `GPT-5.6 Sol` and `extra-high`, verifies the visible
-`Extra High` tier before prompt send, and records both in Oracle evidence. The active 0.17.2
+`Extra High` tier before prompt send, and records both in Oracle evidence. The active 0.17.3
 compatibility layer is hash-gated and fails closed on an unknown version or
 third-party file. Never invent xhigh or silently downgrade.
 

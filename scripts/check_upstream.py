@@ -31,7 +31,10 @@ def fetch(url: str) -> Any:
 def patch_targets(module: Path, assignment: str) -> set[str]:
     tree = ast.parse(module.read_text(encoding="utf-8"))
     for node in tree.body:
-        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == assignment for target in node.targets):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == assignment
+            for target in node.targets
+        ):
             value = ast.literal_eval(node.value)
             return set(value)
     raise ValueError(f"{assignment} is not a literal mapping in {module}")
@@ -181,8 +184,9 @@ def check(name: str, contract: dict[str, Any], targets: set[str]) -> dict[str, A
 def report() -> dict[str, Any]:
     manifest = json.loads((ROOT / "install-manifest.json").read_text(encoding="utf-8"))
     external = manifest["external"]
+    oracle_version = str(external["oracle"]["tested_version"]).replace(".", "")
     specs = {
-        "oracle": (external["oracle"], patch_targets(ROOT / "bin/chatgpt_oracle_compat.py", "PATCHES_0172")),
+        "oracle": (external["oracle"], patch_targets(ROOT / "bin/chatgpt_oracle_compat.py", f"PATCHES_{oracle_version}")),
         "devspace": (external["devspace"], patch_targets(ROOT / "bin/chatgpt_devspace_compat.py", "PATCHES")),
     }
     results = []

@@ -18,6 +18,22 @@ PRISTINE_THINKING_TIME = (
 PRISTINE_THINKING_TIME_0172 = (
     Path(__file__).parent / "fixtures/oracle-0.17.2/thinkingTime.pristine.js"
 ).read_bytes()
+PRISTINE_THINKING_TIME_0173 = (
+    Path(__file__).parent / "fixtures/oracle-0.17.3/thinkingTime.pristine.js"
+).read_bytes()
+PRISTINE_0173_FIXTURES = {
+    "dist/src/browser/actions/assistantResponse.js": (
+        Path(__file__).parent / "fixtures/oracle-0.17.3/assistantResponse.pristine.js"
+    ).read_bytes(),
+    "dist/src/browser/actions/thinkingTime.js": PRISTINE_THINKING_TIME_0173,
+    "dist/src/browser/actions/promptComposer.js": PRISTINE_PROMPT_COMPOSER.read_bytes(),
+    "dist/src/cli/browserConfig.js": (
+        Path(__file__).parent / "fixtures/oracle-0.17.3/browserConfig.pristine.js"
+    ).read_bytes(),
+    "dist/src/browser/index.js": (
+        Path(__file__).parent / "fixtures/oracle-0.17.3/browserIndex.pristine.js"
+    ).read_bytes(),
+}
 
 
 def load_compat():
@@ -51,7 +67,11 @@ def run_gpt56_pro_diagnostic_recovery_case(
     target = package / relative
     target.parent.mkdir(parents=True)
     target.write_bytes(
-        PRISTINE_THINKING_TIME_0172 if version == "0.17.2" else PRISTINE_THINKING_TIME
+        {
+            "0.17.1": PRISTINE_THINKING_TIME,
+            "0.17.2": PRISTINE_THINKING_TIME_0172,
+            "0.17.3": PRISTINE_THINKING_TIME_0173,
+        }[version]
     )
     compat._apply_patch(package, compat.patch_root(version) / "thinkingTime.strict.patch")
     source = "\n".join(target.read_text(encoding="utf-8").splitlines()[3:])
@@ -238,7 +258,11 @@ def run_gpt56_primary_css_visibility_cases(
     target = package / relative
     target.parent.mkdir(parents=True)
     target.write_bytes(
-        PRISTINE_THINKING_TIME_0172 if version == "0.17.2" else PRISTINE_THINKING_TIME
+        {
+            "0.17.1": PRISTINE_THINKING_TIME,
+            "0.17.2": PRISTINE_THINKING_TIME_0172,
+            "0.17.3": PRISTINE_THINKING_TIME_0173,
+        }[version]
     )
     compat._apply_patch(package, compat.patch_root(version) / "thinkingTime.strict.patch")
     source = "\n".join(target.read_text(encoding="utf-8").splitlines()[3:])
@@ -335,14 +359,21 @@ console.log(JSON.stringify(statuses));
     return {str(label): str(status) for label, status in json.loads(completed.stdout.strip().splitlines()[-1]).items()}
 
 
-def run_gpt56_0172_advanced_owner_cases(tmp_path: Path) -> dict[str, dict[str, int | str]]:
+def run_gpt56_0172_advanced_owner_cases(
+    tmp_path: Path, *, version: str = "0.17.2"
+) -> dict[str, dict[str, int | str]]:
     compat = load_compat()
     relative = Path("dist/src/browser/actions/thinkingTime.js")
     package = tmp_path / "package"
     target = package / relative
     target.parent.mkdir(parents=True)
-    target.write_bytes(PRISTINE_THINKING_TIME_0172)
-    compat._apply_patch(package, compat.patch_root("0.17.2") / "thinkingTime.strict.patch")
+    target.write_bytes(
+        {
+            "0.17.2": PRISTINE_THINKING_TIME_0172,
+            "0.17.3": PRISTINE_THINKING_TIME_0173,
+        }[version]
+    )
+    compat._apply_patch(package, compat.patch_root(version) / "thinkingTime.strict.patch")
     source = "\n".join(target.read_text(encoding="utf-8").splitlines()[3:])
     scenarios = json.dumps([
         {"label": "pro-stable", "level": "heavy", "power": 5, "observations": [True, True]},
@@ -2042,8 +2073,8 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
     compat = load_compat()
     contracts = compat.VERSION_PATCHES["0.17.1"]
 
-    assert compat.SUPPORTED_VERSION == "0.17.2"
-    assert compat.RECOVERABLE_VERSIONS == ("0.16.1", "0.17.0", "0.17.1", "0.17.2")
+    assert compat.SUPPORTED_VERSION == "0.17.3"
+    assert compat.RECOVERABLE_VERSIONS == ("0.16.1", "0.17.0", "0.17.1", "0.17.2", "0.17.3")
     assert "dist/src/browser/actions/modelSelection.js" not in contracts
     assert {
         path: (contract["pristine"], contract["patched"])
@@ -2359,7 +2390,242 @@ def test_oracle_0172_pro_diagnostic_proof_is_visible_stable_and_same_picker(
     assert mismatch_logs and mismatch_logs[0].startswith("[browser] Model picker diagnostic:")
 
 
-def test_copy_profile_recovery_patch_reuses_only_the_persisted_profile_seed() -> None:
+def test_oracle_0173_has_exact_hash_gated_patches_and_preserves_0172_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compat = load_compat()
+    contracts = compat.VERSION_PATCHES["0.17.3"]
+    old = compat.VERSION_PATCHES["0.17.2"]["dist/src/browser/actions/thinkingTime.js"]
+
+    assert compat.SUPPORTED_VERSION == "0.17.3"
+    assert compat.RECOVERABLE_VERSIONS == ("0.16.1", "0.17.0", "0.17.1", "0.17.2", "0.17.3")
+    assert {
+        path: (contract["pristine"], contract["patched"])
+        for path, contract in contracts.items()
+    } == {
+        "dist/src/browser/chromeLifecycle.js": ("312b45c44d4cd69a3a057e7bd1584b58182b4b37bc88f6ce6c7d11e216267c81", "61440e467d51031efb7bfc319aef05de7c9061585e5eec148d0e353938eb2093"),
+        "dist/src/browser/recoverConversation.js": ("d7e39d21acf07e6d227e761944519e11cd8d93930629cc87555d7de75a42d1ca", "cc2a036f6e2409ae7edceee1f381a5062cd6cc5cd1618af465a1b384081ed69e"),
+        "dist/src/browser/profileCopy.js": ("06c692861f8a4c1a8769f957b9c582426a13bf4972262c47c1f24a87b239064f", "71459a25b7c46f57bae6f23a5498301f6f6a1d39addf0c1cd4eee1d99b03372c"),
+        "dist/src/cli/browserConfig.js": ("13b304a1b41cbc85257d9340a620bccd4d18bc52a36285ba46c2f72af84f0f84", "a76f338e1afb3573c3436cd261ccbcefacd9c879c71a45e110cf7a3602a06d22"),
+        "dist/src/browser/index.js": ("421f15c6693799571d586d80b7fc35b10492a63acf78d901e21786bf6ec71a90", "cb7b828902163bac941f5890f78edd136cf723e17e262c1347e2843df20c3e44"),
+        "dist/src/browser/actions/assistantResponse.js": ("93d2465ed7dce43d8093a91bada7656bc9ba7ba3729d2fcc43229fa8aa6e36de", "aff8f7cb4e926b0e56c4b02456f54983b14fffa9e01f595fed4fd44a338d41f4"),
+        "dist/src/browser/actions/promptComposer.js": ("db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000", "3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96"),
+        "dist/src/browser/actions/thinkingTime.js": ("6ff4420e81570f6c0a4e277bdd993caf66739c3f633a7cdb733ed645bec2acda", "98724eaf24e27d6f75b3eb7795c49650aee0be6a9a3698e09882c6d3a06c3185"),
+    }
+    assert all((compat.patch_root("0.17.3") / value["patch"]).is_file() for value in contracts.values())
+    # 0.17.3 was never deployed: no legacy migration lists exist for it.
+    for contract in contracts.values():
+        assert "legacy_patched" not in contract
+        assert "legacy_patch" not in contract
+        assert "legacy_patches" not in contract
+
+    relative = Path("dist/src/browser/actions/thinkingTime.js")
+    package = tmp_path / "package"
+    target = package / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes(PRISTINE_THINKING_TIME_0173)
+    (package / "package.json").write_text('{"version":"0.17.3"}', encoding="utf-8")
+    monkeypatch.setattr(
+        compat,
+        "VERSION_PATCHES",
+        {"0.17.3": {str(relative).replace("\\", "/"): contracts[str(relative).replace("\\", "/")]}},
+    )
+
+    result = compat.ensure_oracle_compatibility("oracle 0.17.3", package_root=package)
+
+    assert result["changed"] == [str(relative).replace("\\", "/")]
+    assert digest(target.read_bytes()) == contracts[str(relative).replace("\\", "/")]["patched"]
+    compat._apply_patch(
+        package,
+        compat.patch_root("0.17.3") / "thinkingTime.strict.patch",
+        reverse=True,
+    )
+    assert digest(target.read_bytes()) == contracts[str(relative).replace("\\", "/")]["pristine"]
+    compat._apply_patch(package, compat.patch_root("0.17.3") / "thinkingTime.strict.patch")
+    assert digest(target.read_bytes()) == contracts[str(relative).replace("\\", "/")]["patched"]
+    source = target.read_text(encoding="utf-8")
+    assert "selectEffortFromAdvancedSubmenu" in source
+    assert "collectGpt56PowerProofDiagnostic" in source
+    assert "consecutive >= 2" in source
+    # The 0.17.2 contract stays immutable and recoverable.
+    assert old["patched"] == "77d00dadc13e77bd54b0254a7086a1c6d43a39deacd4f489da808f8d6334ab53"
+    assert old["legacy_patch"] == "thinkingTime.strict.pre-picker-menu-scope.patch"
+    assert old["legacy_patches"]["decfb6830bf20cbfdc8ac0460b7d196599dc510ed8698e062b86161ee52d8829"] == (
+        "thinkingTime.strict.pre-diagnostic-range-validation.patch"
+    )
+
+
+def test_oracle_0173_pro_diagnostic_proof_is_visible_stable_and_same_picker(
+    tmp_path: Path,
+) -> None:
+    hidden_calls, hidden_error, _ = run_gpt56_pro_diagnostic_recovery_case(
+        tmp_path / "hidden", states=[True, True], hidden_ancestor=True, version="0.17.3"
+    )
+    stable_calls, stable_error, stable_logs = run_gpt56_pro_diagnostic_recovery_case(
+        tmp_path / "stable", states=[True, True], version="0.17.3"
+    )
+    sibling_calls, sibling_error, sibling_logs = run_gpt56_pro_diagnostic_recovery_case(
+        tmp_path / "sibling-slider",
+        states=[True, True],
+        sibling_slider=True,
+        version="0.17.3",
+    )
+    transparent_calls, transparent_error, transparent_logs = run_gpt56_pro_diagnostic_recovery_case(
+        tmp_path / "transparent-slider",
+        states=[True, True],
+        sibling_slider=True,
+        transparent_slider=True,
+        version="0.17.3",
+    )
+    mismatch_calls, mismatch_error, mismatch_logs = run_gpt56_pro_diagnostic_recovery_case(
+        tmp_path / "control-text-mismatch",
+        states=[True, True],
+        sibling_slider=True,
+        transparent_slider=True,
+        control_power="2",
+        version="0.17.3",
+    )
+
+    assert hidden_calls == stable_calls == sibling_calls == transparent_calls == mismatch_calls == 2
+    assert "refusing to submit" in str(hidden_error)
+    assert stable_error is None
+    assert stable_logs == ["[browser] Thinking time: Power 5 of 5 (Pro) (already selected)"]
+    assert sibling_error is None
+    assert sibling_logs == ["[browser] Thinking time: Power 5 of 5 (Pro) (already selected)"]
+    assert transparent_error is None
+    assert transparent_logs == ["[browser] Thinking time: Power 5 of 5 (Pro) (already selected)"]
+    assert "refusing to submit" in str(mismatch_error)
+    assert mismatch_logs and mismatch_logs[0].startswith("[browser] Model picker diagnostic:")
+
+
+def test_oracle_0173_generated_advanced_owner_proof_is_stable_and_bound(
+    tmp_path: Path,
+) -> None:
+    results = run_gpt56_0172_advanced_owner_cases(tmp_path, version="0.17.3")
+
+    assert results["pro-stable"] == {"status": "already-selected", "observations": 2}
+    assert results["power4-owned"] == {"status": "already-selected", "observations": 2}
+    assert results["live-sibling-slider"] == {"status": "already-selected", "observations": 2}
+    assert results["extra-high-sibling-slider"] == {"status": "already-selected", "observations": 2}
+    assert results["extra-high-self-transparent-slider"] == {"status": "already-selected", "observations": 2}
+    assert results["power5-zero-based"] == {"status": "already-selected", "observations": 2}
+    assert results["legacy-one-based"] == {"status": "already-selected", "observations": 2}
+    assert results["nested-controlled-menu"] == {"status": "already-selected", "observations": 2}
+    for label in (
+        "ancestor-display-none",
+        "ancestor-opacity-zero",
+        "aria-hidden",
+        "split-picker",
+        "one-observation-then-lost",
+        "power4-unrelated",
+        "power4-control-text-mismatch",
+        "zero-based-raw-out-of-range",
+        "malformed-raw",
+        "minimum-only",
+        "maximum-only",
+        "cross-menu-controlled-root",
+    ):
+        assert results[label]["status"] == "selection-unverified"
+
+
+def test_oracle_0173_japanese_intelligence_labels_survive_in_patched_output(
+    tmp_path: Path,
+) -> None:
+    compat = load_compat()
+    relative = Path("dist/src/browser/actions/thinkingTime.js")
+    contract = compat.VERSION_PATCHES["0.17.3"][str(relative).replace("\\", "/")]
+    package = tmp_path / "package"
+    target = package / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes(PRISTINE_THINKING_TIME_0173)
+    compat._apply_patch(package, compat.patch_root("0.17.3") / contract["patch"])
+    assert digest(target.read_bytes()) == contract["patched"]
+
+    patched = target.read_text(encoding="utf-8")
+    # Upstream 0.17.3 Japanese Intelligence effort controls must remain in the
+    # patched output after the local power-proof machinery is rebased on top.
+    assert "最速" in patched
+    assert "中程度" in patched
+    assert "非常に高い" in patched
+    assert "詳細設定" in patched
+    assert "詳細表示" in patched
+    assert "推論レベル" in patched
+    assert r"\\u3040-\\u30ff" in patched
+    assert "if (token === '高い' || token === '非常に高い')" in patched
+    # Local GPT-5.6 Sol power-proof machinery still present alongside.
+    assert "strictGpt56Effort" in patched
+    assert "collectGpt56PowerProofDiagnostic" in patched
+    assert "finishVerifiedSelection" in patched
+
+
+def test_oracle_0173_upstream_placeholder_headless_and_cookie_policy_constructs_are_retained(
+    tmp_path: Path,
+) -> None:
+    compat = load_compat()
+
+    def patched_text(relative: str) -> str:
+        contract = compat.VERSION_PATCHES["0.17.3"][relative]
+        package = tmp_path / relative.split("/")[-1].removesuffix(".js")
+        target = package / Path(relative)
+        target.parent.mkdir(parents=True)
+        target.write_bytes(PRISTINE_0173_FIXTURES[relative])
+        compat._apply_patch(package, compat.patch_root("0.17.3") / contract["patch"])
+        assert compat.sha256_file(target) == contract["patched"]
+        return target.read_text(encoding="utf-8")
+
+    response = patched_text("dist/src/browser/actions/assistantResponse.js")
+    # Upstream placeholder predicate: whole-string chrome-label consumption with a
+    # length cap, exported builder shared with the page expressions.
+    assert "isAnswerNowPlaceholderText" in response
+    assert "buildAnswerNowPlaceholderPredicateJs" in response
+    assert "chromeLabels" in response
+    assert "text.length > 60" in response
+    assert "sawGate && sawOwner" in response
+    assert "buildResponseObserverExpressionForTest" in response
+
+    browser_config = patched_text("dist/src/cli/browserConfig.js")
+    # Upstream explicit browser-headless and manual-login cookie sync.
+    assert "headless: options.browserHeadless === true ? true : undefined" in browser_config
+    assert "manualLoginCookieSync: options.browserManualLoginCookieSync" in browser_config
+    assert "options.browserManualLoginCookieSync === true" in browser_config
+    assert 'options.browserHeadless ? "--browser-headless" : null' in browser_config
+    # Local copy-profile isolation authority retained.
+    assert "options.browserManualLogin = false" in browser_config
+
+    browser_index = patched_text("dist/src/browser/index.js")
+    # Upstream cookie policy moved into the shared policies module.
+    assert 'import { shouldSyncBrowserCookies } from "./policies.js";' in browser_index
+    assert "shouldSyncBrowserCookies(config, {" in browser_index
+    # Local exact-session override retained.
+    assert "config = { ...config, manualLogin: false, manualLoginProfileDir: null }" in browser_index
+    assert "const startedAt = Date.now();" in browser_index
+
+    profile_copy_patch = (
+        compat.patch_root("0.17.3") / "profileCopy.patch"
+    ).read_text(encoding="utf-8")
+    assert 'process.platform === "win32"' in profile_copy_patch
+
+
+def test_oracle_0173_prompt_composer_patch_reaches_deployed_semantic_hash(
+    tmp_path: Path,
+) -> None:
+    compat = load_compat()
+    relative = "dist/src/browser/actions/promptComposer.js"
+    contract = compat.VERSION_PATCHES["0.17.3"][relative]
+    # The 0.17.0 fixture is byte-identical to the 0.17.3 pristine dist file.
+    assert digest(PRISTINE_PROMPT_COMPOSER.read_bytes()) == contract["pristine"]
+
+    package = tmp_path / "package"
+    target = package / Path(relative)
+    target.parent.mkdir(parents=True)
+    shutil.copy2(PRISTINE_PROMPT_COMPOSER, target)
+    compat._apply_patch(package, compat.patch_root("0.17.3") / contract["patch"])
+    assert digest(target.read_bytes()) == contract["patched"]
+    assert digest(target.read_bytes()) == (
+        "3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96"
+    )
+    compat._apply_patch(package, compat.patch_root("0.17.3") / contract["patch"], reverse=True)
+    assert digest(target.read_bytes()) == contract["pristine"]
     compat = load_compat()
     contract = compat.VERSION_PATCHES["0.17.0"]["dist/src/browser/recoverConversation.js"]
     patch = (

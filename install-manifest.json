@@ -1,6 +1,6 @@
 {
   "schema": "codexpro.install-manifest/v1",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "include": [
     "bin/chatgpt_oracle_run.py",
     "bin/chatgpt_devspace_compat.py",
@@ -71,6 +71,14 @@
     "bin/oracle-compat/0.17.2/thinkingTime.strict.pre-power-range-validation.patch",
     "bin/oracle-compat/0.17.2/thinkingTime.strict.pre-self-transparent-slider.patch",
     "bin/oracle-compat/0.17.2/thinkingTime.strict.patch",
+    "bin/oracle-compat/0.17.3/assistantResponse.patch",
+    "bin/oracle-compat/0.17.3/browserConfig.patch",
+    "bin/oracle-compat/0.17.3/browserIndex.patch",
+    "bin/oracle-compat/0.17.3/chromeLifecycle.patch",
+    "bin/oracle-compat/0.17.3/profileCopy.patch",
+    "bin/oracle-compat/0.17.3/promptComposer.patch",
+    "bin/oracle-compat/0.17.3/recoverConversation.patch",
+    "bin/oracle-compat/0.17.3/thinkingTime.strict.patch",
     "bin/chatgpt_oracle_state.py",
     "bin/chatgpt_oracle_profiles.py",
     "bin/chatgpt_oracle_projects.py",
@@ -121,10 +129,10 @@
   "external": {
     "oracle": {
       "package": "@steipete/oracle",
-      "tested_version": "0.17.2",
+      "tested_version": "0.17.3",
       "license": "MIT",
-      "integrity": "sha512-Y2I/sTML2YPZrmYaw1QbpNd7bt6so9ld1pTjRP/MiEKTWanYjoICkmCpWBplPXq+KzHiVsgyPqUZpwxxOpa2Jg==",
-      "installation": "npx -y @steipete/oracle@0.17.2",
+      "integrity": "sha512-xoziw8brto9rEtOROHcMr4vHu70DDGQJ41bwMHpkJgA77MIZ11B+IQtGqKpZ48WkihmHkEUVEvWsf+eDwxtwgg==",
+      "installation": "npx -y @steipete/oracle@0.17.3",
       "repository": "steipete/oracle",
       "release_tag_convention": "v{version}"
     },
