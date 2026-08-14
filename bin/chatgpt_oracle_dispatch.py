@@ -24,6 +24,24 @@ PROFILES = _load("oracle_dispatch_profiles", BIN / "chatgpt_oracle_profiles.py")
 PROJECTS = _load("oracle_dispatch_projects", BIN / "chatgpt_oracle_projects.py")
 RUNNER = _load("oracle_dispatch_runner", BIN / "chatgpt_oracle_run.py")
 
+# Exact launch-route to transport mapping.  A route that is not listed here
+# fails closed: dispatch must never invent or inherit a transport.
+ROUTE_TRANSPORTS = {
+    "oracle-devspace": "devspace",
+    "oracle-pro-devspace": "pro-devspace",
+    "oracle-pro-attachment-only": "pro-attachment-only",
+}
+
+
+def dispatch_transport(route: str) -> str:
+    """Map one launch route to its exact Oracle transport; unknown routes fail closed."""
+    transport = ROUTE_TRANSPORTS.get(str(route or "").strip())
+    if transport is None:
+        raise ValueError(
+            f"ORACLE_ROUTE_UNSUPPORTED: Oracle route {route!r} has no dispatch transport; refusing to launch"
+        )
+    return transport
+
 
 def compile_manifest(
     *,
@@ -41,15 +59,21 @@ def compile_manifest(
         mission_path=mission_path,
         reasoning_level=reasoning_level,
         attachment_paths=list(attachment_paths or ()),
+        project_root=project_root.expanduser().resolve(strict=False),
     )
-    is_pro = contract["mode"] == "pro"
-    if is_pro and context_manifest_path is None:
-        raise ValueError("PRO_CONTEXT_MANIFEST_REQUIRED: --context-manifest is required for Pro mode")
-    if not is_pro and context_manifest_path is not None:
-        raise ValueError("CONTEXT_MANIFEST_FORBIDDEN: --context-manifest is only valid for Pro mode")
     result = {"ok": True, "contract": contract, "oracle_manifest_path": None}
     if not contract["oracle_launch"]:
         return result
+    transport = dispatch_transport(str(contract.get("route") or ""))
+    is_attachment = transport == "pro-attachment-only"
+    if is_attachment and context_manifest_path is None:
+        raise ValueError(
+            "PRO_CONTEXT_MANIFEST_REQUIRED: --context-manifest is required for the Pro attachment-only route"
+        )
+    if not is_attachment and context_manifest_path is not None:
+        raise ValueError(
+            "CONTEXT_MANIFEST_FORBIDDEN: --context-manifest is only valid for the Pro attachment-only route"
+        )
     root = project_root.expanduser().resolve(strict=True)
     target = output_path.expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -60,7 +84,7 @@ def compile_manifest(
         "mission_sha256": RUNNER.STATE.sha256_file(Path(contract["mission_path"]).resolve(strict=True)),
         "mode": "browser",
         "task_kind": contract["task_kind"],
-        "transport": "pro-attachment-only" if contract["mode"] == "pro" else "devspace",
+        "transport": transport,
         "model": contract.get("model") or "gpt-5.6",
         "model_strategy": "select",
         "thinking_time": contract["thinking_time"],
@@ -70,7 +94,7 @@ def compile_manifest(
     project_url = RUNNER.STATE.normalize_chatgpt_project_url(chatgpt_project_url)
     if project_url:
         manifest["chatgpt_project_url"] = project_url
-    if is_pro:
+    if is_attachment:
         assert context_manifest_path is not None
         raw_context_manifest = context_manifest_path.expanduser()
         if not raw_context_manifest.is_absolute():

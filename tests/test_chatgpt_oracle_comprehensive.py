@@ -23,12 +23,12 @@ def load():
     return module
 
 
-def manifest(tmp_path: Path) -> Path:
+def manifest(tmp_path: Path, *, allow_pro: bool | None = None) -> Path:
     os.environ["CODEX_ORACLE_STATE_ROOT"] = str((tmp_path.parent / f"{tmp_path.name}-host-state").resolve())
     mission = tmp_path / "initial.md"
     mission.write_text("Plan the work broadly.", encoding="utf-8")
     path = tmp_path / "workflow.json"
-    path.write_text(json.dumps({
+    payload = {
         "schema": "codex.chatgpt.oracle-comprehensive/v1",
         "workflow_id": "a" * 32,
         "project_root": str(tmp_path.resolve()),
@@ -38,7 +38,10 @@ def manifest(tmp_path: Path) -> Path:
         "app_name": "DevSpace",
         "model": "gpt-5.6",
         "local_gate_command": ["python", "-c", "raise SystemExit(0)"],
-    }), encoding="utf-8")
+    }
+    if allow_pro is not None:
+        payload["allow_pro"] = allow_pro
+    path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
 
@@ -96,6 +99,22 @@ def test_manifest_rejects_non_devspace_app_before_workflow_creation(tmp_path: Pa
 
     with pytest.raises(module.WorkflowError, match="exactly DevSpace"):
         module.load_manifest(path)
+
+
+def test_manifest_requires_allow_pro_to_be_a_boolean_explicit_opt_in(tmp_path: Path) -> None:
+    module = load()
+    path = manifest(tmp_path)
+    assert module.load_manifest(path)["allow_pro"] is False
+    for invalid in (1, 0, "true", "yes", None, [], {}):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["allow_pro"] = invalid
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(module.WorkflowError, match="allow_pro must be a boolean explicit opt-in"):
+            module.load_manifest(path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["allow_pro"] = True
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert module.load_manifest(path)["allow_pro"] is True
 
 
 def test_manifest_snapshot_remains_authoritative_across_mutex_entry(monkeypatch, tmp_path: Path) -> None:
@@ -344,8 +363,130 @@ def test_pro_stage_runs_oracle_attachment_only_and_materializes_bound_receipt(mo
         if stage == "pro":
             assert payload["transport"] == "pro-attachment-only"
             assert payload["model"] == "gpt-5.6-sol"
-            assert_pro_context(module, payload, mission, (tmp_path / "next-plan.md",))
+            assert_pro_context(module, payload, mission, (tmp_path / "plan-evidence.zip",))
             assert "app_name" not in payload
+            attempt = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("attempt_id="))
+            input_sha = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("input_mission_sha256="))
+            oracle_output = mission.parent / "oracle-output.json"
+            oracle_output.write_text(json.dumps({
+                "schema": module.PRO_OUTPUT_SCHEMA, "workflow_id": "a" * 32, "stage": "pro",
+                "attempt_id": attempt, "input_mission_sha256": input_sha, "status": "PASS",
+                "output_text": "Pro decision\nsecond line\n", "next_stage": "review",
+                "next_mission_text": "Review the Pro decision independently.\nPreserve LF.\n",
+                "ready_for_next": True, "blocker": "",
+            }), encoding="utf-8")
+            return {"ok": True, "run_dir": str(mission.parent / "run"), "output_path": str(oracle_output)}
+        next_stage = {
+            "plan": "pro", "review": "implementation",
+            "implementation": "final-web-gate", "final-web-gate": "complete",
+        }[stage]
+        if stage == "plan":
+            packet = tmp_path / "plan-evidence.zip"
+            packet.write_bytes(b"plan evidence packet")
+            next_mission = _pro_attachment_mission(
+                module, tmp_path, [{"path": str(packet), "sha256": module.sha(packet)}]
+            )
+        else:
+            next_mission = tmp_path / f"next-{stage}.md"
+            next_mission.write_text(f"mission after {stage}", encoding="utf-8")
+        regular_receipt(mission, stage, next_stage, next_mission)
+        return {"ok": True, "run_dir": str(mission.parent / "run")}
+
+    result = run_workflow(module,
+        manifest(tmp_path, allow_pro=True),
+        oracle_execute=fake_execute,
+        local_gate_runner=lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    assert result["ok"] is True, result
+    assert stages == ["plan", "pro", "review", "implementation", "final-web-gate"]
+    pro_stage = next((tmp_path / "workflow" / "stages").glob("01-pro-*"))
+    assert (pro_stage / "output.md").read_bytes() == b"Pro decision\nsecond line\n"
+    assert (pro_stage / "next-mission.md").read_bytes() == b"Review the Pro decision independently.\nPreserve LF.\n"
+    receipt = json.loads((pro_stage / "stage-result.json").read_text(encoding="utf-8"))
+    assert receipt["stage"] == "pro"
+    assert receipt["next_stage"] == "review"
+
+
+@pytest.mark.parametrize("status", ["PASS", "completed"], ids=["plan-ready", "legacy-completed"])
+def test_plan_pro_transition_requires_explicit_opt_in(tmp_path: Path, status: str) -> None:
+    module = load()
+    workflow = manifest(tmp_path)
+    calls = []
+    pro_next = tmp_path / "pro-next.md"
+
+    def fake_execute(path: Path, *, dry_run: bool, **kwargs):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        mission = Path(payload["mission_path"])
+        text = mission.read_text(encoding="utf-8")
+        stage = next(item for item in ("plan", "pro") if f"stage={item}\n" in text)
+        calls.append(stage)
+        if stage != "plan":
+            raise AssertionError("Pro stage must never be submitted without explicit opt-in")
+        attempt = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("attempt_id="))
+        input_sha = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("input_mission_sha256="))
+        output = mission.parent / "plan-output.md"
+        output.write_text("plan", encoding="utf-8")
+        pro_next.write_text("Pro transition without opt-in", encoding="utf-8")
+        (mission.parent / "stage-result.json").write_text(json.dumps({
+            "schema": module.RECEIPT_SCHEMA, "workflow_id": "a" * 32, "stage": "plan",
+            "attempt_id": attempt, "input_mission_sha256": input_sha, "status": status,
+            "output_path": str(output), "output_sha256": module.sha(output),
+            "next_stage": "pro", "next_mission_path": str(pro_next),
+            "next_mission_sha256": module.sha(pro_next), "ready_for_next": True, "blocker": "",
+        }), encoding="utf-8")
+        return {"ok": True, "run_dir": str(mission.parent / "run")}
+
+    with pytest.raises(module.WorkflowError, match="PRO_EXPLICIT_OPT_IN_REQUIRED"):
+        run_workflow(module, workflow, oracle_execute=fake_execute)
+    assert calls == ["plan"]
+
+
+def test_pro_devspace_submits_writable_transport_without_attachments_and_materializes_receipt(
+    monkeypatch, tmp_path: Path
+) -> None:
+    module = load()
+    stages = []
+    real_load_manifest = module.RUNNER.STATE.load_manifest
+
+    def exact_child_load(path: Path, **kwargs):
+        if path.name == "oracle.json":
+            assert kwargs.get("expected_manifest_sha256") == module.sha(path)
+        return real_load_manifest(path, **kwargs)
+
+    monkeypatch.setattr(module.RUNNER.STATE, "load_manifest", exact_child_load)
+
+    def regular_receipt(mission: Path, stage: str, next_stage: str, next_mission: Path) -> None:
+        text = mission.read_text(encoding="utf-8")
+        attempt = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("attempt_id="))
+        input_sha = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("input_mission_sha256="))
+        output = mission.parent / "regular-output.md"
+        output.write_text(stage, encoding="utf-8")
+        (mission.parent / "stage-result.json").write_text(json.dumps({
+            "schema": module.RECEIPT_SCHEMA, "workflow_id": "a" * 32, "stage": stage,
+            "attempt_id": attempt, "input_mission_sha256": input_sha, "status": "PASS",
+            "output_path": str(output), "output_sha256": module.sha(output),
+            "next_stage": next_stage, "next_mission_path": str(next_mission),
+            "next_mission_sha256": module.sha(next_mission), "ready_for_next": True, "blocker": "",
+        }), encoding="utf-8")
+
+    def fake_execute(path: Path, *, dry_run: bool, **kwargs):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["pro_selection_policy"] == "explicit-only"
+        mission = Path(payload["mission_path"])
+        text = mission.read_text(encoding="utf-8")
+        stage = next(item for item in ("plan", "pro", "review", "implementation", "final-web-gate") if f"stage={item}\n" in text)
+        stages.append(stage)
+        if stage == "pro":
+            assert payload["transport"] == "pro-devspace"
+            assert payload["app_name"] == "DevSpace"
+            assert payload["model"] == "gpt-5.6-sol"
+            assert payload["thinking_time"] == "heavy"
+            assert not (set(payload) & {
+                "attachments", "attachment_sha256s",
+                "project_context_manifest_path", "project_context_manifest_sha256",
+            })
+            assert "[PRO_DEVSPACE_WRITE_AUTHORITY]" in text
+            assert "only within the scope this mission directs" in text
             attempt = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("attempt_id="))
             input_sha = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("input_mission_sha256="))
             oracle_output = mission.parent / "oracle-output.json"
@@ -367,7 +508,7 @@ def test_pro_stage_runs_oracle_attachment_only_and_materializes_bound_receipt(mo
         return {"ok": True, "run_dir": str(mission.parent / "run")}
 
     result = run_workflow(module,
-        manifest(tmp_path),
+        manifest(tmp_path, allow_pro=True),
         oracle_execute=fake_execute,
         local_gate_runner=lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""),
     )
@@ -377,8 +518,34 @@ def test_pro_stage_runs_oracle_attachment_only_and_materializes_bound_receipt(mo
     assert (pro_stage / "output.md").read_bytes() == b"Pro decision\nsecond line\n"
     assert (pro_stage / "next-mission.md").read_bytes() == b"Review the Pro decision independently.\nPreserve LF.\n"
     receipt = json.loads((pro_stage / "stage-result.json").read_text(encoding="utf-8"))
+    assert set(receipt) == {
+        "schema", "workflow_id", "stage", "attempt_id", "input_mission_sha256", "status",
+        "output_path", "output_sha256", "next_stage", "next_mission_path",
+        "next_mission_sha256", "ready_for_next", "blocker",
+    }
     assert receipt["stage"] == "pro"
     assert receipt["next_stage"] == "review"
+
+
+def test_pro_mission_states_write_authority_only_for_the_writable_route(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    source = tmp_path / "pro-source.md"
+    source.write_text("Pro review request", encoding="utf-8")
+    source_sha = module.sha(source)
+    writable_mission, _, _, _ = module._pro_stage_mission(
+        config, "a" * 32, 1, source, "b" * 32, source_sha, source.read_bytes(), writable=True,
+    )
+    text = writable_mission.read_text(encoding="utf-8")
+    assert "[PRO_DEVSPACE_WRITE_AUTHORITY]" in text
+    assert f"exact_project_root={config['project_root']}" in text
+    assert "exact project root" in text
+    assert "only inside exact_project_root" in text
+    assert "Never substitute a parent root, child directory" in text
+    read_only_mission, _, _, _ = module._pro_stage_mission(
+        config, "a" * 32, 1, source, "c" * 32, source_sha, source.read_bytes(),
+    )
+    assert "[PRO_DEVSPACE_WRITE_AUTHORITY]" not in read_only_mission.read_text(encoding="utf-8")
 
 
 def test_pro_exact_recovery_materializes_output_without_resubmission(tmp_path: Path) -> None:
@@ -2645,6 +2812,42 @@ def test_pro_attachment_contract_rejects_hash_mismatch_before_submission(tmp_pat
         module._declared_pro_attachments(config, uppercase, uppercase.read_bytes())
 
 
+def test_pro_declared_evidence_hash_mismatch_is_rejected_before_pro_submission(tmp_path: Path) -> None:
+    module = load()
+    workflow = manifest(tmp_path, allow_pro=True)
+    calls = []
+    packet = tmp_path / "evidence.zip"
+    packet.write_bytes(b"evidence packet")
+
+    def fake_execute(path: Path, *, dry_run: bool, **kwargs):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        mission = Path(payload["mission_path"])
+        text = mission.read_text(encoding="utf-8")
+        stage = next(item for item in ("plan", "pro") if f"stage={item}\n" in text)
+        calls.append(stage)
+        if stage != "plan":
+            raise AssertionError("Pro submission must not happen with a mismatched evidence hash")
+        attempt = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("attempt_id="))
+        input_sha = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("input_mission_sha256="))
+        output = mission.parent / "plan-output.md"
+        output.write_text("plan", encoding="utf-8")
+        next_mission = _pro_attachment_mission(
+            module, tmp_path, [{"path": str(packet), "sha256": "0" * 64}]
+        )
+        (mission.parent / "stage-result.json").write_text(json.dumps({
+            "schema": module.RECEIPT_SCHEMA, "workflow_id": "a" * 32, "stage": "plan",
+            "attempt_id": attempt, "input_mission_sha256": input_sha, "status": "PASS",
+            "output_path": str(output), "output_sha256": module.sha(output),
+            "next_stage": "pro", "next_mission_path": str(next_mission),
+            "next_mission_sha256": module.sha(next_mission), "ready_for_next": True, "blocker": "",
+        }), encoding="utf-8")
+        return {"ok": True, "run_dir": str(mission.parent / "run")}
+
+    with pytest.raises(module.WorkflowError, match="hash mismatch"):
+        run_workflow(module, workflow, oracle_execute=fake_execute)
+    assert calls == ["plan"]
+
+
 def test_pro_attachment_contract_rejects_outside_project_and_symlink(tmp_path: Path) -> None:
     module = load()
     config = module.load_manifest(manifest(tmp_path))
@@ -2929,6 +3132,30 @@ def test_plan_mission_teaches_declared_packet_contract(tmp_path: Path) -> None:
     assert "output_path and next_mission_path MUST be absolute paths" in text
 
 
+def test_plan_mission_declares_pro_selection_policy(tmp_path: Path) -> None:
+    module = load()
+    config = module.load_manifest(manifest(tmp_path))
+    initial = config["initial_mission_path"]
+    mission, _, _, _ = module._stage_mission(
+        config, "a" * 32, 0, "plan", initial, "b" * 32,
+        module.sha(initial), initial.read_bytes(),
+    )
+    text = mission.read_text(encoding="utf-8")
+    assert "[PRO_SELECTION_POLICY]" in text
+    assert "pro_selection_allowed=false" in text
+    assert "Do not emit next_stage=pro; continue with review or an authorized web-multi stage." in text
+
+    opted_in = module.load_manifest(manifest(tmp_path, allow_pro=True))
+    initial = opted_in["initial_mission_path"]
+    mission, _, _, _ = module._stage_mission(
+        opted_in, "a" * 32, 0, "plan", initial, "b" * 32,
+        module.sha(initial), initial.read_bytes(),
+    )
+    text = mission.read_text(encoding="utf-8")
+    assert "pro_selection_allowed=true" in text
+    assert "Do not emit next_stage=pro" not in text
+
+
 def test_receipt_compatibly_resolves_project_relative_paths_with_hash_binding(tmp_path: Path) -> None:
     module = load()
     config = module.load_manifest(manifest(tmp_path))
@@ -2980,7 +3207,7 @@ def test_receipt_relative_path_escape_remains_fail_closed(tmp_path: Path) -> Non
 
 def test_completed_plan_receipt_is_compatibly_normalized_only_when_fully_valid(tmp_path: Path) -> None:
     module = load()
-    config = module.load_manifest(manifest(tmp_path))
+    config = module.load_manifest(manifest(tmp_path, allow_pro=True))
     output = tmp_path / "plan-output.md"
     next_mission = tmp_path / "pro-next.md"
     output.write_text("plan", encoding="utf-8")

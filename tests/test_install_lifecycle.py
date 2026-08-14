@@ -1283,7 +1283,7 @@ def test_temp_codex_home_install_and_rollback_is_exact_inverse() -> None:
         assert installed_pro_metadata.read_bytes() == (
             ROOT / 'skills' / 'chatgpt-pro-browser' / 'agents' / 'openai.yaml'
         ).read_bytes()
-        assert b'allow_implicit_invocation: true' in installed_pro_metadata.read_bytes()
+        assert b'allow_implicit_invocation: false' in installed_pro_metadata.read_bytes()
         assert installed_oracle_patch.is_file()
         assert installed_devspace_patch.is_file()
 

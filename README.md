@@ -5,7 +5,7 @@
 Codex가 웹 ChatGPT에 계획·리서치·검토·코드 구현을 맡기고, 로컬 Codex는
 제출·복구·해시·최종 테스트만 담당하도록 만드는 Windows용 자동화 도구입니다.
 
-현재 릴리스는 `1.8.1`입니다.
+현재 릴리스는 `1.9.0`입니다.
 
 이 프로젝트는 다음 두 도구를 연결합니다.
 
@@ -16,9 +16,17 @@ Codex가 웹 ChatGPT에 계획·리서치·검토·코드 구현을 맡기고, �
 
 일반 GPT 작업은 Oracle이 `GPT-5.6 Sol`과 보이는 `Extra High` 등급
 (`Power 4 of 5`)을 확인한 뒤 정확히 `@DevSpace`와 절대 UTF-8 미션 파일
-경로만 ChatGPT에 전달합니다. Pro 작업은 `gpt-5.6-sol`과 증명된
-`Power 5 of 5`(`Pro`) 등급, 정확한 첨부 파일만 사용하며 DevSpace를
-사용하지 않습니다.
+경로만 ChatGPT에 전달합니다. 일반 작업은 이 `extra-high` 등급을 기본으로
+사용하며 자동으로 Pro로 승격하지 않습니다. Pro는 일일 할당량 제한이 있으므로
+사용자가 명시적으로 요청할 때만 선택됩니다. 새 qualified Pro 실행은
+`pro-devspace` transport를 사용하며, `@DevSpace` 멘션으로 exact project
+root 안에서 미션이 지시한 파일 쓰기와 명령 실행을 수행할 수 있습니다.
+저장소 안전성 규칙은 여전히 상위이며, 계정·ChatGPT 앱 설정·외부 상태 변경은
+미션이 명시적으로 승인할 때만 허용됩니다. `pro-attachment-only`는 별개의
+명시적 불변 증거 경로로 남으며 자동 fallback이 아닙니다. 표준 종합
+워크플로는 manifest에 `allow_pro: true`가 있을 때만 plan의 Pro 전환을
+허용하며, 그 값은 사용자의 명시적 요청 이후에만 넣습니다. Pro 스킬은
+자동으로 호출되지 않습니다(`allow_implicit_invocation: false`).
 
 ## 이 도구로 할 수 있는 일
 
@@ -41,7 +49,8 @@ Codex가 UTF-8 미션 파일과 실행 manifest 작성
     ↓
 Oracle이 로그인된 ChatGPT 세션 실행
     ├─ 일반 GPT: @DevSpace + 미션 경로
-    └─ Pro: 미션 + 고정 해시 첨부 파일
+    ├─ qualified Pro: @DevSpace + 미션 경로 (exact root 안 쓰기)
+    └─ 증거 Pro: 미션 + 고정 해시 첨부 파일
     ↓
 웹 GPT가 프로젝트 탐색·계획·구현·테스트
     ↓
@@ -66,16 +75,19 @@ Codex가 해시·상태·최종 결정론적 테스트만 확인
 | Web Multi-GPT | Web Multi-GPT | 여러 관점의 독립 탐색·검증 | 독립 Oracle 세션 2~25개 + merger |
 | Local Multi-GPT | Local Multi-GPT | 로컬 병렬 자문·반례 탐색 | `gpt-5.6-luna` + `max` 고정, 읽기 전용 |
 | 종합모드 | comprehensive mode | 계획부터 구현·최종 게이트까지 자동 연결 | plan → 명시적으로 선택한 Pro/Web Multi → review → implementation → gate |
-| Pro | `pro` / Pro | 독립적인 최종 판단·설계 검토 후 결과만 반환 | Oracle `gpt-5.6-sol` + `Power 5 of 5`, 첨부 전용, DevSpace 없음 |
+| Pro | `pro` / Pro | 사용자가 명시적으로 요청한 Pro 판단·검토만 수행 | qualified `pro-devspace`: DevSpace 멘션 + exact root 안 쓰기; 증거 `pro-attachment-only`: 첨부 전용, 앱 없음; 둘 다 `gpt-5.6-sol` + `Power 5 of 5` |
 
 지휘는 웹 제출 한 번으로 끝나는 실행 모드입니다. 종합모드는 지휘와 같은
 구현 단계를 포함하면서 계획·독립 검토·선택적 Pro/Web Multi·최종 게이트를
 추가한 다단계 워크플로입니다. Web Multi는 명시적으로 선택한 경우에만
 실행하며 일반 작업이나 실패한 작업에서 자동으로 전환하지 않습니다.
 
-단순 Pro는 종합모드와 별개인 한 번짜리 검토 경로입니다. 첨부된 계획·코드·문서를
-검토하고 결과 파일을 반환하면 끝나며, 자동으로 구현이나 다음 단계로 넘어가지
-않습니다. 계획부터 구현까지 이어야 할 때만 종합모드를 사용합니다.
+단순 Pro는 종합모드와 별개인 한 번짜리 경로입니다. 증거 경로
+(`pro-attachment-only`)는 첨부된 계획·코드·문서를 검토하고 결과 파일을
+반환하며, qualified Pro(`pro-devspace`)는 미션이 지시한 범위에서 exact
+root 안의 파일을 쓰고 명령을 실행할 수 있습니다. 어떤 Pro 경로도 자동으로
+구현이나 다음 단계로 넘어가지 않으며, 계획부터 구현까지 이어야 할 때만
+종합모드를 사용합니다.
 
 Local Multi-GPT와 Web Multi-GPT는 서로 다른 경로입니다. Local Multi-GPT는
 PC의 Codex 하위 레인을 사용하는 선택적 자문 도구이며, 모든 단계가
@@ -190,8 +202,24 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
 
 ## Pro 실행 예시
 
-Pro는 프로젝트 앱을 사용하지 않습니다. 미션과 필요한 증거 파일을 정확한
-해시로 고정해 첨부합니다.
+Pro는 사용자가 명시적으로 요청할 때만 실행됩니다. qualified
+Pro(`pro-devspace`)는 첨부 없이 `@DevSpace` 멘션과 절대 미션 경로를
+전달하며, exact project root 안에서 미션이 지시한 파일 쓰기와 명령 실행을
+수행합니다.
+
+```powershell
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
+  --mode pro `
+  --project-root C:\project `
+  --mission-path C:\project\pro.md `
+  --manifest-output C:\project\.ai-bridge\pro.json `
+  --chatgpt-project-url https://chatgpt.com/g/g-p-example/project `
+  --dry-run
+```
+
+증거 경로(`pro-attachment-only`)는 프로젝트 앱을 사용하지 않습니다. 미션과
+필요한 증거 파일을 정확한 해시로 고정해 첨부합니다. `--attachment`와
+`--context-manifest`는 이 증거 경로에서만 사용합니다.
 
 ```powershell
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `

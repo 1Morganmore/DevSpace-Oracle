@@ -6,7 +6,7 @@ A Windows automation toolkit that delegates planning, research, review, code
 changes, and testing to web ChatGPT while keeping local Codex work focused on
 transport, recovery, identity, hashes, and the final deterministic gate.
 
-The current release is `1.8.1`.
+The current release is `1.9.0`.
 
 It connects two upstream tools:
 
@@ -17,9 +17,18 @@ It connects two upstream tools:
 
 Regular GPT runs verify `GPT-5.6 Sol` at the visible `Extra High` tier (`Power
 4 of 5`), then send one line containing exactly `@DevSpace` and the absolute
-UTF-8 mission-file path.
-Pro runs use `gpt-5.6-sol` with the proven `Power 5 of 5` (`Pro`) effort,
-exact hash-frozen attachments, and no DevSpace.
+UTF-8 mission-file path. Regular work uses this `extra-high` tier by default
+and never promotes to Pro automatically. Pro has a limited daily allowance, so
+it is selected only when the user explicitly requests it. New qualified Pro
+runs use the `pro-devspace` transport: they mention `@DevSpace` and may write
+mission-directed files and run the mission's commands inside the exact project
+root. Repository safety rules stay authoritative; account, ChatGPT app
+settings, and external state change only when the mission explicitly
+authorizes them. `pro-attachment-only` remains a separate explicit
+immutable-evidence route and is not an automatic fallback. The standard
+comprehensive workflow allows a plan-to-Pro transition only when its manifest
+sets `allow_pro: true`, which the host writes only after an explicit user
+request. Pro skills never auto-invoke (`allow_implicit_invocation: false`).
 
 ## What it provides
 
@@ -41,7 +50,8 @@ User request
     -> Codex writes a UTF-8 mission and manifest
     -> Oracle starts a signed-in ChatGPT session
        |-- regular GPT: @DevSpace + mission path
-       `-- Pro: mission + hash-frozen attachments
+       |-- qualified Pro: @DevSpace + mission path (writes inside the exact root)
+       `-- evidence Pro: mission + hash-frozen attachments
     -> web GPT explores, plans, edits, and tests
     -> Oracle saves the answer as a local artifact
     -> Codex checks identity, hashes, and one deterministic final gate
@@ -63,18 +73,20 @@ Host state and ChatGPT output are stored outside DevSpace projects under
 | Web Multi-GPT | Web Multi-GPT | Independent parallel perspectives and merger | 2-25 Oracle sessions |
 | Local Multi-GPT | Local Multi-GPT | Local advisory synthesis and counterexample search | Fixed `gpt-5.6-luna` + `max`, read-only |
 | Comprehensive | comprehensive mode | Plan, explicitly selected Pro/Web Multi, review, implementation, gate | Staged Oracle workflow |
-| Pro | `pro` / Pro | Independent final judgment or design review; result only | Oracle attachments only; `gpt-5.6-sol` + `Power 5 of 5` |
+| Pro | `pro` / Pro | Explicitly requested Pro judgment or design review; result only | Qualified `pro-devspace`: DevSpace mention + writes inside exact root; evidence `pro-attachment-only`: attachments only, no app; both `gpt-5.6-sol` + `Power 5 of 5` |
 
 Orchestrator mode is a single web submission. Comprehensive mode contains an
 orchestrator-equivalent implementation stage plus planning, independent review,
 optional Pro or Web Multi-GPT, and final gates. Web Multi runs only when it is
 explicitly selected; regular work and failures never transition to it automatically.
 
-Standalone Pro is a one-shot review route, separate from comprehensive mode. It
-reviews the attached plan, code, or document, returns the durable result, and
-stops; it never transitions automatically into implementation or another stage.
-Use comprehensive mode only when the work must continue from planning through
-implementation and gates.
+Standalone Pro is a one-shot route, separate from comprehensive mode. The
+evidence route (`pro-attachment-only`) reviews the attached plan, code, or
+document and returns the durable result; qualified Pro (`pro-devspace`) can
+write files and run commands inside the exact project root within the
+mission's scope. Neither Pro route transitions automatically into
+implementation or another stage; use comprehensive mode only when the work
+must continue from planning through implementation and gates.
 
 Local Multi-GPT and Web Multi-GPT are separate paths. Local Multi-GPT is an
 optional advisory tool that runs Codex child lanes on the PC. Every stage is
@@ -173,9 +185,26 @@ top-level `oracle_manifest_sha256` in the same command as
 
 ## Pro example
 
-Pro uses no project app. Build and validate the 1 MiB context packet described
-in `skills/chatgpt-pro-browser/SKILL.md`; dispatch then revalidates its manifest,
+Pro runs only on an explicit user request. Qualified Pro (`pro-devspace`)
+sends no attachments: the dispatch emits the `@DevSpace` mention plus the
+absolute mission path, and the web Pro session may write mission-directed
+files and run the mission's commands inside the exact project root.
+
+```powershell
+python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
+  --mode pro `
+  --project-root C:\project `
+  --mission-path C:\project\pro.md `
+  --manifest-output C:\project\.ai-bridge\pro.json `
+  --dry-run
+```
+
+The evidence route (`pro-attachment-only`) uses no project app. Build and
+validate the 1 MiB context packet described in
+`skills/chatgpt-pro-browser/SKILL.md`; dispatch then revalidates its manifest,
 receipt, mission, packet, and evidence hashes before submission.
+`--attachment` and `--context-manifest` are accepted only on this evidence
+route.
 
 ```powershell
 python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `

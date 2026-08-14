@@ -1,6 +1,6 @@
 {
   "name": "codexpro-automation",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "private": false,
   "description": "Windows orchestrator that delegates Codex planning, research, implementation, and review to web ChatGPT through Oracle and DevSpace",
   "license": "MIT",

@@ -19,8 +19,12 @@ temporary `CODEX_HOME`. On POSIX use `$CODEX_HOME/bin` when set, otherwise
 - 수정, edit: `--mode edit`
 - 지휘, 지휘모드, orchestrator: `--mode orchestrator`
 - 심층 리서치, 딥 리서치, deep research: `--mode deep-research`
-- Pro, 프로: `--mode pro`; require the context manifest and attachments, use
-  attachment-only Oracle, and never select DevSpace or a ChatGPT Project.
+- Pro, 프로: `--mode pro`; run only when the user explicitly requests Pro.
+  Without `--attachment`, it is qualified Pro (`pro-devspace`): the `@DevSpace`
+  mention plus the mission path, with mission-scoped writes and commands inside
+  the exact project root. With `--context-manifest` and `--attachment`, it is
+  the evidence route (`pro-attachment-only`): attachment-only Oracle, and never
+  select DevSpace or a ChatGPT Project.
 - 웹 멀티 GPT, Web Multi-GPT: `chatgpt_oracle_multi.py`; require the explicit
   parallel policy below.
 - 로컬 멀티 GPT, Local Multi-GPT: use the local `multi_gpt_start`,
@@ -35,7 +39,9 @@ temporary `CODEX_HOME`. On POSIX use `$CODEX_HOME/bin` when set, otherwise
   `$env:USERPROFILE\.codex\skills\chatgpt-workspace-setup\scripts\devspace_tailscale_setup.py`.
 
 Regular web modes always select GPT-5.6 Sol and verify visible Extra High. Pro
-selects the account-visible Pro tier. Never silently downgrade either route.
+selects the account-visible Pro tier and runs only on an explicit user
+request. Never silently downgrade either route, and never promote a regular
+route to Pro automatically.
 
 ## Author and preview
 

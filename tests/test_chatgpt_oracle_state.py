@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 STATE_PATH = Path(__file__).resolve().parents[1] / "bin" / "chatgpt_oracle_state.py"
+PROFILES_PATH = Path(__file__).resolve().parents[1] / "bin" / "chatgpt_oracle_profiles.py"
 REFERENCE_FOOTER_FIXTURE = (
     Path(__file__).resolve().parent / "fixtures" / "oracle-task-outcome-reference-footer.md"
 )
@@ -18,6 +19,16 @@ REFERENCE_FOOTER_FIXTURE = (
 def load_state():
     name = "chatgpt_oracle_state_test"
     spec = importlib.util.spec_from_file_location(name, STATE_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_profiles():
+    name = "chatgpt_oracle_profiles_test"
+    spec = importlib.util.spec_from_file_location(name, PROFILES_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
@@ -88,6 +99,40 @@ def test_pro_attachment_output_is_never_marker_classified(tmp_path: Path) -> Non
         encoding="utf-8",
     )
 
+    assert state.classify_task_outcome(
+        output,
+        contract="legacy",
+        transport="pro-attachment-only",
+    ) == "not_applicable"
+
+
+def test_pro_devspace_output_follows_marker_contract_and_only_attachment_is_not_applicable(
+    tmp_path: Path,
+) -> None:
+    state = load_state()
+    output = tmp_path / "output.md"
+    output.write_text(
+        "TASK_OUTCOME: EXECUTED\n",
+        encoding="utf-8",
+    )
+    unmarked = tmp_path / "unmarked.md"
+    unmarked.write_text("no marker here\n", encoding="utf-8")
+
+    assert state.classify_task_outcome(
+        output,
+        contract="v1",
+        transport="pro-devspace",
+    ) == "executed"
+    assert state.classify_task_outcome(
+        unmarked,
+        contract="v1",
+        transport="pro-devspace",
+    ) == "unknown"
+    assert state.classify_task_outcome(
+        unmarked,
+        contract="legacy",
+        transport="pro-devspace",
+    ) == "legacy_unclassified"
     assert state.classify_task_outcome(
         output,
         contract="legacy",
@@ -649,6 +694,204 @@ def test_regular_manifest_requires_exact_devspace_app(tmp_path: Path) -> None:
     assert exc.value.code == "DEVSPACE_APP_REQUIRED"
 
 
+def test_pro_devspace_manifest_loads_with_devspace_boundary_and_pending_outcome(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    config = state.load_manifest(manifest(
+        tmp_path,
+        mission.resolve(),
+        transport="pro-devspace",
+        app_name="DevSpace",
+        model="gpt-5.6-sol",
+        thinking_time="heavy",
+    ))
+    assert config.transport == "pro-devspace"
+    assert config.app_name == "DevSpace"
+    assert config.attachments == ()
+    assert config.project_context_manifest_path is None
+    assert config.project_context_manifest_sha256 is None
+    assert config.model == "gpt-5.6-sol"
+    assert config.thinking_time == "heavy"
+    assert config.research == "off"
+    layout = state.create_layout(config, run_id="20260814T120000Z-a3aeba967d99")
+    payload = state.state_payload(config, layout, status="prepared", resolved_version="oracle 0.17.3")
+    assert payload["transport"] == "pro-devspace"
+    assert payload["app_name"] == "DevSpace"
+    assert payload["task_outcome"] == "pending"
+    assert payload["task_outcome_contract"] == "legacy"
+    assert payload["attachments"] == []
+    assert payload["project_context_manifest"] is None
+
+
+@pytest.mark.parametrize("contract", ["legacy", "v1"])
+def test_pro_devspace_manifest_accepts_legacy_or_v1_task_outcome_contract(
+    tmp_path: Path, contract: str
+) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    config = state.load_manifest(manifest(
+        tmp_path,
+        mission.resolve(),
+        transport="pro-devspace",
+        app_name="DevSpace",
+        model="gpt-5.6-sol",
+        thinking_time="heavy",
+        task_outcome_contract=contract,
+    ))
+    assert config.task_outcome_contract == contract
+
+
+def test_pro_devspace_manifest_rejects_mission_outside_project(tmp_path: Path) -> None:
+    state = load_state()
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.md"
+    outside.write_text("work", encoding="utf-8")
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(
+            tmp_path,
+            outside.resolve(),
+            transport="pro-devspace",
+            app_name="DevSpace",
+            model="gpt-5.6-sol",
+            thinking_time="heavy",
+        ))
+
+    assert exc.value.code == "MISSION_OUTSIDE_PROJECT"
+
+
+def test_pro_devspace_manifest_rejects_attachments_and_unknown_transports(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(
+            tmp_path,
+            mission.resolve(),
+            transport="pro-devspace",
+            app_name="DevSpace",
+            model="gpt-5.6-sol",
+            thinking_time="heavy",
+            attachments=[str(mission.resolve())],
+        ))
+    assert exc.value.code == "PRO_DEVSPACE_ATTACHMENTS_FORBIDDEN"
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(tmp_path, mission.resolve(), attachments=[str(mission.resolve())]))
+    assert exc.value.code == "REGULAR_ATTACHMENTS_FORBIDDEN"
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(tmp_path, mission.resolve(), transport="pro-devspace-readonly"))
+    assert exc.value.code == "TRANSPORT_INVALID"
+
+
+def test_pro_devspace_manifest_requires_exact_devspace_app(tmp_path: Path) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(
+            tmp_path,
+            mission.resolve(),
+            transport="pro-devspace",
+            app_name="",
+            model="gpt-5.6-sol",
+            thinking_time="heavy",
+        ))
+    assert exc.value.code == "APP_NAME_INVALID"
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(
+            tmp_path,
+            mission.resolve(),
+            transport="pro-devspace",
+            app_name="OtherWorkspace",
+            model="gpt-5.6-sol",
+            thinking_time="heavy",
+        ))
+    assert exc.value.code == "DEVSPACE_APP_REQUIRED"
+
+
+@pytest.mark.parametrize(
+    ("extra", "code"),
+    [
+        ({"model": "gpt-5.6"}, "PRO_MODEL_INVALID"),
+        ({"model_strategy": "current"}, "PRO_MODEL_STRATEGY_INVALID"),
+        ({"thinking_time": "extended"}, "PRO_THINKING_TIME_INVALID"),
+        ({"research": "deep"}, "PRO_RESEARCH_FORBIDDEN"),
+    ],
+)
+def test_pro_devspace_manifest_fails_closed_without_exact_pro_contract(
+    tmp_path: Path, extra: dict, code: str
+) -> None:
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    value = {
+        "transport": "pro-devspace",
+        "app_name": "DevSpace",
+        "model": "gpt-5.6-sol",
+        "thinking_time": "heavy",
+    }
+    value.update(extra)
+    with pytest.raises(state.OracleStateError) as exc:
+        state.load_manifest(manifest(tmp_path, mission.resolve(), **value))
+    assert exc.value.code == code
+
+
+def test_pro_devspace_composer_reuses_the_single_profiles_handoff(tmp_path: Path) -> None:
+    state = load_state()
+    profiles = load_profiles()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    config = state.load_manifest(manifest(
+        tmp_path,
+        mission.resolve(),
+        transport="pro-devspace",
+        app_name="DevSpace",
+        model="gpt-5.6-sol",
+        thinking_time="heavy",
+    ))
+    prompt = state.composer_prompt(config)
+    assert prompt == profiles.pro_devspace_composer_handoff(mission.resolve(), tmp_path.resolve())
+    assert prompt == state.composer_prompt(config, mission.resolve())
+    assert prompt.splitlines() == [prompt]
+    assert prompt.startswith(
+        f"@DevSpace Read and execute the mission file inside exact_project_root={tmp_path.resolve()}. "
+    )
+    assert "create, edit, and remove mission-owned files" in prompt
+    assert prompt.endswith(f"Mission file: {mission.resolve()}")
+
+
+def test_pro_devspace_composer_fails_closed_on_a_degraded_install(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A partially installed CODEX_HOME must produce a coded state failure.
+
+    `spec_from_file_location` happily returns a loader for a missing path, so
+    the composer would otherwise raise a bare FileNotFoundError before the
+    runner records any state.
+    """
+    state = load_state()
+    mission = tmp_path / "mission.md"
+    mission.write_text("work", encoding="utf-8")
+    config = state.load_manifest(manifest(
+        tmp_path,
+        mission.resolve(),
+        transport="pro-devspace",
+        app_name="DevSpace",
+        model="gpt-5.6-sol",
+        thinking_time="heavy",
+    ))
+    monkeypatch.setattr(state, "PROFILES_PATH", tmp_path / "absent_profiles.py")
+    with pytest.raises(state.OracleStateError) as excinfo:
+        state.composer_prompt(config)
+    assert excinfo.value.code == "ORACLE_PROFILES_MODULE_MISSING"
+
+
 def test_oracle_commands_pin_the_active_and_recoverable_versions() -> None:
     state = load_state()
 
@@ -968,3 +1211,158 @@ def test_ledger_completion_without_a_durable_artifact_is_not_complete() -> None:
     verdict = state.resolve_lifecycle({"status": "complete"}, output_is_present=False)
 
     assert verdict == {"lifecycle": "needs_attention", "authority_source": "local-ledger"}
+
+
+def proof_state(tmp_path: Path, **mutations) -> Path:
+    state = load_state()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("output.md", "stdout.log", "stderr.log", "transcript.md"):
+        (run_dir / name).write_text("", encoding="utf-8")
+    payload = {
+        "schema": state.STATE_SCHEMA,
+        "run_id": "20260814T120000Z-a3aeba967d99",
+        "project_root": str(tmp_path.resolve()),
+        "mode": "browser",
+        "transport": "pro-devspace",
+        "app_name": "DevSpace",
+        "session_authority": "submitted_unknown",
+        "terminal_harvested": False,
+        "task_outcome": "pending",
+        "profile": {
+            "model": "gpt-5.6-sol",
+            "model_strategy": "select",
+            "thinking_time": "heavy",
+        },
+        "oracle": {
+            "resolved_version": "oracle 0.17.3",
+            "session_locator": "oracle-test-run-a3aeba967d",
+        },
+        "artifacts": {
+            "output": str(run_dir / "output.md"),
+            "stdout": str(run_dir / "stdout.log"),
+            "stderr": str(run_dir / "stderr.log"),
+            "transcript": str(run_dir / "transcript.md"),
+        },
+    }
+    payload.update(mutations)
+    state_path = run_dir / "state.json"
+    state.write_json_atomic(state_path, payload)
+    return state_path
+
+
+@pytest.mark.parametrize(
+    ("marker", "requested_level"),
+    [
+        (
+            "Thinking time: selection unverified (requested Heavy); "
+            "refusing to submit without confirmed Power 5 of 5 (Pro).",
+            "Heavy",
+        ),
+        (
+            "Thinking time: unknown outcome selecting Heavy; "
+            "refusing to submit without confirmed Power 5 of 5 (Pro).",
+            "Heavy",
+        ),
+    ],
+)
+def test_pro_devspace_strict_thinking_time_failure_is_proven(
+    tmp_path: Path, marker: str, requested_level: str
+) -> None:
+    state = load_state()
+    state_path = proof_state(tmp_path)
+    locator = "oracle-test-run-a3aeba967d"
+    (state_path.parent / "stdout.log").write_text(
+        f"Session: {locator}\n{marker}\n",
+        encoding="utf-8",
+    )
+
+    evidence = state.proven_pre_submit_thinking_time_failure(state_path)
+
+    assert evidence is not None
+    assert evidence["code"] == "ORACLE_THINKING_TIME_PRE_SUBMIT_FAILED"
+    assert evidence["requested_level"] == requested_level
+    assert evidence["failure_reason"] == "oracle-thinking-time-selection-unverified"
+    assert evidence["oracle_locator"] == locator
+
+
+@pytest.mark.parametrize(
+    ("mutation",),
+    [
+        ({"app_name": None},),
+        ({"app_name": "OtherWorkspace"},),
+        ({"transport": "devspace"},),
+        ({"transport": "pro-attachment-only"},),
+        ({"profile": {"model": "gpt-5.6", "model_strategy": "select", "thinking_time": "heavy"}},),
+        ({"profile": {"model": "gpt-5.6-sol", "model_strategy": "select", "thinking_time": "extra-high"}},),
+        ({"oracle": {"resolved_version": "oracle 0.17.1", "session_locator": "oracle-test-run-a3aeba967d"}},),
+    ],
+)
+def test_pro_devspace_strict_thinking_time_failure_stays_fail_closed(
+    tmp_path: Path, mutation: dict
+) -> None:
+    state = load_state()
+    state_path = proof_state(tmp_path, **mutation)
+    locator = "oracle-test-run-a3aeba967d"
+    (state_path.parent / "stdout.log").write_text(
+        f"Session: {locator}\n"
+        "Thinking time: selection unverified (requested Heavy); "
+        "refusing to submit without confirmed Power 5 of 5 (Pro).\n",
+        encoding="utf-8",
+    )
+
+    assert state.proven_pre_submit_thinking_time_failure(state_path) is None
+
+
+def test_pro_devspace_legacy_heavy_ui_failure_is_proven(tmp_path: Path) -> None:
+    state = load_state()
+    state_path = proof_state(tmp_path, session_authority="pre_submit")
+    locator = "oracle-test-run-a3aeba967d"
+    marker = (
+        "Thinking time: option not found for pro (requested Heavy); "
+        "refusing to submit without confirmed Pro Heavy."
+    )
+    (state_path.parent / "stdout.log").write_text(
+        f"Session: {locator}\n"
+        f"ERROR: {marker}\n"
+        f"User error (browser-automation): {marker}\n",
+        encoding="utf-8",
+    )
+
+    evidence = state.proven_pre_submit_ui_failure(state_path)
+
+    assert evidence is not None
+    assert evidence["code"] == "ORACLE_PRO_HEAVY_UNCONFIRMED_PRE_SUBMIT"
+    assert evidence["failure_reason"] == "pro-heavy-ui-option-unconfirmed"
+    assert evidence["oracle_locator"] == locator
+
+
+def test_pro_shapes_do_not_cross_settle_between_transports(tmp_path: Path) -> None:
+    state = load_state()
+    # A pro-devspace record with the attachment shape (app_name None) is not
+    # either contract shape and must never settle.
+    state_path = proof_state(tmp_path, app_name=None)
+    locator = "oracle-test-run-a3aeba967d"
+    marker = (
+        "Thinking time: option not found for pro (requested Heavy); "
+        "refusing to submit without confirmed Pro Heavy."
+    )
+    (state_path.parent / "stdout.log").write_text(
+        f"Session: {locator}\n"
+        f"ERROR: {marker}\n"
+        f"User error (browser-automation): {marker}\n",
+        encoding="utf-8",
+    )
+
+    assert state.proven_pre_submit_ui_failure(state_path) is None
+
+
+def test_pro_devspace_proof_additions_leave_version_sets_unchanged() -> None:
+    state = load_state()
+
+    assert state.ORACLE_THINKING_TIME_STRICT_PROOF_VERSIONS == {"0.17.2", "0.17.3"}
+    assert state.ORACLE_UI_FAILURE_SETTLEMENT_VERSIONS == {"0.17.1", "0.17.2", "0.17.3"}
+    assert state.ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_PROOF_VERSIONS == {"0.17.2", "0.17.3"}
+    assert state.ORACLE_MODEL_SWITCHER_PROOF_VERSIONS == {"0.17.2", "0.17.3"}
+    assert state.ORACLE_COPY_PROFILE_MANUAL_LOGIN_CONFLICT_PROOF_VERSIONS == {"0.17.2", "0.17.3"}
+    assert state.ORACLE_PROFILE_COPY_RSYNC_MISSING_PROOF_VERSIONS == {"0.17.2", "0.17.3"}

@@ -1,6 +1,6 @@
 {
   "schema": "codexpro.install-manifest/v1",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "include": [
     "bin/chatgpt_oracle_run.py",
     "bin/chatgpt_devspace_compat.py",
@@ -124,7 +124,8 @@
   "routing": {
     "new_work_engine": "oracle",
     "regular_workspace_transport": "devspace",
-    "pro_transport": "oracle-attachment-only"
+    "pro_transport": "oracle-pro-devspace",
+    "pro_evidence_transport": "oracle-pro-attachment-only"
   },
   "external": {
     "oracle": {

@@ -1,14 +1,20 @@
 ---
 name: chatgpt-pro-plan-handoff
-description: Run staged comprehensive GPT work through Oracle, with optional attachment-only Pro and independent Oracle Web Multi advisory stages, then one deterministic local gate.
+description: Run staged comprehensive GPT work through Oracle, with an optional explicitly gated Pro stage and independent Oracle Web Multi advisory stages, then one deterministic local gate.
 ---
 
 # Oracle comprehensive workflow
 
 Use `codex.chatgpt.oracle-comprehensive/v1` for new comprehensive work. The
 active entry point is `%USERPROFILE%\.codex\bin\chatgpt_oracle_comprehensive.py`.
-Every regular web stage uses Oracle plus the manually registered DevSpace app;
-an optional Pro stage is Oracle attachment-only and selects no app.
+Every regular web stage uses Oracle plus the manually registered DevSpace app.
+The optional Pro stage runs only when the manifest sets `allow_pro: true` — a
+value the host writes only after an explicit user request. It uses the
+qualified `pro-devspace` transport by default (`@DevSpace` mention, mission-
+scoped writes and commands inside the exact project root, legacy outcome
+contract like every other comprehensive stage) or the explicit
+`pro-attachment-only` evidence transport when the user asks for attachment
+evidence.
 The stage order is plan -> optional Pro or Oracle Web Multi -> review ->
 implementation -> final web gate -> one deterministic local gate.
 
@@ -31,7 +37,10 @@ Create an absolute UTF-8 initial mission and a
 `codex.chatgpt.oracle-comprehensive/v1` manifest inside the exact project root.
 The manifest binds `workflow_id`, `project_root`, `workflow_dir`,
 `initial_mission_path`, `initial_mission_sha256`, `app_name`, `model`, and
-`local_gate_command`. It may also contain an exact `chatgpt_project_url`.
+`local_gate_command`. It may also contain an exact `chatgpt_project_url`. A
+Pro stage is scheduled only when the manifest sets `allow_pro: true`; the host
+writes that value only after an explicit user request, and no comprehensive
+workflow inserts a Pro stage without it.
 Preview it without submitting:
 
 ```powershell
