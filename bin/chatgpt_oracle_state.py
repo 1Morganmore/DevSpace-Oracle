@@ -55,9 +55,23 @@ ORACLE_UI_FAILURE_SETTLEMENT_VERSIONS = {"0.17.1", "0.17.2", ORACLE_ACTIVE_VERSI
 # and the current active runtime.  These are explicit per-marker sets on
 # purpose — never an ORACLE_ACTIVE_VERSION alias, or promotion silently drops
 # stored 0.17.2 runs from settlement. Older runtimes remain deliberately
-# excluded because these marker-specific recovery proofs did not bind them
-# before the 0.17.3 promotion.
+# excluded from automatic proof and from every marker except the separate
+# explicit-user-confirmation exception below.
 ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
+ORACLE_LEGACY_USER_CONFIRMATION_VERSIONS = {"0.17.1"}
+ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_USER_CONFIRMATION_VERSIONS = (
+    ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_PROOF_VERSIONS
+    | ORACLE_LEGACY_USER_CONFIRMATION_VERSIONS
+)
+# These are durable sidecar formats, so append marker-shipping runtimes here
+# when promoting the active version; never derive the set from today's active
+# or fresh-confirmation version sets.
+ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_RECORDED_VERSIONS = {
+    "0.17.1",
+    "0.17.2",
+    "0.17.3",
+}
+ORACLE_CHATGPT_SESSION_ABSENT_RECORDED_VERSIONS = {"0.17.2", "0.17.3"}
 ORACLE_THINKING_TIME_STRICT_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
 ORACLE_MODEL_SWITCHER_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
 ORACLE_COPY_PROFILE_MANUAL_LOGIN_CONFLICT_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
@@ -1201,16 +1215,21 @@ def _artifact_bytes(state: dict[str, Any], name: str) -> tuple[Path, bytes] | No
         return None
 
 
-def _comprehensive_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
+def _comprehensive_no_submission_evidence(
+    state_path: Path,
+    *,
+    revalidate_recorded: bool = False,
+) -> dict[str, Any] | None:
     """Return exact evidence for a user-adjudicable Oracle composer timeout.
 
     The accepted messages do not release ownership on their own.  This helper
     only proves that the run is eligible for an explicit user adjudication: no
     output or conversation URL exists, Oracle reported an eligible composer
     failure, and exact recovery has neither a live tab nor a saved URL.
-    The APP_MENTION_ROUTE_UNCONFIRMED branch binds markers emitted by the
-    0.17.2 runtime (exact-recovery-only) and the active runtime; the plain
-    prompt-timeout message is version-agnostic.
+    The APP_MENTION_ROUTE_UNCONFIRMED branch is eligible for explicit user
+    confirmation on 0.17.1, 0.17.2, and the active runtime.  Historical
+    settlement revalidation uses the recorded marker and immutable artifact
+    hashes instead of today's version set.
     """
     state = load_state(state_path)
     authority = str(state.get("session_authority") or "")
@@ -1231,6 +1250,15 @@ def _comprehensive_no_submission_evidence(state_path: Path) -> dict[str, Any] | 
         return None
     stdout_path, stdout_bytes = stdout_record
     stderr_path, stderr_bytes = stderr_record
+    transcript_record = _artifact_bytes(state, "transcript")
+    if transcript_record is None:
+        return None
+    transcript_path, transcript_bytes = transcript_record
+    if (
+        transcript_path.resolve() != (run_dir / "transcript.md").resolve()
+        or transcript_path.is_symlink()
+    ):
+        return None
     if (
         stdout_path.resolve() != (run_dir / "stdout.log").resolve()
         or stderr_path.resolve() != (run_dir / "stderr.log").resolve()
@@ -1240,8 +1268,14 @@ def _comprehensive_no_submission_evidence(state_path: Path) -> dict[str, Any] | 
         return None
     try:
         stdout_text = stdout_bytes.decode("utf-8", errors="strict")
-        stderr_bytes.decode("utf-8", errors="strict")
+        stderr_text = stderr_bytes.decode("utf-8", errors="strict")
+        transcript_text = transcript_bytes.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
+        return None
+    if any(
+        CHATGPT_CONVERSATION_URL_RE.search(text)
+        for text in (stdout_text, stderr_text, transcript_text)
+    ):
         return None
     oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
     locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
@@ -1262,8 +1296,11 @@ def _comprehensive_no_submission_evidence(state_path: Path) -> dict[str, Any] | 
     )
     app_route_unconfirmed = (
         app_route_contract
-        and normalize_oracle_version(oracle.get("resolved_version"))
-        in ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_PROOF_VERSIONS
+        and (
+            revalidate_recorded
+            or normalize_oracle_version(oracle.get("resolved_version"))
+            in ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_USER_CONFIRMATION_VERSIONS
+        )
         and {
             f"ERROR: {ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER}",
             (
@@ -1272,6 +1309,10 @@ def _comprehensive_no_submission_evidence(state_path: Path) -> dict[str, Any] | 
             ),
         }.issubset(stdout_lines)
     )
+    if app_route_unconfirmed:
+        host_watchdog = state.get("host_watchdog") if isinstance(state.get("host_watchdog"), dict) else {}
+        if state.get("exit_code") is None or str(host_watchdog.get("status") or "") in {"armed", "expired"}:
+            return None
     if not locator or not (
         ORACLE_PROMPT_NOT_OBSERVED_MARKER in stdout_text or app_route_unconfirmed
     ):
@@ -1403,8 +1444,10 @@ def _comprehensive_no_submission_evidence(state_path: Path) -> dict[str, Any] | 
         **binding,
         "mission_sha256": mission_sha256,
         "oracle_locator": locator,
+        "oracle_version": normalize_oracle_version(oracle.get("resolved_version")),
         "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
         "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+        "transcript_sha256": hashlib.sha256(transcript_bytes).hexdigest(),
         "recovery_evidence": recovery_records,
         "output_absent": True,
         "conversation_url_absent": True,
@@ -1577,8 +1620,10 @@ def _web_multi_child_no_submission_evidence(state_path: Path) -> dict[str, Any] 
         "source_mission_path": str(source_path), "source_mission_sha256": source_sha256,
         "transport_mission_path": str(transport_path), "transport_mission_sha256": transport_sha256,
         "mission_sha256": mission_sha256, "oracle_locator": locator,
+        "oracle_version": normalize_oracle_version(oracle.get("resolved_version")),
         **provenance,
         "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(), "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+        "transcript_sha256": hashlib.sha256(transcript_bytes).hexdigest(),
         "recovery_evidence": recovery_records, "output_absent": True, "conversation_url_absent": True,
         "_task_outcome_reason": "user-confirmed-no-submission-after-prompt-timeout",
         "_source_mission_path": str(source_path), "_transport_mission_path": str(transport_path),
@@ -1722,12 +1767,17 @@ def _bind_pre_send_no_submission_artifacts(state: dict[str, Any], run_dir: Path)
     }
 
 
-def _direct_app_route_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
+def _direct_app_route_no_submission_evidence(
+    state_path: Path,
+    *,
+    revalidate_recorded: bool = False,
+) -> dict[str, Any] | None:
     """Bind an exact direct pre-send app-route rejection to user adjudication.
 
-    The APP_MENTION_ROUTE_UNCONFIRMED marker is bound only for the 0.17.2
-    runtime (exact-recovery-only) and the active runtime; older runtimes stay
-    fail-closed because their promptComposer patches were never bound here.
+    Fresh confirmation accepts 0.17.1 only through this explicit user
+    confirmation path; automatic proof remains restricted to its own version
+    set.  Historical settlement revalidation trusts the recorded marker and
+    immutable artifact bindings instead of today's version set.
     """
     state = load_state(state_path)
     profile = state.get("profile") if isinstance(state.get("profile"), dict) else {}
@@ -1754,14 +1804,20 @@ def _direct_app_route_no_submission_evidence(state_path: Path) -> dict[str, Any]
         or not app_route_contract
     ):
         return None
+    host_watchdog = state.get("host_watchdog") if isinstance(state.get("host_watchdog"), dict) else {}
+    if state.get("exit_code") is None or str(host_watchdog.get("status") or "") in {"armed", "expired"}:
+        return None
     bound = _bind_pre_send_no_submission_artifacts(state, state_path.parent)
     if bound is None:
         return None
     oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
     stdout_lines = {line.strip() for line in bound["_stdout_text"].splitlines()}
     if (
-        normalize_oracle_version(oracle.get("resolved_version"))
-        not in ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_PROOF_VERSIONS
+        (
+            not revalidate_recorded
+            and normalize_oracle_version(oracle.get("resolved_version"))
+            not in ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_USER_CONFIRMATION_VERSIONS
+        )
         or {
             f"ERROR: {ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER}",
             f"User error (browser-automation): {ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER}",
@@ -1780,6 +1836,7 @@ def _direct_app_route_no_submission_evidence(state_path: Path) -> dict[str, Any]
         "manifest_sha256": bound["manifest_sha256"],
         "mission_sha256": bound["mission_sha256"],
         "oracle_locator": bound["oracle_locator"],
+        "oracle_version": normalize_oracle_version(oracle.get("resolved_version")),
         "stdout_sha256": bound["stdout_sha256"],
         "stderr_sha256": bound["stderr_sha256"],
         "transcript_sha256": bound["transcript_sha256"],
@@ -1790,17 +1847,17 @@ def _direct_app_route_no_submission_evidence(state_path: Path) -> dict[str, Any]
     }
 
 
-def _chatgpt_session_absent_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
+def _chatgpt_session_absent_no_submission_evidence(
+    state_path: Path,
+    *,
+    revalidate_recorded: bool = False,
+) -> dict[str, Any] | None:
     """Bind Oracle's exact pre-send session-absent refusal to user adjudication.
 
-    Oracle 0.17.3 no longer copies cookies out of a live Chrome profile, so an
-    expired signed-in seed profile makes Oracle refuse on the login page before
-    anything is composed or sent.  The paired refusal lines are accepted only
-    for the runtimes that ship them, together with the full pre-send artifact
-    contract shared with the app-route rejection.  This evidence is exactly as
-    strong as the direct app-route rejection, but it only makes the run
-    eligible for an explicit user no-submission confirmation — it never
-    releases the project lock on its own.
+    A fresh confirmation accepts only the runtimes that ship this exact
+    session-absent marker.  Historical settlement revalidation uses the
+    recorded marker and immutable artifact bindings instead of today's version
+    set; it never broadens fresh eligibility.
     """
     state = load_state(state_path)
     if (
@@ -1813,7 +1870,8 @@ def _chatgpt_session_absent_no_submission_evidence(state_path: Path) -> dict[str
         return None
     oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
     if (
-        normalize_oracle_version(oracle.get("resolved_version"))
+        not revalidate_recorded
+        and normalize_oracle_version(oracle.get("resolved_version"))
         not in ORACLE_CHATGPT_SESSION_ABSENT_PROOF_VERSIONS
     ):
         return None
@@ -1859,6 +1917,7 @@ def _chatgpt_session_absent_no_submission_evidence(state_path: Path) -> dict[str
         "manifest_sha256": bound["manifest_sha256"],
         "mission_sha256": bound["mission_sha256"],
         "oracle_locator": bound["oracle_locator"],
+        "oracle_version": normalize_oracle_version(oracle.get("resolved_version")),
         "stdout_sha256": bound["stdout_sha256"],
         "stderr_sha256": bound["stderr_sha256"],
         "transcript_sha256": bound["transcript_sha256"],
@@ -1893,6 +1952,64 @@ def _user_confirmable_no_submission_evidence(state_path: Path) -> dict[str, Any]
     return _web_multi_child_no_submission_evidence(state_path)
 
 
+def _recorded_user_confirmed_no_submission_evidence(
+    state_path: Path,
+    recorded: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Revalidate a sidecar using its recorded evidence family.
+
+    This path intentionally does not call `_user_confirmable_no_submission_evidence`:
+    a historical sidecar must survive promotion when its runtime leaves the
+    current fresh-confirmation version set.  The selected evidence builder
+    still rechecks every current artifact, marker, route, URL, process, and
+    provenance invariant; only the current version-set gate is bypassed.
+    """
+    if _settlement_logs_have_conversation_url(state_path):
+        return None
+    eligibility = str(recorded.get("settlement_eligibility") or "").strip()
+    version_present = "oracle_version" in recorded
+    recorded_version = normalize_oracle_version(recorded.get("oracle_version"))
+    if version_present and recorded_version not in ORACLE_RECOVERABLE_VERSIONS:
+        return None
+    if version_present and eligibility == "oracle-direct-app-route-unconfirmed/v1":
+        if recorded_version not in ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_RECORDED_VERSIONS:
+            return None
+    if version_present and eligibility == "oracle-chatgpt-session-absent/v1":
+        if recorded_version not in ORACLE_CHATGPT_SESSION_ABSENT_RECORDED_VERSIONS:
+            return None
+    if version_present and not eligibility:
+        stdout_record = _artifact_bytes(load_state(state_path), "stdout")
+        if stdout_record is None:
+            return None
+        try:
+            stdout_text = stdout_record[1].decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return None
+        if (
+            ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_MARKER in stdout_text
+            and recorded_version not in ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_RECORDED_VERSIONS
+        ):
+            return None
+    if eligibility == "oracle-direct-app-route-unconfirmed/v1":
+        return _direct_app_route_no_submission_evidence(
+            state_path,
+            revalidate_recorded=True,
+        )
+    if eligibility == "oracle-chatgpt-session-absent/v1":
+        return _chatgpt_session_absent_no_submission_evidence(
+            state_path,
+            revalidate_recorded=True,
+        )
+    if eligibility == "oracle-web-multi-child/v1":
+        return _web_multi_child_no_submission_evidence(state_path)
+    if not eligibility:
+        return _comprehensive_no_submission_evidence(
+            state_path,
+            revalidate_recorded=True,
+        )
+    return None
+
+
 def proven_user_confirmed_no_submission(state_path: Path) -> dict[str, Any] | None:
     """Revalidate a persisted user confirmation against immutable run artifacts."""
     state = load_state(state_path)
@@ -1913,16 +2030,27 @@ def proven_user_confirmed_no_submission(state_path: Path) -> dict[str, Any] | No
         recorded = json.loads(artifact_bytes.decode("utf-8", errors="strict"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
-    if (
+    if not isinstance(recorded, dict) or (
         recorded.get("schema") != "codex.chatgpt.oracle-user-confirmed-no-submission/v1"
         or recorded.get("code") != "ORACLE_USER_CONFIRMED_NO_SUBMISSION"
         or recorded.get("confirmation") != USER_CONFIRMED_NO_SUBMISSION
         or not str(recorded.get("reason") or "").strip()
     ):
         return None
-    current = _user_confirmable_no_submission_evidence(state_path)
-    if current is None:
+    if (
+        str(state.get("session_authority") or "") != "pre_submit"
+        or str(state.get("transport_status") or "") != "not_submitted_user_confirmed"
+        or state.get("terminal_harvested") is True
+    ):
         return None
+    current = _recorded_user_confirmed_no_submission_evidence(state_path, recorded)
+    if current is None or state.get("task_outcome_reason") != current.get("_task_outcome_reason"):
+        return None
+    for key, value in recorded.items():
+        if key in {"schema", "code", "confirmation", "reason"}:
+            continue
+        if key not in current or current.get(key) != value:
+            return None
     for key in (
         "project_root",
         "run_id",

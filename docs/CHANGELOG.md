@@ -33,6 +33,13 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
   포함), transport 집합은 `devspace`/`pro-devspace`/`pro-attachment-only`
   정확히 3개입니다. 설치 manifest routing과 릴리스를 1.9.0으로 갱신했습니다.
 
+- Oracle `0.17.1`의 `APP_MENTION_ROUTE_UNCONFIRMED` 전송 전 실패는 자동
+  증명이 아니라 명시적 사용자 확인을 거친 경우에만 `not_submitted`로
+  정산할 수 있습니다. 정산 영수증은 Oracle 버전과 stdout/stderr/transcript
+  SHA-256을 결합하고, 현재 런타임 버전이 바뀌어도 기록된 증거군을 다시
+  검증합니다. 현재 버전이 불명확하거나 URL·출력·활성 프로세스가 발견되면
+  프로젝트 잠금을 유지합니다.
+
 ## 이전 릴리스
 
 ### 1.8.1 Oracle 0.17.3 승격

@@ -985,7 +985,10 @@ def _oracle_running_state(module, oracle_manifest: Path) -> Path:
     layout.run_dir.mkdir(parents=True)
     module.RUNNER.STATE.write_json_atomic(
         layout.state_path,
-        module.RUNNER.STATE.state_payload(config, layout, status="running", resolved_version="test"),
+        module.RUNNER.STATE.state_payload(
+            config, layout, status="running",
+            resolved_version=module.RUNNER.STATE.ORACLE_ACTIVE_VERSION,
+        ),
     )
     return layout.run_dir
 
@@ -1032,6 +1035,7 @@ def _retirable_workflow(module, tmp_path: Path) -> tuple[Path, dict, Path, Path]
         encoding="utf-8",
     )
     (layout.run_dir / "stderr.log").write_text("", encoding="utf-8")
+    (layout.run_dir / "transcript.md").write_text("", encoding="utf-8")
     (layout.run_dir / "recovery-harvest-stdout.log").write_text(
         f'No live ChatGPT tab matched session "{slug}". Attempting recovery.\n',
         encoding="utf-8",
@@ -1695,6 +1699,7 @@ def test_user_confirmed_settlement_submits_one_bound_replacement_then_never_a_se
 
     def fake_execute(oracle_manifest: Path, *, dry_run: bool, **kwargs):
         run_dir = _oracle_running_state(module, oracle_manifest)
+        (run_dir / "transcript.md").write_text("", encoding="utf-8")
         submissions.append(run_dir)
         state_path = run_dir / "state.json"
         state = module.RUNNER.STATE.load_state(state_path)

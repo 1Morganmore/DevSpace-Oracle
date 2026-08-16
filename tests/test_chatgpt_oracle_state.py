@@ -1363,6 +1363,12 @@ def test_pro_devspace_proof_additions_leave_version_sets_unchanged() -> None:
     assert state.ORACLE_THINKING_TIME_STRICT_PROOF_VERSIONS == {"0.17.2", "0.17.3"}
     assert state.ORACLE_UI_FAILURE_SETTLEMENT_VERSIONS == {"0.17.1", "0.17.2", "0.17.3"}
     assert state.ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_PROOF_VERSIONS == {"0.17.2", "0.17.3"}
+    assert state.ORACLE_LEGACY_USER_CONFIRMATION_VERSIONS == {"0.17.1"}
+    assert state.ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_USER_CONFIRMATION_VERSIONS == {
+        "0.17.1",
+        "0.17.2",
+        "0.17.3",
+    }
     assert state.ORACLE_MODEL_SWITCHER_PROOF_VERSIONS == {"0.17.2", "0.17.3"}
     assert state.ORACLE_COPY_PROFILE_MANUAL_LOGIN_CONFLICT_PROOF_VERSIONS == {"0.17.2", "0.17.3"}
     assert state.ORACLE_PROFILE_COPY_RSYNC_MISSING_PROOF_VERSIONS == {"0.17.2", "0.17.3"}
@@ -1507,6 +1513,163 @@ def test_session_absent_user_confirmation_releases_ownership(tmp_path: Path) -> 
     assert verdict["settlement_eligibility"] is None
     assert verdict["requires_user_confirmation"] is False
     assert verdict["evidence"]["user_confirmed"] is True
+
+def test_historical_user_confirmation_ignores_current_app_route_version_set(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state = load_state()
+    state_path = session_absent_state(
+        tmp_path,
+        oracle={
+            "resolved_version": "oracle 0.17.3",
+            "session_locator": "oracle-test-run-a3aeba967d",
+        },
+    )
+    (state_path.parent / "stdout.log").write_text(
+        "Session: oracle-test-run-a3aeba967d\n"
+        "ERROR: APP_MENTION_ROUTE_UNCONFIRMED\n"
+        "User error (browser-automation): APP_MENTION_ROUTE_UNCONFIRMED\n",
+        encoding="utf-8",
+    )
+    state.settle_user_confirmed_no_submission(
+        state_path,
+        confirmation=state.USER_CONFIRMED_NO_SUBMISSION,
+        reason="user confirmed the exact historical run was not submitted",
+    )
+
+    settlement_path = state_path.parent / "user-confirmed-no-submission.json"
+    recorded = json.loads(settlement_path.read_text(encoding="utf-8"))
+    assert recorded["oracle_version"] == "0.17.3"
+    monkeypatch.setattr(
+        state,
+        "ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_USER_CONFIRMATION_VERSIONS",
+        {"0.17.1", "0.17.2", "0.17.4"},
+    )
+
+    assert state.proven_user_confirmed_no_submission(state_path) is not None
+
+
+def test_user_confirmation_revalidation_rejects_recovery_conversation_url(
+    tmp_path: Path,
+) -> None:
+    state = load_state()
+    state_path = session_absent_state(
+        tmp_path,
+        oracle={
+            "resolved_version": "oracle 0.17.3",
+            "session_locator": "oracle-test-run-a3aeba967d",
+        },
+    )
+    (state_path.parent / "stdout.log").write_text(
+        "Session: oracle-test-run-a3aeba967d\n"
+        "ERROR: APP_MENTION_ROUTE_UNCONFIRMED\n"
+        "User error (browser-automation): APP_MENTION_ROUTE_UNCONFIRMED\n",
+        encoding="utf-8",
+    )
+    state.settle_user_confirmed_no_submission(
+        state_path,
+        confirmation=state.USER_CONFIRMED_NO_SUBMISSION,
+        reason="user confirmed the exact run was not submitted",
+    )
+    (state_path.parent / "recovery-harvest-stdout.log").write_text(
+        "recovery observed https://chatgpt.com/c/oracle-live\n",
+        encoding="utf-8",
+    )
+
+    assert state.proven_user_confirmed_no_submission(state_path) is None
+
+
+def test_legacy_app_route_user_confirmation_is_explicit_and_version_bound(
+    tmp_path: Path,
+) -> None:
+    state = load_state()
+    state_path = session_absent_state(
+        tmp_path,
+        oracle={
+            "resolved_version": "oracle 0.17.1",
+            "session_locator": "oracle-test-run-a3aeba967d",
+        },
+    )
+    (state_path.parent / "stdout.log").write_text(
+        "Session: oracle-test-run-a3aeba967d\n"
+        "ERROR: APP_MENTION_ROUTE_UNCONFIRMED\n"
+        "User error (browser-automation): APP_MENTION_ROUTE_UNCONFIRMED\n",
+        encoding="utf-8",
+    )
+
+    evidence = state._user_confirmable_no_submission_evidence(state_path)
+    assert evidence is not None
+    assert evidence["settlement_eligibility"] == "oracle-direct-app-route-unconfirmed/v1"
+    assert evidence["oracle_version"] == "0.17.1"
+
+    settled = state.settle_user_confirmed_no_submission(
+        state_path,
+        confirmation=state.USER_CONFIRMED_NO_SUBMISSION,
+        reason="user confirmed the exact legacy run was not submitted",
+    )
+
+    assert settled["session_authority"] == "pre_submit"
+    recorded = json.loads(
+        (state_path.parent / "user-confirmed-no-submission.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert recorded["oracle_version"] == "0.17.1"
+    assert state.proven_user_confirmed_no_submission(state_path) is not None
+
+def test_bound_oracle_version_mismatch_invalidates_confirmation(
+    tmp_path: Path,
+) -> None:
+    state = load_state()
+    state_path = session_absent_state(
+        tmp_path,
+        oracle={
+            "resolved_version": "oracle 0.17.3",
+            "session_locator": "oracle-test-run-a3aeba967d",
+        },
+    )
+    (state_path.parent / "stdout.log").write_text(
+        "Session: oracle-test-run-a3aeba967d\n"
+        "ERROR: APP_MENTION_ROUTE_UNCONFIRMED\n"
+        "User error (browser-automation): APP_MENTION_ROUTE_UNCONFIRMED\n",
+        encoding="utf-8",
+    )
+    state.settle_user_confirmed_no_submission(
+        state_path,
+        confirmation=state.USER_CONFIRMED_NO_SUBMISSION,
+        reason="user confirmed the exact run was not submitted",
+    )
+
+    payload = state.load_state(state_path)
+    payload["oracle"]["resolved_version"] = "oracle 0.17.2"
+    state.write_json_atomic(state_path, payload)
+
+    assert state.proven_user_confirmed_no_submission(state_path) is None
+
+    payload["oracle"]["resolved_version"] = "oracle 0.17.3"
+    settlement_path = state_path.parent / "user-confirmed-no-submission.json"
+    recorded = json.loads(settlement_path.read_text(encoding="utf-8"))
+    recorded["oracle_version"] = "0.18.0"
+    state.write_json_atomic(settlement_path, recorded)
+    payload["oracle"]["resolved_version"] = "oracle 0.18.0"
+    payload["user_confirmed_no_submission"]["sha256"] = state.sha256_file(settlement_path)
+    state.write_json_atomic(state_path, payload)
+
+    assert state.proven_user_confirmed_no_submission(state_path) is None
+
+
+def test_legacy_session_absent_marker_remains_unconfirmed(tmp_path: Path) -> None:
+    state = load_state()
+    state_path = session_absent_state(
+        tmp_path,
+        oracle={
+            "resolved_version": "oracle 0.17.1",
+            "session_locator": "oracle-test-run-a3aeba967d",
+        },
+    )
+
+    assert state._user_confirmable_no_submission_evidence(state_path) is None
 
 
 def test_conversation_url_binds_run_against_settlement(tmp_path: Path) -> None:

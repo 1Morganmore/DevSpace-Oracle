@@ -3358,6 +3358,13 @@ def test_user_confirmed_no_submission_is_hash_bound_idempotent_and_fail_closed(
     restored["user_confirmed_no_submission"] = reference
     runner.STATE.write_json_atomic(state_path, restored)
 
+    transcript_path = run_dir / "transcript.md"
+    transcript_bytes = transcript_path.read_bytes()
+    transcript_path.write_bytes(transcript_bytes + b"\ncontradictory transcript mutation\n")
+    assert runner.STATE.proven_user_confirmed_no_submission(state_path) is None
+    transcript_path.write_bytes(transcript_bytes)
+    assert runner.STATE.proven_user_confirmed_no_submission(state_path) is not None
+
     # Any contradictory later recovery revokes the release even though the
     # original no-tab/no-URL recovery still exists.
     (run_dir / "recovery-live-stdout.log").write_text(
@@ -3635,12 +3642,12 @@ def test_direct_app_route_unconfirmed_with_stored_0172_settles_and_releases_proj
     assert proof["settlement_eligibility"] == "oracle-direct-app-route-unconfirmed/v1"
 
 
-@pytest.mark.parametrize("stored_version", ["0.16.1", "0.17.0", "0.17.1"])
+@pytest.mark.parametrize("stored_version", ["0.16.1", "0.17.0"])
 def test_direct_app_route_unconfirmed_with_non_contract_version_is_fail_closed(
     tmp_path: Path,
     stored_version: str,
 ) -> None:
-    """Runtimes outside the app-route proof contract never become settleable."""
+    """Runtimes outside the explicit app-route confirmation set stay blocked."""
     runner = load_runner()
     manifest_path = manifest(tmp_path)
 
@@ -3677,14 +3684,15 @@ def test_direct_app_route_unconfirmed_with_non_contract_version_is_fail_closed(
     assert exc.value.code == "NO_SUBMISSION_EVIDENCE_INCOMPLETE"
 
 
-def test_comprehensive_app_route_unconfirmed_with_stored_0172_is_user_settleable(
+@pytest.mark.parametrize("stored_version", ["0.17.1", "0.17.2"])
+def test_comprehensive_app_route_unconfirmed_with_stored_version_is_user_settleable(
     tmp_path: Path,
+    stored_version: str,
 ) -> None:
-    """A stored 0.17.2 comprehensive run stays app-route settleable.
+    """Stored 0.17.1 and 0.17.2 comprehensive runs stay adjudicable.
 
-    The comprehensive HOST_STAGE_CONTRACT path binds the same
-    APP_MENTION_ROUTE_UNCONFIRMED marker for the 0.17.2 (exact-recovery-only)
-    and active runtimes; a stored 0.17.2 run must stay user-adjudicable.
+    The HOST_STAGE_CONTRACT path binds the same APP_MENTION_ROUTE_UNCONFIRMED
+    marker across the legacy and exact-recovery-only runtime generations.
     """
     runner = load_runner()
     run_id = "b" * 32
@@ -3749,13 +3757,13 @@ def test_comprehensive_app_route_unconfirmed_with_stored_0172_is_user_settleable
         "Cannot recover conversation: session metadata has no recoverable ChatGPT conversation URL.\n",
         encoding="utf-8",
     )
-    state["oracle"]["resolved_version"] = "oracle 0.17.2"
+    state["oracle"]["resolved_version"] = f"oracle {stored_version}"
     runner.STATE.write_json_atomic(state_path, state)
 
     settled = runner.settle_user_confirmed_no_submission(
         run_dir,
         confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION,
-        reason="user inspected the exact 0.17.2 comprehensive run and confirmed no submission",
+        reason=f"user inspected the exact {stored_version} comprehensive run and confirmed no submission",
     )
     proof = runner.STATE.proven_user_confirmed_no_submission(state_path)
 
