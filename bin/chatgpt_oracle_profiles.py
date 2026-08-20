@@ -22,7 +22,7 @@ REGULAR_REASONING_LEVELS = ("Very High",)
 REGULAR_THINKING_TIME = "extra-high"
 DEVSPACE_APP_NAME = "DevSpace"
 # Current ChatGPT exposes Pro as the maximum effort for GPT-5.6 Sol, not as a
-# separate model row.  Oracle 0.17.3 verifies that Pro effort independently
+# separate model row. Oracle 0.18.0 verifies that Pro effort independently
 # (Power 5 of 5 proof); `heavy` is only Oracle's compatibility token for it.
 PRO_MODEL = "gpt-5.6-sol"
 PRO_COMPOSER_PROMPT = "Read the attached prompt/instructions and all attached files, then complete the task."

@@ -5,6 +5,48 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
 
 ## 현재 릴리스
 
+### 1.10.0 upstream 호환·복구 보강
+
+- 프로젝트 릴리스를 `1.10.0`으로 올리고 새 실행을
+  `@steipete/oracle@0.18.0`에 고정했습니다. DevSpace는 `1.0.7`을 유지하고,
+  Oracle `0.17.3`을 포함한 기존 버전은 persisted exact run 복구 전용으로
+  남깁니다.
+- Oracle 0.18.0에서 upstream 바이트가 달라진 세 target
+  (`thinkingTime.js`, `browser/index.js`, `cli/browserConfig.js`)만 새 바이트에
+  맞춰 포팅하고, 나머지 다섯 target도 명시적인 0.18.0 asset/contract로
+  결속했습니다. upstream disabled-tier 감지와 cookie-sync opt-in, 로컬의
+  보이는 Power 4/5·5/5 증명, 실행별 복사 프로필, 기존 timeout 예산과 hash
+  gate를 유지합니다. 라이브 브라우저 검증은 이 릴리스에서 수행하지
+  않았습니다.
+- exact recovery writer는 run directory로 파생한 별도 mutex로 직렬화하고
+  프로젝트 submit mutex를 기다리지 않습니다. unresolved session은 새 제출을
+  계속 차단하며, 늦은 원래 observer는 exact harvest가 저장한 terminal 결과를
+  덮어쓰지 않습니다.
+- 진단은 persisted `blocked`와 `not_executed`를 complete lifecycle보다 먼저
+  `terminal-task-not-executed`로 분류합니다. unresolved artifact의
+  `OAuth token request failed` + `503`은 별도 registered-app OAuth
+  시그니처로 구분하고, malformed/ambiguous marker와 persisted `unknown`은
+  fail-closed로 남깁니다.
+- DevSpace 1.0.7의 `oauth-provider.js` exact patch는 소비된 회전 refresh
+  token을 동일 client·scope·resource에만 30초, 최대 32개 메모리 항목으로
+  재생합니다. revoke·만료·불일치는 거부하고 자격 증명이나 OAuth DB schema를
+  바꾸지 않습니다.
+- Windows DevSpace 복구는 기존 HKCU Run 값 `DevSpace MCP Server` 하나의 숨김
+  single-instance watchdog을 사용합니다. 매 health cycle마다 live config를
+  다시 읽고 exact service와 Funnel만 복구하며 Owner 자격 증명, OAuth
+  client/token, ChatGPT 등록·설정, root를 변경하지 않습니다.
+- `scripts/check_upstream.py`는 npm latest와 npm `gitHead`, annotated source tag
+  object·peeled commit·signature, GitHub Release, default-branch head를 서로
+  다른 증거로 보고합니다. `releases/latest`를 source tag로 부르거나 release가
+  뒤처졌다는 이유로 npm dist identity를 바꾸지 않습니다.
+- 부모 `731aec0a2d76c3c1c02815344accd118c177daff`(1.15.1)까지 감사를
+  갱신했습니다. exact recovery, OAuth replay, 진단, watchdog은 이 fork의
+  authority 경계에 맞춰 adapted했습니다. regular composer는 계속 정확히
+  `@DevSpace <absolute mission path>`만 보내며 parent의 exact-root 사전 prose와
+  Ultra GPT mode는 이 릴리스에서 채택하지 않습니다.
+
+## 이전 릴리스
+
 ### 1.9.0 명시적 Pro 읽기·쓰기 정책
 
 - 부모 1.14.0의 명시적 Pro 읽기·쓰기 정책을 이식했습니다. 일반 웹 작업은
@@ -39,8 +81,6 @@ README는 현재 제품의 목적과 사용법만 설명합니다. 구현 변경
   SHA-256을 결합하고, 현재 런타임 버전이 바뀌어도 기록된 증거군을 다시
   검증합니다. 현재 버전이 불명확하거나 URL·출력·활성 프로세스가 발견되면
   프로젝트 잠금을 유지합니다.
-
-## 이전 릴리스
 
 ### 1.8.1 Oracle 0.17.3 승격
 

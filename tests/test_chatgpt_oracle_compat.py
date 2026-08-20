@@ -21,6 +21,9 @@ PRISTINE_THINKING_TIME_0172 = (
 PRISTINE_THINKING_TIME_0173 = (
     Path(__file__).parent / "fixtures/oracle-0.17.3/thinkingTime.pristine.js"
 ).read_bytes()
+PRISTINE_THINKING_TIME_0180 = (
+    Path(__file__).parent / "fixtures/oracle-0.18.0/thinkingTime.pristine.js"
+).read_bytes()
 PRISTINE_0173_FIXTURES = {
     "dist/src/browser/actions/assistantResponse.js": (
         Path(__file__).parent / "fixtures/oracle-0.17.3/assistantResponse.pristine.js"
@@ -33,6 +36,22 @@ PRISTINE_0173_FIXTURES = {
     "dist/src/browser/index.js": (
         Path(__file__).parent / "fixtures/oracle-0.17.3/browserIndex.pristine.js"
     ).read_bytes(),
+}
+ORACLE_0180_FIXTURE_FILES = {
+    "dist/src/browser/chromeLifecycle.js": "chromeLifecycle.pristine.js",
+    "dist/src/browser/recoverConversation.js": "recoverConversation.pristine.js",
+    "dist/src/browser/profileCopy.js": "profileCopy.pristine.js",
+    "dist/src/cli/browserConfig.js": "browserConfig.pristine.js",
+    "dist/src/browser/index.js": "browserIndex.pristine.js",
+    "dist/src/browser/actions/assistantResponse.js": "assistantResponse.pristine.js",
+    "dist/src/browser/actions/promptComposer.js": "promptComposer.pristine.js",
+    "dist/src/browser/actions/thinkingTime.js": "thinkingTime.pristine.js",
+}
+PRISTINE_0180_FIXTURES = {
+    relative: (
+        Path(__file__).parent / "fixtures/oracle-0.18.0" / fixture
+    ).read_bytes()
+    for relative, fixture in ORACLE_0180_FIXTURE_FILES.items()
 }
 
 
@@ -48,6 +67,19 @@ def load_compat():
 
 def digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+def thinking_source_for_harness(target: Path) -> str:
+    lines = target.read_text(encoding="utf-8").splitlines()
+    while lines and lines[0].startswith("import "):
+        lines.pop(0)
+    source = "\n".join(lines)
+    if "BrowserAutomationError" in source:
+        source = (
+            "class BrowserAutomationError extends Error { "
+            "constructor(message, details) { super(message); this.details = details; } }\n"
+            + source
+        )
+    return source
 
 
 def run_gpt56_pro_diagnostic_recovery_case(
@@ -71,10 +103,11 @@ def run_gpt56_pro_diagnostic_recovery_case(
             "0.17.1": PRISTINE_THINKING_TIME,
             "0.17.2": PRISTINE_THINKING_TIME_0172,
             "0.17.3": PRISTINE_THINKING_TIME_0173,
+            "0.18.0": PRISTINE_THINKING_TIME_0180,
         }[version]
     )
     compat._apply_patch(package, compat.patch_root(version) / "thinkingTime.strict.patch")
-    source = "\n".join(target.read_text(encoding="utf-8").splitlines()[3:])
+    source = thinking_source_for_harness(target)
     scenario = json.dumps(
         {
             "states": states,
@@ -262,10 +295,11 @@ def run_gpt56_primary_css_visibility_cases(
             "0.17.1": PRISTINE_THINKING_TIME,
             "0.17.2": PRISTINE_THINKING_TIME_0172,
             "0.17.3": PRISTINE_THINKING_TIME_0173,
+            "0.18.0": PRISTINE_THINKING_TIME_0180,
         }[version]
     )
     compat._apply_patch(package, compat.patch_root(version) / "thinkingTime.strict.patch")
-    source = "\n".join(target.read_text(encoding="utf-8").splitlines()[3:])
+    source = thinking_source_for_harness(target)
     scenarios = json.dumps([
         {"label": "visible", "display": "block", "visibility": "visible", "opacity": "1", "ariaHidden": False},
         {"label": "display-none", "display": "none", "visibility": "visible", "opacity": "1", "ariaHidden": False},
@@ -371,10 +405,11 @@ def run_gpt56_0172_advanced_owner_cases(
         {
             "0.17.2": PRISTINE_THINKING_TIME_0172,
             "0.17.3": PRISTINE_THINKING_TIME_0173,
+            "0.18.0": PRISTINE_THINKING_TIME_0180,
         }[version]
     )
     compat._apply_patch(package, compat.patch_root(version) / "thinkingTime.strict.patch")
-    source = "\n".join(target.read_text(encoding="utf-8").splitlines()[3:])
+    source = thinking_source_for_harness(target)
     scenarios = json.dumps([
         {"label": "pro-stable", "level": "heavy", "power": 5, "observations": [True, True]},
         {"label": "ancestor-display-none", "level": "heavy", "power": 5, "ancestorDisplay": "none"},
@@ -1118,7 +1153,7 @@ def test_canonical_hash_binds_both_lf_and_crlf_deployed_bytes(
 def test_unknown_oracle_version_or_file_hash_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     compat = load_compat()
     with pytest.raises(compat.OracleCompatError) as version:
-        compat.ensure_oracle_compatibility("oracle 0.18.0", package_root=tmp_path)
+        compat.ensure_oracle_compatibility("oracle 0.19.0", package_root=tmp_path)
     assert version.value.code == "ORACLE_VERSION_UNVALIDATED"
 
     package = tmp_path / "package"
@@ -2073,8 +2108,15 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
     compat = load_compat()
     contracts = compat.VERSION_PATCHES["0.17.1"]
 
-    assert compat.SUPPORTED_VERSION == "0.17.3"
-    assert compat.RECOVERABLE_VERSIONS == ("0.16.1", "0.17.0", "0.17.1", "0.17.2", "0.17.3")
+    assert compat.SUPPORTED_VERSION == "0.18.0"
+    assert compat.RECOVERABLE_VERSIONS == (
+        "0.16.1",
+        "0.17.0",
+        "0.17.1",
+        "0.17.2",
+        "0.17.3",
+        "0.18.0",
+    )
     assert "dist/src/browser/actions/modelSelection.js" not in contracts
     assert {
         path: (contract["pristine"], contract["patched"])
@@ -2397,8 +2439,15 @@ def test_oracle_0173_has_exact_hash_gated_patches_and_preserves_0172_recovery(
     contracts = compat.VERSION_PATCHES["0.17.3"]
     old = compat.VERSION_PATCHES["0.17.2"]["dist/src/browser/actions/thinkingTime.js"]
 
-    assert compat.SUPPORTED_VERSION == "0.17.3"
-    assert compat.RECOVERABLE_VERSIONS == ("0.16.1", "0.17.0", "0.17.1", "0.17.2", "0.17.3")
+    assert compat.SUPPORTED_VERSION == "0.18.0"
+    assert compat.RECOVERABLE_VERSIONS == (
+        "0.16.1",
+        "0.17.0",
+        "0.17.1",
+        "0.17.2",
+        "0.17.3",
+        "0.18.0",
+    )
     assert {
         path: (contract["pristine"], contract["patched"])
         for path, contract in contracts.items()
@@ -2413,7 +2462,7 @@ def test_oracle_0173_has_exact_hash_gated_patches_and_preserves_0172_recovery(
         "dist/src/browser/actions/thinkingTime.js": ("6ff4420e81570f6c0a4e277bdd993caf66739c3f633a7cdb733ed645bec2acda", "98724eaf24e27d6f75b3eb7795c49650aee0be6a9a3698e09882c6d3a06c3185"),
     }
     assert all((compat.patch_root("0.17.3") / value["patch"]).is_file() for value in contracts.values())
-    # 0.17.3 was never deployed: no legacy migration lists exist for it.
+    # The exact 0.17.3 recovery contract has no intra-version legacy levels.
     for contract in contracts.values():
         assert "legacy_patched" not in contract
         assert "legacy_patch" not in contract
@@ -2453,6 +2502,287 @@ def test_oracle_0173_has_exact_hash_gated_patches_and_preserves_0172_recovery(
     assert old["legacy_patches"]["decfb6830bf20cbfdc8ac0460b7d196599dc510ed8698e062b86161ee52d8829"] == (
         "thinkingTime.strict.pre-diagnostic-range-validation.patch"
     )
+
+
+def test_oracle_0180_patches_the_exact_pristine_dist_and_preserves_0173_recovery(
+    tmp_path: Path,
+) -> None:
+    compat = load_compat()
+    contracts = compat.VERSION_PATCHES["0.18.0"]
+    expected = {
+        "dist/src/browser/chromeLifecycle.js": (
+            "312b45c44d4cd69a3a057e7bd1584b58182b4b37bc88f6ce6c7d11e216267c81",
+            "61440e467d51031efb7bfc319aef05de7c9061585e5eec148d0e353938eb2093",
+        ),
+        "dist/src/browser/recoverConversation.js": (
+            "d7e39d21acf07e6d227e761944519e11cd8d93930629cc87555d7de75a42d1ca",
+            "cc2a036f6e2409ae7edceee1f381a5062cd6cc5cd1618af465a1b384081ed69e",
+        ),
+        "dist/src/browser/profileCopy.js": (
+            "06c692861f8a4c1a8769f957b9c582426a13bf4972262c47c1f24a87b239064f",
+            "71459a25b7c46f57bae6f23a5498301f6f6a1d39addf0c1cd4eee1d99b03372c",
+        ),
+        "dist/src/cli/browserConfig.js": (
+            "52ddb9d0289849301f83863ed0b5209b8d9f071358e7784fcf4a5c8724b1c147",
+            "63920f771c36b34b95b67c54d49d3187bf7144f01651f567cdde41068b4a6e0e",
+        ),
+        "dist/src/browser/index.js": (
+            "d0f4f8972e3f755fe0f54d74a24a8e04346c9bc01509196b4ce625e4816f7b79",
+            "748cc9d20c4efca4942652c4631dc130819dbcdfd95f3267671c4a514f4ed3c3",
+        ),
+        "dist/src/browser/actions/assistantResponse.js": (
+            "93d2465ed7dce43d8093a91bada7656bc9ba7ba3729d2fcc43229fa8aa6e36de",
+            "aff8f7cb4e926b0e56c4b02456f54983b14fffa9e01f595fed4fd44a338d41f4",
+        ),
+        "dist/src/browser/actions/promptComposer.js": (
+            "db090a5fb6d13c4c88a68b5e474a53a19c3857295a64c3ba4a0eef1868d06000",
+            "3767d8a6702e42191e8195641ad2f0834882bed9cda1362a723c906249402d96",
+        ),
+        "dist/src/browser/actions/thinkingTime.js": (
+            "3d9d06b08417bca3b2d646eb4d46887d26c5de7c068d1e995c73b6b6e2f61199",
+            "e58fcd1f50cac2fdfb9334df485e035896586182acddbb46d846c12bdbdeb424",
+        ),
+    }
+
+    assert compat.SUPPORTED_VERSION == "0.18.0"
+    assert compat.PATCHES is contracts
+    assert {
+        relative: (contract["pristine"], contract["patched"])
+        for relative, contract in contracts.items()
+    } == expected
+    assert set(PRISTINE_0180_FIXTURES) == set(contracts)
+    assert all(
+        (compat.patch_root("0.18.0") / contract["patch"]).is_file()
+        for contract in contracts.values()
+    )
+
+    package = tmp_path / "pristine"
+    for relative, pristine in PRISTINE_0180_FIXTURES.items():
+        target = package / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(pristine)
+        assert compat.sha256_file(target) == contracts[relative]["pristine"]
+    (package / "package.json").write_text('{"version":"0.18.0"}', encoding="utf-8")
+
+    result = compat.ensure_oracle_compatibility("oracle 0.18.0", package_root=package)
+
+    assert result["changed"] == list(contracts)
+    assert result["already_patched"] == []
+    for relative, contract in contracts.items():
+        assert compat.sha256_file(package / relative) == contract["patched"]
+
+    thinking = (package / "dist/src/browser/actions/thinkingTime.js").read_text(encoding="utf-8")
+    assert "export class ThinkingTierUnavailableError" in thinking
+    assert 'case "option-disabled"' in thinking
+    assert "const isOptionDisabled = (node) =>" in thinking
+    assert "waitForDisabledNotice" in thinking
+    assert "strictRequestedEffort" in thinking
+    assert 'result?.status !== "option-disabled"' in thinking
+    assert "collectGpt56PowerProofDiagnostic" in thinking
+    assert "Power 4 of 5 (Extra High)" in thinking
+    assert "Power 5 of 5 (Pro)" in thinking
+
+    browser_config = (package / "dist/src/cli/browserConfig.js").read_text(encoding="utf-8")
+    assert "const chromeCookieSyncRequested =" in browser_config
+    assert "options.browserCookieSync === true || options.browserManualLoginCookieSync === true" in browser_config
+    assert "cookieSync: inline?.cookies?.length" in browser_config
+    assert "options.browserManualLogin = false" in browser_config
+
+    browser_index = (package / "dist/src/browser/index.js").read_text(encoding="utf-8")
+    assert "CHROME_COOKIE_SYNC_WARNING" in browser_index
+    assert "disabled by default; use --browser-cookie-sync to opt in" in browser_index
+    assert "shouldSyncBrowserCookies(config, {" in browser_index
+    assert "config = { ...config, manualLogin: false, manualLoginProfileDir: null }" in browser_index
+
+    recovery = compat.VERSION_PATCHES["0.17.3"]
+    assert recovery["dist/src/browser/actions/thinkingTime.js"] == {
+        "patch": "thinkingTime.strict.patch",
+        "pristine": "6ff4420e81570f6c0a4e277bdd993caf66739c3f633a7cdb733ed645bec2acda",
+        "patched": "98724eaf24e27d6f75b3eb7795c49650aee0be6a9a3698e09882c6d3a06c3185",
+    }
+    assert recovery["dist/src/cli/browserConfig.js"]["patched"] == (
+        "a76f338e1afb3573c3436cd261ccbcefacd9c879c71a45e110cf7a3602a06d22"
+    )
+    assert recovery["dist/src/browser/index.js"]["patched"] == (
+        "cb7b828902163bac941f5890f78edd136cf723e17e262c1347e2843df20c3e44"
+    )
+    assert all(
+        (compat.patch_root("0.17.3") / contract["patch"]).is_file()
+        for contract in recovery.values()
+    )
+
+
+def test_oracle_0180_unknown_dist_bytes_fail_closed_before_patching(
+    tmp_path: Path,
+) -> None:
+    compat = load_compat()
+    package = tmp_path / "drifted"
+    for relative, pristine in PRISTINE_0180_FIXTURES.items():
+        target = package / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(pristine)
+    (package / "package.json").write_text('{"version":"0.18.0"}', encoding="utf-8")
+    drifted = package / "dist/src/browser/chromeLifecycle.js"
+    drifted.write_bytes(drifted.read_bytes() + b"\n// unknown drift\n")
+
+    with pytest.raises(compat.OracleCompatError) as exc:
+        compat.ensure_oracle_compatibility("0.18.0", package_root=package)
+
+    assert exc.value.code == "ORACLE_FILE_HASH_MISMATCH"
+    assert exc.value.evidence["path"] == str(drifted)
+    assert exc.value.evidence["expected"] == [
+        compat.VERSION_PATCHES["0.18.0"]["dist/src/browser/chromeLifecycle.js"]["pristine"],
+        compat.VERSION_PATCHES["0.18.0"]["dist/src/browser/chromeLifecycle.js"]["patched"],
+    ]
+
+
+def test_oracle_0180_disabled_tier_notice_remains_fail_closed_for_strict_gpt56(
+    tmp_path: Path,
+) -> None:
+    compat = load_compat()
+    relative = "dist/src/browser/actions/thinkingTime.js"
+    package = tmp_path / "package"
+    target = package / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes(PRISTINE_THINKING_TIME_0180)
+    compat._apply_patch(
+        package,
+        compat.patch_root("0.18.0") / compat.VERSION_PATCHES["0.18.0"][relative]["patch"],
+    )
+    source = thinking_source_for_harness(target)
+    harness = r"""
+const MENU_CONTAINER_SELECTOR = '[data-testid="model-menu"]';
+const MENU_ITEM_SELECTOR = '[role="menuitem"]';
+const MODEL_BUTTON_SELECTOR = '[data-testid="model-button"]';
+const logDomFailure = async () => {};
+const buildClickDispatcher = () => '';
+const disabled = {
+  status: 'option-disabled',
+  label: 'Extra High',
+  notice: 'weekly cap reached',
+  modelKind: 'standard',
+  diagnostic: {},
+};
+const Runtime = { evaluate: async () => ({ result: { value: disabled } }) };
+const proDisabled = {
+  status: 'option-disabled',
+  label: 'Pro',
+  notice: 'monthly cap reached',
+  modelKind: 'standard',
+  diagnostic: {
+    modelButton: { text: 'Pro' },
+    menus: [{ items: [
+      { testid: 'composer-model-picker-slider-simple-view', text: 'Power 5 of 5 Pro' },
+      { testid: 'composer-model-picker-slider-advanced-view', text: 'Model GPT-5.6 Sol Effort Pro' },
+    ] }],
+  },
+};
+let proCalls = 0;
+const ProRuntime = {
+  evaluate: async () => ({
+    result: {
+      value: ++proCalls === 1 ? proDisabled : 'oracle-gpt56-pro-visible-proof-v1',
+    },
+  }),
+};
+const logs = [];
+const logger = (message) => logs.push(message);
+logger.verbose = false;
+const outcome = {};
+try {
+  await ensureThinkingTime(Runtime, 'extra-high', logger, 'gpt-5.6-sol');
+  outcome.strict = { threw: false };
+} catch (error) {
+  outcome.strict = {
+    threw: true,
+    name: error.name,
+    message: error.message,
+    stage: error.details?.stage ?? null,
+    confirmedTarget: error.confirmedTarget,
+  };
+}
+try {
+  await ensureThinkingTime(ProRuntime, 'heavy', logger, 'gpt-5.6-sol');
+  outcome.heavy = { threw: false, calls: proCalls };
+} catch (error) {
+  outcome.heavy = {
+    threw: true,
+    name: error.name,
+    message: error.message,
+    stage: error.details?.stage ?? null,
+    confirmedTarget: error.confirmedTarget,
+    calls: proCalls,
+  };
+}
+await ensureThinkingTime(Runtime, 'standard', logger, 'gpt-5.6-sol');
+outcome.nonStrictLogs = logs;
+console.log(JSON.stringify(outcome));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module"],
+        input=source + harness,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=True,
+    )
+    outcome = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert outcome["strict"] == {
+        "threw": True,
+        "name": "ThinkingTierUnavailableError",
+        "message": (
+            "Thinking time: Extra High is unavailable on this account "
+            "(weekly cap reached); refusing to submit without confirmed "
+            "Power 4 of 5 (Extra High)."
+        ),
+        "stage": "thinking-tier-unavailable",
+        "confirmedTarget": "Power 4 of 5 (Extra High)",
+    }
+    assert outcome["heavy"] == {
+        "threw": True,
+        "name": "ThinkingTierUnavailableError",
+        "message": (
+            "Thinking time: Pro is unavailable on this account "
+            "(monthly cap reached); refusing to submit without confirmed "
+            "Power 5 of 5 (Pro)."
+        ),
+        "stage": "thinking-tier-unavailable",
+        "confirmedTarget": "Power 5 of 5 (Pro)",
+        "calls": 1,
+    }
+    assert outcome["nonStrictLogs"][-1] == (
+        "[browser] Thinking time: Extra High is unavailable on this account "
+        "(weekly cap reached); keeping the effort already selected in ChatGPT."
+    )
+
+
+def test_oracle_0180_power_4_and_5_proofs_remain_visible_stable_and_bound(
+    tmp_path: Path,
+) -> None:
+    hidden_calls, hidden_error, _ = run_gpt56_pro_diagnostic_recovery_case(
+        tmp_path / "hidden",
+        states=[True, True],
+        hidden_ancestor=True,
+        version="0.18.0",
+    )
+    stable_calls, stable_error, stable_logs = run_gpt56_pro_diagnostic_recovery_case(
+        tmp_path / "stable",
+        states=[True, True],
+        version="0.18.0",
+    )
+    results = run_gpt56_0172_advanced_owner_cases(
+        tmp_path / "advanced",
+        version="0.18.0",
+    )
+
+    assert hidden_calls == stable_calls == 2
+    assert "refusing to submit" in str(hidden_error)
+    assert stable_error is None
+    assert stable_logs == ["[browser] Thinking time: Power 5 of 5 (Pro) (already selected)"]
+    assert results["power4-owned"] == {"status": "already-selected", "observations": 2}
+    assert results["power4-control-text-mismatch"]["status"] == "selection-unverified"
+    assert results["split-picker"]["status"] == "selection-unverified"
 
 
 def test_oracle_0173_pro_diagnostic_proof_is_visible_stable_and_same_picker(

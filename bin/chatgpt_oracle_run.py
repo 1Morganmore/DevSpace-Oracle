@@ -125,6 +125,17 @@ DEVSPACE_READINESS_CHECKS = (
     "devspace_compatibility",
     "devspace_endpoint",
 )
+SEMANTIC_COMPLETION_OUTCOMES = frozenset({
+    "executed",
+    "not_applicable",
+    "legacy_unclassified",
+})
+
+
+def semantic_completion_outcome(task_outcome: object) -> bool:
+    return task_outcome in SEMANTIC_COMPLETION_OUTCOMES
+
+
 
 
 def detect_tailscale_hostname(
@@ -894,9 +905,28 @@ def promote_terminal_harvest_candidate(
     *,
     candidate_path: Path,
     expected_candidate_sha256: str,
+    platform_name: str | None = None,
 ) -> dict[str, Any]:
     """Promote one already observed terminal candidate without launching Oracle."""
     directory = run_dir.expanduser().resolve(strict=True)
+    with STATE.exact_run_recovery_mutex(
+        directory,
+        timeout_seconds=30,
+        platform_name=platform_name,
+    ):
+        return _promote_terminal_harvest_candidate_locked(
+            directory,
+            candidate_path=candidate_path,
+            expected_candidate_sha256=expected_candidate_sha256,
+        )
+
+
+def _promote_terminal_harvest_candidate_locked(
+    directory: Path,
+    *,
+    candidate_path: Path,
+    expected_candidate_sha256: str,
+) -> dict[str, Any]:
     state_path = directory / "state.json"
     state = STATE.load_state(state_path)
     if str(state.get("session_authority") or "") != "terminal_observed":
@@ -953,13 +983,22 @@ def promote_terminal_harvest_candidate(
         contract=str(state.get("task_outcome_contract") or "legacy"),
         transport=str(state.get("transport") or "devspace"),
     )
+    semantic_complete = semantic_completion_outcome(task_outcome)
+    status = "complete" if semantic_complete else "attention_required"
     updated = STATE.update_state(
-        state_path, status="complete", exit_code=state.get("exit_code"), session_authority="terminal",
+        state_path, status=status, exit_code=state.get("exit_code"), session_authority="terminal",
         terminal_harvested=True, artifact_sha256=actual_sha256, transport_status="complete",
         task_outcome=task_outcome, task_outcome_reason="deterministic-terminal-candidate-promotion",
     )
-    return {"ok": True, "status": "complete", "run_dir": str(directory), "output_path": str(output_path),
-            "candidate_path": str(candidate), "artifact_sha256": actual_sha256, "result": updated}
+    return {
+        "ok": semantic_complete,
+        "status": status,
+        "run_dir": str(directory),
+        "output_path": str(output_path),
+        "candidate_path": str(candidate),
+        "artifact_sha256": actual_sha256,
+        "result": updated,
+    }
 
 
 def execute_run(
@@ -1233,6 +1272,64 @@ def execute_run(
                 "result": settled,
             }
         return {"ok": False, "run_dir": str(layout.run_dir), "result": failed}
+
+
+    with STATE.project_submit_mutex(
+        mutex_root,
+        timeout_seconds=config.submit_mutex_timeout_seconds,
+        platform_name=platform_name,
+    ):
+        with STATE.exact_run_recovery_mutex(
+            layout.run_dir,
+            timeout_seconds=30,
+            platform_name=platform_name,
+        ):
+            return _finalize_run_after_process_wait(
+                layout,
+                config,
+                exit_code=exit_code,
+                watchdog_expired=watchdog_expired,
+                watchdog_timeout_seconds=watchdog_timeout_seconds,
+                oracle_process_pid=oracle_process_pid,
+            )
+
+
+def _finalize_run_after_process_wait(
+    layout: Any,
+    config: Any,
+    *,
+    exit_code: int | None,
+    watchdog_expired: bool,
+    watchdog_timeout_seconds: float | None,
+    oracle_process_pid: int | None,
+) -> dict[str, Any]:
+    latest = STATE.load_state(layout.state_path)
+    latest_output = Path(
+        str((latest.get("artifacts") or {}).get("output") or layout.output_path)
+    )
+    latest_task_outcome = str(
+        latest.get("task_outcome")
+        or (
+            "legacy_unclassified"
+            if config.task_outcome_contract != "v1"
+            else "unknown"
+        )
+    )
+    latest_semantic_complete = semantic_completion_outcome(latest_task_outcome)
+    if (
+        latest.get("session_authority") == "terminal"
+        and latest.get("terminal_harvested") is True
+        and STATE.output_is_nonempty(latest_output)
+    ):
+        STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
+        return {
+            "ok": latest_semantic_complete,
+            "status": "complete" if latest_semantic_complete else "attention_required",
+            "run_dir": str(layout.run_dir),
+            "result": latest,
+            "output_path": str(latest_output),
+            "monotonic_race_preserved": True,
+        }
     STATE.write_transcript(layout)
     if watchdog_expired:
         state = STATE.update_state(
@@ -1293,11 +1390,7 @@ def execute_run(
         if transport_complete
         else "pending"
     )
-    semantic_complete = task_outcome in {
-        "executed",
-        "not_applicable",
-        "legacy_unclassified",
-    }
+    semantic_complete = semantic_completion_outcome(task_outcome)
     status = "complete" if transport_complete and semantic_complete else "attention_required"
     if transport_complete:
         state = STATE.update_state(
@@ -1446,15 +1539,15 @@ def _recover_run_locked(
             conversation_url=historical_url,
         )
     if (
-        state.get("status") == "complete"
-        and state.get("session_authority") == "terminal"
+        state.get("session_authority") == "terminal"
         and state.get("terminal_harvested") is True
         and STATE.output_is_nonempty(Path(str(state["artifacts"]["output"])))
     ):
         outcome = str(state.get("task_outcome") or "legacy_unclassified")
+        semantic_complete = semantic_completion_outcome(outcome)
         return {
-            "ok": outcome in {"executed", "not_applicable", "legacy_unclassified"},
-            "status": "complete",
+            "ok": semantic_complete,
+            "status": "complete" if semantic_complete else "attention_required",
             "run_dir": str(directory),
             "action": "none",
             "result": state,
@@ -1748,18 +1841,20 @@ def _recover_run_locked(
         if harvested
         else "pending"
     )
-    semantic_complete = task_outcome in {
-        "executed",
-        "not_applicable",
-        "legacy_unclassified",
-    }
+    semantic_complete = semantic_completion_outcome(task_outcome)
     status = "complete" if harvested and semantic_complete else "attention_required"
     latest = STATE.load_state(layout.state_path)
     latest_output = Path(str(latest.get("artifacts", {}).get("output") or output_path))
-    if latest.get("status") == "complete" and STATE.output_is_nonempty(latest_output):
+    if (
+        latest.get("session_authority") == "terminal"
+        and latest.get("terminal_harvested") is True
+        and STATE.output_is_nonempty(latest_output)
+    ):
+        latest_outcome = str(latest.get("task_outcome") or "legacy_unclassified")
+        latest_semantic_complete = semantic_completion_outcome(latest_outcome)
         return {
-            "ok": True,
-            "status": "complete",
+            "ok": latest_semantic_complete,
+            "status": "complete" if latest_semantic_complete else "attention_required",
             "run_dir": str(directory),
             "action": action,
             "exit_code": exit_code,
@@ -1810,8 +1905,29 @@ def adjudicate_task_outcome(
     expected_output_sha256: str,
     task_outcome: str,
     reason: str,
+    platform_name: str | None = None,
 ) -> dict[str, Any]:
     directory = run_dir.expanduser().resolve(strict=True)
+    with STATE.exact_run_recovery_mutex(
+        directory,
+        timeout_seconds=30,
+        platform_name=platform_name,
+    ):
+        return _adjudicate_task_outcome_locked(
+            directory,
+            expected_output_sha256=expected_output_sha256,
+            task_outcome=task_outcome,
+            reason=reason,
+        )
+
+
+def _adjudicate_task_outcome_locked(
+    directory: Path,
+    *,
+    expected_output_sha256: str,
+    task_outcome: str,
+    reason: str,
+) -> dict[str, Any]:
     state_path = directory / "state.json"
     state = STATE.load_state(state_path)
     output_path = Path(str((state.get("artifacts") or {}).get("output") or ""))
@@ -1886,16 +2002,36 @@ def settle_user_confirmed_no_submission(
         else project_root
     )
     with STATE.project_submit_mutex(mutex_root, timeout_seconds=30, platform_name=platform_name):
-        settled = STATE.settle_user_confirmed_no_submission(
-            state_path,
-            confirmation=confirmation,
-            reason=reason,
-        )
-        owners = STATE.unresolved_project_sessions(
-            directory.parent,
-            project_root,
-            exclude_run_id=str(settled.get("run_id") or ""),
-        )
+        with STATE.exact_run_recovery_mutex(
+            directory,
+            timeout_seconds=30,
+            platform_name=platform_name,
+        ):
+            current = STATE.load_state(state_path)
+            current_project_root = Path(
+                str(current.get("project_root") or "")
+            ).expanduser().resolve(strict=True)
+            current_parallel_parent_id = str(
+                current.get("parallel_parent_id") or ""
+            ).strip().casefold()
+            if (
+                current_project_root != project_root
+                or current_parallel_parent_id != parallel_parent_id
+            ):
+                raise OracleRunError(
+                    "SETTLEMENT_MUTEX_SCOPE_CHANGED",
+                    "run mutex routing changed before settlement revalidation",
+                )
+            settled = STATE.settle_user_confirmed_no_submission(
+                state_path,
+                confirmation=confirmation,
+                reason=reason,
+            )
+            owners = STATE.unresolved_project_sessions(
+                directory.parent,
+                project_root,
+                exclude_run_id=str(settled.get("run_id") or ""),
+            )
     return {
         "ok": True,
         "status": "pre_submit_user_confirmed",
@@ -1923,7 +2059,6 @@ def recover_run(
 ) -> dict[str, Any]:
     directory = run_dir.expanduser().resolve(strict=True)
     stored = STATE.load_state(directory / "state.json")
-    project_root = Path(str(stored.get("project_root") or "")).expanduser().resolve(strict=True)
     parallel_parent_id = str(stored.get("parallel_parent_id") or "").strip().casefold()
     if parallel_parent_id and STATE.PARENT_ID_RE.fullmatch(parallel_parent_id) is None:
         raise OracleRunError(
@@ -1931,13 +2066,8 @@ def recover_run(
             "stored parallel parent id is invalid",
             {"parallel_parent_id": parallel_parent_id},
         )
-    mutex_root = (
-        project_root / ".oracle-parallel-submit" / parallel_parent_id
-        if parallel_parent_id
-        else project_root
-    )
-    with STATE.project_submit_mutex(
-        mutex_root,
+    with STATE.exact_run_recovery_mutex(
+        directory,
         timeout_seconds=30,
         platform_name=platform_name,
     ):

@@ -7,3 +7,6 @@ tests/fixtures/oracle-0.17.3/assistantResponse.pristine.js text eol=lf
 tests/fixtures/oracle-0.17.3/browserConfig.pristine.js text eol=lf
 tests/fixtures/oracle-0.17.3/browserIndex.pristine.js text eol=lf
 tests/fixtures/oracle-0.17.3/thinkingTime.pristine.js text eol=lf
+bin/devspace-compat/1.0.7/oauth-refresh-replay.patch text eol=lf whitespace=-blank-at-eol
+bin/oracle-compat/0.18.0/*.patch text eol=lf whitespace=-blank-at-eol
+tests/fixtures/oracle-0.18.0/*.js text eol=lf

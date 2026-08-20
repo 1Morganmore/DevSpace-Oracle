@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -54,7 +55,7 @@ def manifest(tmp_path: Path, *, test_profile: bool = True, **extra) -> Path:
         "oracle_command": [
             "npx.cmd" if os.name == "nt" else "npx",
             "-y",
-            "@steipete/oracle@0.17.3",
+            "@steipete/oracle@0.18.0",
         ],
     }
     if test_profile and "copy_profile" not in extra:
@@ -138,7 +139,7 @@ def pro_devspace_manifest(tmp_path: Path, prompt_text: str = "pro instructions",
 
 
 def version_runner(command, **kwargs):
-    return subprocess.CompletedProcess(command, 0, stdout="oracle 0.17.3\n", stderr="")
+    return subprocess.CompletedProcess(command, 0, stdout="oracle 0.18.0\n", stderr="")
 
 
 def recovery_version_runner(command, **kwargs):
@@ -377,13 +378,13 @@ def test_version_resolution_allows_a_bounded_slow_valid_oracle_0173() -> None:
     def slow_valid(command, **kwargs):
         captured["command"] = command
         captured["timeout"] = kwargs["timeout"]
-        return subprocess.CompletedProcess(command, 0, stdout="oracle 0.17.3\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="oracle 0.18.0\n", stderr="")
 
     assert runner.resolve_oracle_version(
-        ["npx.cmd", "-y", "@steipete/oracle@0.17.3"], run_factory=slow_valid
-    ) == "oracle 0.17.3"
+        ["npx.cmd", "-y", "@steipete/oracle@0.18.0"], run_factory=slow_valid
+    ) == "oracle 0.18.0"
     assert captured == {
-        "command": ["npx.cmd", "-y", "@steipete/oracle@0.17.3", "--version"],
+        "command": ["npx.cmd", "-y", "@steipete/oracle@0.18.0", "--version"],
         "timeout": runner.ORACLE_VERSION_RESOLUTION_TIMEOUT_SECONDS,
     }
     assert runner.ORACLE_VERSION_RESOLUTION_TIMEOUT_SECONDS == 90
@@ -395,19 +396,19 @@ def test_validated_package_root_is_the_exact_runtime_popen_target(tmp_path: Path
     cli = root / "dist" / "bin" / "oracle-cli.js"
     cli.parent.mkdir(parents=True)
     cli.write_text("// exact validated cli", encoding="utf-8")
-    (root / "package.json").write_text(json.dumps({"version": "0.17.3"}), encoding="utf-8")
+    (root / "package.json").write_text(json.dumps({"version": "0.18.0"}), encoding="utf-8")
     node = tmp_path / "node.exe"
     node.write_bytes(b"node")
     compatibility = {
         "ok": True,
-        "version": "0.17.3",
+        "version": "0.18.0",
         "package_root": str(root),
         "package_roots": [str(root)],
     }
 
     runtime_command = runner.validated_oracle_runtime_command(
         compatibility,
-        "oracle 0.17.3",
+        "oracle 0.18.0",
         which_runner=lambda name: str(node),
     )
     assert runtime_command == (str(node.resolve()), str(cli.resolve()))
@@ -456,17 +457,17 @@ def test_validated_runtime_rejects_an_unlisted_compatibility_root(tmp_path: Path
     runner = load_runner()
     root = tmp_path / "oracle"
     root.mkdir()
-    (root / "package.json").write_text(json.dumps({"version": "0.17.3"}), encoding="utf-8")
+    (root / "package.json").write_text(json.dumps({"version": "0.18.0"}), encoding="utf-8")
 
     with pytest.raises(runner.OracleRunError) as exc:
         runner.validated_oracle_runtime_command(
             {
                 "ok": True,
-                "version": "0.17.3",
+                "version": "0.18.0",
                 "package_root": str(root),
                 "package_roots": [str(tmp_path / "different")],
             },
-            "0.17.3",
+            "0.18.0",
             which_runner=lambda name: str(tmp_path / "node.exe"),
         )
 
@@ -477,7 +478,7 @@ def test_default_oracle_command_is_pinned_to_the_hash_validated_version() -> Non
     runner = load_runner()
 
     assert runner.STATE.default_oracle_command(platform_name="nt") == (
-        "npx.cmd", "-y", "@steipete/oracle@0.17.3",
+        "npx.cmd", "-y", "@steipete/oracle@0.18.0",
     )
     with pytest.raises(runner.STATE.OracleStateError) as exc:
         runner.STATE.validate_oracle_command(["npx.cmd", "-y", "@steipete/oracle@0.16.1"])
@@ -980,7 +981,7 @@ def test_complete_requires_zero_exit_and_nonempty_output(tmp_path: Path) -> None
         result = execute_run(runner, manifest(root), run_factory=version_runner, popen_factory=popen_for(code, output, captured, events))
         assert result["ok"] is ok
         assert result["result"]["status"] == status
-        assert result["result"]["oracle"]["resolved_version"] == "oracle 0.17.3"
+        assert result["result"]["oracle"]["resolved_version"] == "oracle 0.18.0"
         assert "--file" not in captured["command"]
         assert events == ["popen", "wait"]
         assert Path(result["result"]["artifacts"]["transcript"]).is_file()
@@ -1345,6 +1346,378 @@ def test_host_watchdog_deadline_race_accepts_only_a_process_that_already_exited(
     assert result["result"]["host_watchdog"]["status"] == "process-exited"
 
 
+
+def test_recovery_ignores_held_project_mutex_and_late_observer_preserves_terminal(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+    project_lock = {"held": False}
+    recovered_in_wait: list[dict] = []
+    recovery_launches: list[list[str]] = []
+    original_output: Path | None = None
+
+    class ProjectMutex:
+        def __enter__(self):
+            assert project_lock["held"] is False
+            project_lock["held"] = True
+            return self
+
+        def __exit__(self, *args):
+            project_lock["held"] = False
+            return None
+
+    runner.STATE.project_submit_mutex = lambda *args, **kwargs: ProjectMutex()
+
+    def terminal_recovery(command, **kwargs):
+        assert project_lock["held"] is True
+        recovery_launches.append(list(command))
+        candidate = Path(command[command.index("--write-output") + 1])
+        candidate.write_text("durable recovered answer", encoding="utf-8")
+        kwargs["stdout"].write(b"State: completed\n")
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    class LateOriginalProcess:
+        pid = 5151
+
+        def wait(self, timeout=None):
+            assert project_lock["held"] is True
+            assert original_output is not None
+            recovered_in_wait.append(
+                recover_run(
+                    runner,
+                    original_output.parent,
+                    action="harvest",
+                    popen_factory=terminal_recovery,
+                )
+            )
+            return 9
+
+    def late_original_popen(command, **kwargs):
+        nonlocal original_output
+        original_output = Path(command[command.index("--write-output") + 1])
+        kwargs["stdout"].write(b"State: running\n")
+        kwargs["stdout"].flush()
+        return LateOriginalProcess()
+
+    result = execute_run(
+        runner,
+        manifest(tmp_path, run_id="6" * 32),
+        run_factory=version_runner,
+        popen_factory=late_original_popen,
+    )
+
+    assert project_lock["held"] is False
+    assert len(recovery_launches) == 1
+    assert recovered_in_wait[0]["status"] == "complete"
+    assert result["ok"] is True
+    assert result["status"] == "complete"
+    assert result["monotonic_race_preserved"] is True
+    assert result["result"] == recovered_in_wait[0]["result"]
+    assert Path(result["output_path"]).read_text(encoding="utf-8") == "durable recovered answer"
+
+
+@pytest.mark.parametrize(
+    ("candidate_text", "expected_outcome"),
+    [
+        ("workspace access denied\nTASK_OUTCOME: BLOCKED\n", "blocked"),
+        ("workspace never opened\nTASK_OUTCOME: NOT_EXECUTED\n", "not_executed"),
+        ("terminal response without an outcome marker", "unknown"),
+    ],
+)
+def test_post_wait_terminal_fast_path_preserves_semantic_attention(
+    tmp_path: Path,
+    candidate_text: str,
+    expected_outcome: str,
+) -> None:
+    runner = load_runner()
+    original_output: Path | None = None
+
+    def terminal_recovery(command, **kwargs):
+        candidate = Path(command[command.index("--write-output") + 1])
+        candidate.write_text(candidate_text, encoding="utf-8")
+        kwargs["stdout"].write(b"State: completed\n")
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    class LateOriginalProcess:
+        pid = 5252
+
+        def wait(self, timeout=None):
+            assert original_output is not None
+            recovered = recover_run(
+                runner,
+                original_output.parent,
+                action="harvest",
+                popen_factory=terminal_recovery,
+            )
+            assert recovered["status"] == "attention_required"
+            return 9
+
+    def late_original_popen(command, **kwargs):
+        nonlocal original_output
+        original_output = Path(command[command.index("--write-output") + 1])
+        return LateOriginalProcess()
+
+    result = execute_run(
+        runner,
+        manifest(
+            tmp_path,
+            run_id={
+                "blocked": "a",
+                "not_executed": "b",
+                "unknown": "c",
+            }[expected_outcome]
+            * 32,
+            task_outcome_contract="v1",
+        ),
+        run_factory=version_runner,
+        popen_factory=late_original_popen,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "attention_required"
+    assert result["monotonic_race_preserved"] is True
+    assert result["result"]["task_outcome"] == expected_outcome
+
+
+
+
+def test_post_wait_guard_and_final_mutation_exclude_late_recovery_commit(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+    process_waited = threading.Event()
+    recovery_blocked_on_original = threading.Event()
+    recovery_launched = threading.Event()
+    exact_lock = threading.Lock()
+    owner_lock = threading.Lock()
+    owner = {"thread": None}
+    recovery_threads: list[threading.Thread] = []
+    recovery_results: list[dict] = []
+    recovery_errors: list[BaseException] = []
+
+    class ExactMutex:
+        def __enter__(self):
+            name = threading.current_thread().name
+            with owner_lock:
+                if owner["thread"] is not None:
+                    assert owner["thread"] == "MainThread"
+                    recovery_blocked_on_original.set()
+            exact_lock.acquire()
+            with owner_lock:
+                owner["thread"] = name
+            return self
+
+        def __exit__(self, *args):
+            with owner_lock:
+                owner["thread"] = None
+            exact_lock.release()
+            return None
+
+    runner.STATE.exact_run_recovery_mutex = lambda *args, **kwargs: ExactMutex()
+    original_load_state = runner.STATE.load_state
+    recovery_started = {"value": False}
+
+    def terminal_recovery(command, **kwargs):
+        recovery_launched.set()
+        candidate = Path(command[command.index("--write-output") + 1])
+        candidate.write_text(
+            "late durable recovery\nTASK_OUTCOME: EXECUTED\n",
+            encoding="utf-8",
+        )
+        kwargs["stdout"].write(b"State: completed\n")
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    def guarded_load_state(path):
+        payload = original_load_state(path)
+        if (
+            process_waited.is_set()
+            and threading.current_thread().name == "MainThread"
+            and not recovery_started["value"]
+        ):
+            recovery_started["value"] = True
+
+            def recover_after_guard() -> None:
+                try:
+                    recovery_results.append(
+                        recover_run(
+                            runner,
+                            Path(path).parent,
+                            action="harvest",
+                            popen_factory=terminal_recovery,
+                        )
+                    )
+                except BaseException as exc:
+                    recovery_errors.append(exc)
+
+            thread = threading.Thread(
+                name="late-recovery",
+                target=recover_after_guard,
+            )
+            recovery_threads.append(thread)
+            thread.start()
+            assert recovery_blocked_on_original.wait(timeout=5)
+            assert recovery_launched.is_set() is False
+        return payload
+
+    runner.STATE.load_state = guarded_load_state
+
+    class OriginalProcess:
+        pid = 5353
+
+        def wait(self, timeout=None):
+            process_waited.set()
+            return 9
+
+    original = execute_run(
+        runner,
+        manifest(
+            tmp_path,
+            run_id="f" * 32,
+            task_outcome_contract="v1",
+        ),
+        run_factory=version_runner,
+        popen_factory=lambda command, **kwargs: OriginalProcess(),
+    )
+    for thread in recovery_threads:
+        thread.join(timeout=5)
+
+    assert original["ok"] is False
+    assert recovery_errors == []
+    assert len(recovery_results) == 1
+    assert recovery_results[0]["ok"] is True
+    assert all(not thread.is_alive() for thread in recovery_threads)
+    final = original_load_state(Path(original["run_dir"]) / "state.json")
+    assert final["status"] == "complete"
+    assert final["session_authority"] == "terminal"
+    assert final["terminal_harvested"] is True
+    assert final["task_outcome"] == "executed"
+
+
+def test_two_exact_recovery_writers_are_serialized_per_run(tmp_path: Path) -> None:
+    runner = load_runner()
+    initial = execute_run(
+        runner,
+        manifest(tmp_path, run_id="7" * 32),
+        run_factory=version_runner,
+        popen_factory=popen_for(4, None, {}, []),
+    )
+    run_dir = Path(initial["run_dir"])
+    serialization_lock = threading.Lock()
+    counters_lock = threading.Lock()
+    counters = {"active": 0, "maximum": 0, "mutex_calls": 0, "launches": 0}
+
+    class SerialRecoveryMutex:
+        def __enter__(self):
+            serialization_lock.acquire()
+            with counters_lock:
+                counters["active"] += 1
+                counters["maximum"] = max(counters["maximum"], counters["active"])
+            return self
+
+        def __exit__(self, *args):
+            with counters_lock:
+                counters["active"] -= 1
+            serialization_lock.release()
+            return None
+
+    def exact_mutex(directory, **kwargs):
+        assert Path(directory) == run_dir
+        with counters_lock:
+            counters["mutex_calls"] += 1
+        return SerialRecoveryMutex()
+
+    runner.STATE.exact_run_recovery_mutex = exact_mutex
+
+    def terminal_recovery(command, **kwargs):
+        with counters_lock:
+            counters["launches"] += 1
+        candidate = Path(command[command.index("--write-output") + 1])
+        candidate.write_text("one durable recovery", encoding="utf-8")
+        kwargs["stdout"].write(b"State: completed\n")
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    start = threading.Barrier(3)
+    results: list[dict] = []
+    errors: list[BaseException] = []
+
+    def writer() -> None:
+        try:
+            start.wait(timeout=5)
+            result = recover_run(
+                runner,
+                run_dir,
+                action="harvest",
+                popen_factory=terminal_recovery,
+            )
+            with counters_lock:
+                results.append(result)
+        except Exception as exc:
+            with counters_lock:
+                errors.append(exc)
+
+    writers = [threading.Thread(target=writer) for _ in range(2)]
+    for writer_thread in writers:
+        writer_thread.start()
+    start.wait(timeout=5)
+    for writer_thread in writers:
+        writer_thread.join(timeout=5)
+
+    assert all(not writer_thread.is_alive() for writer_thread in writers)
+    assert errors == []
+    assert counters == {
+        "active": 0,
+        "maximum": 1,
+        "mutex_calls": 2,
+        "launches": 1,
+    }
+    assert len(results) == 2
+    assert all(result["status"] == "complete" for result in results)
+    assert sum(result.get("monotonic_noop") is True for result in results) == 1
+
+
+def test_live_recovery_keeps_fresh_submission_blocked_by_unresolved_owner(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+    initial = execute_run(
+        runner,
+        manifest(tmp_path, run_id="8" * 32),
+        run_factory=version_runner,
+        popen_factory=popen_for(4, None, {}, []),
+    )
+    run_dir = Path(initial["run_dir"])
+
+    def running_recovery(command, **kwargs):
+        kwargs["stdout"].write(b"State: running\n")
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    recovered = recover_run(
+        runner,
+        run_dir,
+        action="live",
+        popen_factory=running_recovery,
+    )
+    fresh_launches: list[list[str]] = []
+    fresh = execute_run(
+        runner,
+        manifest(tmp_path, run_id="9" * 32),
+        run_factory=version_runner,
+        popen_factory=lambda command, **kwargs: fresh_launches.append(list(command)),
+    )
+
+    assert recovered["status"] == "session_live"
+    assert recovered["result"]["session_authority"] == "live"
+    assert fresh["ok"] is False
+    assert fresh_launches == []
+    assert "still owns this project" in Path(
+        fresh["result"]["artifacts"]["stderr"]
+    ).read_text(encoding="utf-8")
+
 def test_pro_recovery_uses_exact_slug_without_attachments_or_resubmit(tmp_path: Path) -> None:
     runner = load_runner()
     result = execute_run(
@@ -1397,7 +1770,10 @@ def test_historical_0161_recovery_replaces_the_unpinned_stored_command(tmp_path:
     assert recovery["argv"][:3] == ["npx.cmd", "-y", "@steipete/oracle@0.16.1"]
 
 
-@pytest.mark.parametrize("stored_version", ["0.16.1", "0.17.0", "0.17.1", "0.17.2", "0.17.3"])
+@pytest.mark.parametrize(
+    "stored_version",
+    ["0.16.1", "0.17.0", "0.17.1", "0.17.2", "0.17.3", "0.18.0"],
+)
 def test_recovery_resolves_and_compat_checks_the_exact_stored_version(
     tmp_path: Path,
     stored_version: str,
@@ -1541,7 +1917,7 @@ def test_recovery_compat_hash_failure_never_popens(tmp_path: Path) -> None:
     assert launched == []
 
 
-@pytest.mark.parametrize("stored_version", [None, "oracle 0.18.0"])
+@pytest.mark.parametrize("stored_version", [None, "oracle 0.19.0"])
 def test_recovery_rejects_missing_or_unrecognized_stored_version_without_popen(
     tmp_path: Path,
     stored_version: str | None,
@@ -1603,7 +1979,16 @@ def test_windows_launch_uses_no_window_and_waits(tmp_path: Path) -> None:
     assert Path(captured["kwargs"]["env"]["TEMP"]).name == "browser-temp"
     assert captured["kwargs"]["env"]["TMP"] == captured["kwargs"]["env"]["TEMP"]
     assert not Path(captured["kwargs"]["env"]["TEMP"]).exists()
-    assert events == ["enter", "owner", "endpoint", "popen", "wait", "exit"]
+    assert events == [
+        "enter",
+        "owner",
+        "endpoint",
+        "popen",
+        "wait",
+        "exit",
+        "enter",
+        "exit",
+    ]
 
 
 def test_transport_mission_change_blocks_before_oracle_launch(tmp_path: Path) -> None:
@@ -2103,9 +2488,9 @@ def test_recovery_settles_0172_strict_thinking_time_failure_and_releases_project
 ) -> None:
     """A stored 0.17.2 run keeps its exact strict-thinking-time settlement.
 
-    The strict thinking-time patch shipped in both the 0.17.2 (now
-    exact-recovery-only) and the active runtime, so recovery must still prove
-    the marker and release the project after the 0.17.3 promotion.
+    The strict thinking-time patch shipped in 0.17.2 and 0.17.3 (now
+    exact-recovery-only) as well as the active runtime, so recovery must still prove
+    the marker and release the project after the 0.18.0 promotion.
     """
     runner = load_runner()
     manifest_path = pro_manifest(tmp_path) if pro_mode else manifest(tmp_path)
@@ -2276,9 +2661,9 @@ def test_recovery_settles_0172_model_switcher_failure_and_releases_project(
 ) -> None:
     """A stored 0.17.2 run keeps its exact model-switcher settlement.
 
-    The model-switcher/no-cookie diagnostic shipped in both the 0.17.2 (now
-    exact-recovery-only) and the active runtime, so recovery must still prove
-    the marker and release the project after the 0.17.3 promotion.
+    The model-switcher/no-cookie diagnostic shipped in 0.17.2 and 0.17.3 (now
+    exact-recovery-only) as well as the active runtime, so recovery must still prove
+    the marker and release the project after the 0.18.0 promotion.
     """
     runner = load_runner()
     manifest_path = pro_manifest(tmp_path, run_id="f" * 32)
@@ -2408,7 +2793,7 @@ CHATGPT_SESSION_ABSENT_MARKER = (
 
 
 def chatgpt_session_absent_popen(command, **kwargs):
-    """Reproduce Oracle 0.17.3 refusing before send on an expired seed profile."""
+    """Reproduce the current Oracle refusing before send on an expired seed profile."""
     slug = command[command.index("--slug") + 1]
     kwargs["stdout"].write(
         (
@@ -2613,6 +2998,141 @@ def test_chatgpt_session_absent_user_confirmation_releases_the_lock_and_allows_a
         popen_factory=popen_for(0, b"answer\nTASK_OUTCOME: EXECUTED\n", {}, []),
     )
     assert second["ok"] is True
+
+
+def test_settlement_waits_for_exact_recovery_and_fresh_submit_stays_blocked(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+    manifest_path = pro_devspace_manifest(tmp_path, run_id="d" * 32)
+    initial = execute_run(
+        runner,
+        manifest_path,
+        run_factory=version_runner,
+        popen_factory=chatgpt_session_absent_popen,
+    )
+    run_dir = Path(initial["run_dir"])
+    fresh_manifest = tmp_path / "fresh-job.json"
+    fresh_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    fresh_payload["run_id"] = "e" * 32
+    fresh_manifest.write_text(json.dumps(fresh_payload), encoding="utf-8")
+
+    project_lock = threading.Lock()
+    exact_lock = threading.Lock()
+    recovery_inside = threading.Event()
+    allow_recovery = threading.Event()
+    settlement_has_project = threading.Event()
+    settlement_waiting_for_exact = threading.Event()
+    fresh_waiting_for_project = threading.Event()
+
+    class ProjectMutex:
+        def __enter__(self):
+            name = threading.current_thread().name
+            if name == "fresh-submit":
+                fresh_waiting_for_project.set()
+            project_lock.acquire()
+            if name == "settlement":
+                settlement_has_project.set()
+            return self
+
+        def __exit__(self, *args):
+            project_lock.release()
+            return None
+
+    class ExactMutex:
+        def __enter__(self):
+            if threading.current_thread().name == "settlement":
+                settlement_waiting_for_exact.set()
+            exact_lock.acquire()
+            return self
+
+        def __exit__(self, *args):
+            exact_lock.release()
+            return None
+
+    runner.STATE.project_submit_mutex = lambda *args, **kwargs: ProjectMutex()
+    runner.STATE.exact_run_recovery_mutex = lambda *args, **kwargs: ExactMutex()
+
+    def live_recovery(command, **kwargs):
+        recovery_inside.set()
+        assert allow_recovery.wait(timeout=5)
+        kwargs["stdout"].write(b"State: running\n")
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    recovery_results: list[dict] = []
+    settlement_errors: list[BaseException] = []
+    fresh_results: list[dict] = []
+    fresh_launches: list[list[str]] = []
+
+    recovery_thread = threading.Thread(
+        name="recovery",
+        target=lambda: recovery_results.append(
+            recover_run(
+                runner,
+                run_dir,
+                action="live",
+                popen_factory=live_recovery,
+            )
+        ),
+    )
+
+    def settle() -> None:
+        try:
+            runner.settle_user_confirmed_no_submission(
+                run_dir,
+                confirmation=runner.STATE.USER_CONFIRMED_NO_SUBMISSION,
+                reason="user inspected the exact run before recovery completed",
+            )
+        except BaseException as exc:
+            settlement_errors.append(exc)
+
+    settlement_thread = threading.Thread(name="settlement", target=settle)
+
+    def submit_fresh() -> None:
+        fresh_results.append(
+            execute_run(
+                runner,
+                fresh_manifest,
+                run_factory=version_runner,
+                popen_factory=popen_for(
+                    0,
+                    b"duplicate submission\nTASK_OUTCOME: EXECUTED\n",
+                    {},
+                    fresh_launches,
+                ),
+            )
+        )
+
+    fresh_thread = threading.Thread(name="fresh-submit", target=submit_fresh)
+    recovery_thread.start()
+    assert recovery_inside.wait(timeout=5)
+    settlement_thread.start()
+    assert settlement_has_project.wait(timeout=5)
+    assert settlement_waiting_for_exact.wait(timeout=5)
+    fresh_thread.start()
+    assert fresh_waiting_for_project.wait(timeout=5)
+
+    assert settlement_thread.is_alive()
+    assert fresh_thread.is_alive()
+    assert fresh_launches == []
+
+    allow_recovery.set()
+    for thread in (recovery_thread, settlement_thread, fresh_thread):
+        thread.join(timeout=5)
+
+    assert all(
+        not thread.is_alive()
+        for thread in (recovery_thread, settlement_thread, fresh_thread)
+    )
+    assert recovery_results[0]["status"] == "session_live"
+    assert len(settlement_errors) == 1
+    assert getattr(settlement_errors[0], "code", "") == "NO_SUBMISSION_AUTHORITY_INVALID"
+    assert fresh_results[0]["ok"] is False
+    assert fresh_launches == []
+    assert "still owns this project" in Path(
+        fresh_results[0]["result"]["artifacts"]["stderr"]
+    ).read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -3595,9 +4115,9 @@ def test_direct_app_route_unconfirmed_with_stored_0172_settles_and_releases_proj
 ) -> None:
     """A stored 0.17.2 run stays eligible for direct app-route adjudication.
 
-    The APP_MENTION_ROUTE_UNCONFIRMED marker shipped in both the 0.17.2 (now
-    exact-recovery-only) and the active runtime, so user settlement of a
-    stored 0.17.2 direct run must still work after the 0.17.3 promotion.
+    The APP_MENTION_ROUTE_UNCONFIRMED marker shipped in 0.17.2 and 0.17.3 (now
+    exact-recovery-only) as well as the active runtime, so user settlement of a
+    stored 0.17.2 direct run must still work after the 0.18.0 promotion.
     """
     runner = load_runner()
     manifest_path = manifest(tmp_path)
@@ -4523,30 +5043,46 @@ def test_recovery_never_downgrades_durable_complete(tmp_path: Path) -> None:
     assert calls == []
 
 
-def test_parallel_recovery_reuses_the_parent_scoped_submit_mutex(tmp_path: Path) -> None:
+def test_parallel_recovery_uses_exact_run_mutex_not_parent_submit_mutex(
+    tmp_path: Path,
+) -> None:
     runner = load_runner()
     parent_id = "a" * 32
-    roots: list[Path] = []
+    submit_roots: list[Path] = []
+    recovery_runs: list[Path] = []
 
     class Mutex:
-        def __init__(self, root: Path):
+        def __init__(self, calls: list[Path], root: Path):
+            self.calls = calls
             self.root = root
 
         def __enter__(self):
-            roots.append(self.root)
+            self.calls.append(self.root)
+            return self
 
         def __exit__(self, *args):
             return None
 
-    runner.STATE.project_submit_mutex = lambda root, **kwargs: Mutex(root)
+    runner.STATE.project_submit_mutex = (
+        lambda root, **kwargs: Mutex(submit_roots, Path(root))
+    )
+    runner.STATE.exact_run_recovery_mutex = (
+        lambda run_dir, **kwargs: Mutex(recovery_runs, Path(run_dir))
+    )
     result = execute_run(
         runner,
         manifest(tmp_path, parallel_parent_id=parent_id),
         run_factory=version_runner,
         popen_factory=popen_for(4, None, {}, []),
     )
+    submit_roots_after_execute = list(submit_roots)
+    recovery_runs_after_execute = list(recovery_runs)
     recovered = recover_run(runner, Path(result["run_dir"]), action="harvest", dry_run=True)
-    expected = tmp_path.resolve() / ".oracle-parallel-submit" / parent_id
+    expected_submit_root = tmp_path.resolve() / ".oracle-parallel-submit" / parent_id
     assert result["result"]["status"] == "attention_required"
     assert recovered["status"] == "dry-run"
-    assert roots == [expected, expected]
+    assert submit_roots_after_execute == [expected_submit_root, expected_submit_root]
+    assert submit_roots == submit_roots_after_execute
+    expected_run = Path(result["run_dir"]).resolve()
+    assert recovery_runs_after_execute == [expected_run]
+    assert recovery_runs == [expected_run, expected_run]

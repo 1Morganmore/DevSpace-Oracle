@@ -1,0 +1,415 @@
+diff --git a/dist/src/browser/actions/thinkingTime.js b/dist/src/browser/actions/thinkingTime.js
+index 2ad047a..d1ec1fb 100644
+--- a/dist/src/browser/actions/thinkingTime.js
++++ b/dist/src/browser/actions/thinkingTime.js
+@@ -65,6 +65,132 @@
+     // own, independently of the legacy Pro-model + "extended" combination.
+     const strictProEffort = level === "pro" ||
+         ((targetModelKind === "pro" || observedModelKind === "pro") && level === "extended");
++    const strictGpt56Effort = /(?:^|[^0-9])5[._ -]6(?:[^0-9]|$)/i.test(desiredModel ?? "") &&
++        (level === "extra-high" || level === "heavy");
++    const strictRequestedEffort = strictProEffort || strictGpt56Effort;
++    const requiredEffortLabel = strictProEffort
++        ? level === "pro" ? "Pro" : "Pro Extended"
++        : level === "heavy" ? "Power 5 of 5 (Pro)" : "Power 4 of 5 (Extra High)";
++    // The in-page selector owns the normal proof. If the picker finished
++    // rendering between that probe and its diagnostic snapshot, require the
++    // same visible, aria-controls-bound picker twice before accepting Pro.
++    const diagnosticItems = (result?.diagnostic?.menus ?? []).flatMap((menu) => menu?.items ?? []);
++    const diagnosticProProof = strictGpt56Effort && level === "heavy" &&
++        String(result?.diagnostic?.modelButton?.text ?? "").trim().toLowerCase() === "pro" &&
++        diagnosticItems.some((item) => item?.testid === "composer-model-picker-slider-simple-view" &&
++            /\bpro\b/i.test(String(item?.text ?? "")) &&
++            /\b5\s+of\s+5\b/i.test(String(item?.text ?? ""))) &&
++        diagnosticItems.some((item) => item?.testid === "composer-model-picker-slider-advanced-view" &&
++            /model\s*gpt-?5[._ -]6\s*sol/i.test(String(item?.text ?? "")) &&
++            /effort\s*pro/i.test(String(item?.text ?? "")));
++    const confirmDiagnosticProProof = async () => {
++        const confirmation = await Runtime.evaluate({
++            expression: `(async () => {
++                const marker = 'oracle-gpt56-pro-visible-proof-v1';
++                const visible = (node, allowSelfOpacityZero = false) => {
++                    const rect = node?.getBoundingClientRect?.();
++                    if (!rect?.width || !rect?.height) return false;
++                    for (let current = node; current; current = current.parentElement) {
++                        const style = window.getComputedStyle(current);
++                        if (style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility) ||
++                            ((!allowSelfOpacityZero || current !== node) && !(Number(style.opacity ?? '1') > 0)) ||
++                            current.getAttribute?.('aria-hidden') === 'true') return false;
++                    }
++                    return true;
++                };
++                const text = (node) => String(node?.textContent ?? '') + ' ' +
++                    String(node?.getAttribute?.('aria-label') ?? '');
++                const pickerRoots = (button) => String(button.getAttribute?.('aria-controls') ?? '')
++                    .trim().split(/\\s+/).filter(Boolean)
++                    .map((id) => document.getElementById(id)).filter(visible);
++                const boundProofScopes = (button) => {
++                    const controlled = pickerRoots(button);
++                    const buttonMenu = button?.closest?.('[role="menu"]');
++                    const ownedControlled = controlled.filter((root) =>
++                        buttonMenu?.contains?.(root));
++                    if (buttonMenu && ownedControlled.length && visible(buttonMenu)) {
++                        return [buttonMenu];
++                    }
++                    return controlled.map((root) => {
++                        const menu = root?.matches?.('[role="menu"]') ? root :
++                            root?.closest?.('[role="menu"]');
++                        return menu && visible(menu) ? menu : root;
++                    });
++                };
++                const readPowerTextValue = (view) => {
++                    const compact = Array.from(String(view?.textContent ?? '').toLowerCase())
++                        .filter((character) =>
++                            (character >= 'a' && character <= 'z') ||
++                            (character >= '0' && character <= '9'))
++                        .join('');
++                    for (let candidate = 1; candidate <= 5; candidate += 1) {
++                        if (compact.includes(String(candidate) + 'of5')) return candidate;
++                    }
++                    return null;
++                };
++                const readPowerValue = (view) => {
++                    const control = view?.querySelector?.('[role="slider"], input[type="range"]') || view;
++                    const rawAttribute = control?.getAttribute?.('aria-valuenow');
++                    const minimumAttribute = control?.getAttribute?.('aria-valuemin');
++                    const maximumAttribute = control?.getAttribute?.('aria-valuemax');
++                    const hasRaw = rawAttribute !== null && rawAttribute !== undefined &&
++                        String(rawAttribute).trim() !== '';
++                    const hasMinimum = minimumAttribute !== null && minimumAttribute !== undefined &&
++                        String(minimumAttribute).trim() !== '';
++                    const hasMaximum = maximumAttribute !== null && maximumAttribute !== undefined &&
++                        String(maximumAttribute).trim() !== '';
++                    let controlValue = null;
++                    if (hasMinimum || hasMaximum) {
++                        if (!hasRaw || !hasMinimum || !hasMaximum) return null;
++                        const raw = Number(rawAttribute);
++                        const minimum = Number(minimumAttribute);
++                        const maximum = Number(maximumAttribute);
++                        if (!Number.isInteger(raw) || minimum !== 0 || maximum !== 4 ||
++                            raw < minimum || raw > maximum) return null;
++                        controlValue = raw + 1;
++                    } else if (hasRaw) {
++                        const raw = Number(rawAttribute);
++                        if (!Number.isInteger(raw) || raw < 1 || raw > 5) return null;
++                        controlValue = raw;
++                    }
++                    const textValue = readPowerTextValue(view);
++                    if (controlValue !== null && textValue !== null &&
++                        controlValue !== textValue) return null;
++                    return controlValue ?? textValue;
++                };
++                const sliderPro = (root) => Array.from(root.querySelectorAll(
++                    '[data-testid="composer-model-picker-slider-simple-view"]',
++                )).some((node) => visible(node, true) && readPowerValue(node) === 5 &&
++                    /\\bpro\\b/i.test(text(node)));
++                const advancedPro = (root) => Array.from(root.querySelectorAll(
++                    '[data-testid="composer-model-picker-slider-advanced-view"]',
++                )).some((node) => visible(node) &&
++                    /model\\s*gpt-?5[._ -]6\\s*sol/i.test(text(node)) &&
++                    /effort\\s*pro/i.test(text(node)));
++                const proof = () => Array.from(document.querySelectorAll(
++                    ${JSON.stringify(MODEL_BUTTON_SELECTOR)},
++                )).some((button) => visible(button) && /\\bpro\\b/i.test(text(button)) &&
++                    boundProofScopes(button)
++                        .some((root) => sliderPro(root) && advancedPro(root)));
++                const deadline = performance.now() + 500;
++                let consecutive = 0;
++                while (performance.now() < deadline) {
++                    consecutive = proof() ? consecutive + 1 : 0;
++                    if (consecutive >= 2) return marker;
++                    await new Promise((resolve) => setTimeout(resolve, 100));
++                }
++                return null;
++            })()`,
++            awaitPromise: true,
++            returnByValue: true,
++        });
++        return confirmation.result?.value === 'oracle-gpt56-pro-visible-proof-v1';
++    };
++    if (result?.status !== "option-disabled" &&
++        diagnosticProProof && await confirmDiagnosticProProof()) {
++        logger(formatBrowserThinkingLog("Power 5 of 5 (Pro) (already selected)"));
++        return;
++    }
+     switch (result?.status) {
+         case "already-selected":
+             logger(formatBrowserThinkingLog(`${result.label ?? capitalizedLevel} (already selected)`));
+@@ -75,8 +201,11 @@
+         case "option-disabled": {
+             await logDomFailure(Runtime, logger, "thinking-option-disabled");
+             logPickerDiagnostic(result, logger);
+-            if (strictProEffort) {
+-                throw new ThinkingTierUnavailableError(level, capitalizedLevel, result.label ?? null, result.notice ?? null, confirmedThinkingTarget(level, capitalizedLevel, targetModelKind, observedModelKind));
++            if (strictRequestedEffort) {
++                const confirmedTarget = strictGpt56Effort
++                    ? requiredEffortLabel
++                    : confirmedThinkingTarget(level, capitalizedLevel, targetModelKind, observedModelKind);
++                throw new ThinkingTierUnavailableError(level, capitalizedLevel, result.label ?? null, result.notice ?? null, confirmedTarget);
+             }
+             // A non-strict caller goes on to submit, so this log must not borrow the
+             // strict error's "refusing to submit" wording: the request really is sent,
+@@ -97,9 +226,8 @@
+                     ? ` for ${targetModelKind}`
+                     : "";
+             const message = `Thinking time: ${result.status.replaceAll("-", " ")}${kindHint} (requested ${capitalizedLevel})`;
+-            if (strictProEffort) {
+-                const target = level === "pro" ? "Pro" : "Pro Extended";
+-                throw new Error(`${message}; refusing to submit without confirmed ${target}.`);
++            if (strictRequestedEffort) {
++                throw new Error(`${message}; refusing to submit without confirmed ${requiredEffortLabel}.`);
+             }
+             // "selection-unverified" is the one status here that already dispatched a
+             // click, so the effort may or may not have moved. Every other status left
+@@ -113,9 +241,8 @@
+         default: {
+             await logDomFailure(Runtime, logger, "thinking-time-unknown");
+             logPickerDiagnostic(result, logger);
+-            if (strictProEffort) {
+-                const target = level === "pro" ? "Pro" : "Pro Extended";
+-                throw new Error(`Thinking time: unknown outcome selecting ${capitalizedLevel}; refusing to submit without confirmed ${target}.`);
++            if (strictRequestedEffort) {
++                throw new Error(`Thinking time: unknown outcome selecting ${capitalizedLevel}; refusing to submit without confirmed ${requiredEffortLabel}.`);
+             }
+             logger(formatBrowserThinkingLog(`unknown outcome selecting ${capitalizedLevel}; continuing with ChatGPT default.`));
+             return;
+@@ -446,12 +573,157 @@
+       // 'intelligen' matches both "Intelligence" and German "Intelligenz".
+       return normalize(label?.textContent ?? '').includes('intelligen');
+     };
+-    const failure = (status, extra = {}) => ({
+-      status,
+-      modelKind: effectiveTargetModelKind(),
+-      ...extra,
+-      diagnostic: collectPickerDiagnostic(),
+-    });
++    const POWER_TARGET = {
++      'extra-high': 4,
++      heavy: 5,
++    }[TARGET_LEVEL] ?? null;
++    const powerSliderControl = (view) => view?.querySelector?.(
++      '[role="slider"], input[type="range"]',
++    ) || view;
++    const readPowerTextValue = (view) => {
++      const compact = Array.from(String(view?.textContent ?? '').toLowerCase())
++        .filter((character) =>
++          (character >= 'a' && character <= 'z') ||
++          (character >= '0' && character <= '9'))
++        .join('');
++      for (let candidate = 1; candidate <= 5; candidate += 1) {
++        if (compact.includes(String(candidate) + 'of5')) return candidate;
++      }
++      return null;
++    };
++    const readPowerValue = (view) => {
++      const control = powerSliderControl(view);
++      const rawAttribute = control?.getAttribute?.('aria-valuenow');
++      const minimumAttribute = control?.getAttribute?.('aria-valuemin');
++      const maximumAttribute = control?.getAttribute?.('aria-valuemax');
++      const hasRaw = rawAttribute !== null && rawAttribute !== undefined && String(rawAttribute).trim() !== '';
++      const hasMinimum = minimumAttribute !== null && minimumAttribute !== undefined &&
++        String(minimumAttribute).trim() !== '';
++      const hasMaximum = maximumAttribute !== null && maximumAttribute !== undefined &&
++        String(maximumAttribute).trim() !== '';
++      let controlValue = null;
++      if (hasMinimum || hasMaximum) {
++        if (!hasRaw || !hasMinimum || !hasMaximum) return null;
++        const raw = Number(rawAttribute);
++        const minimum = Number(minimumAttribute);
++        const maximum = Number(maximumAttribute);
++        if (!Number.isInteger(raw) || minimum !== 0 || maximum !== 4 ||
++            raw < minimum || raw > maximum) return null;
++        controlValue = raw + 1;
++      } else if (hasRaw) {
++        const raw = Number(rawAttribute);
++        if (!Number.isInteger(raw) || raw < 1 || raw > 5) return null;
++        controlValue = raw;
++      }
++      const textValue = readPowerTextValue(view);
++      if (controlValue !== null && textValue !== null && controlValue !== textValue) return null;
++      return controlValue ?? textValue;
++    };
++    const isPowerProofVisible = (node, allowSelfOpacityZero = false) => {
++      if (!isVisible(node)) return false;
++      for (let current = node; current; current = current.parentElement) {
++        const style = window.getComputedStyle?.(current);
++        if (!style || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility) ||
++            ((!allowSelfOpacityZero || current !== node) && !(Number(style.opacity ?? '1') > 0)) ||
++            current.getAttribute?.('aria-hidden') === 'true') return false;
++      }
++      return true;
++    };
++    const compactNodeText = (node) => Array.from(
++      String(node?.textContent ?? '').toLowerCase() +
++      String(node?.getAttribute?.('aria-label') ?? '').toLowerCase(),
++    ).filter((character) =>
++      (character >= 'a' && character <= 'z') ||
++      (character >= '0' && character <= '9')).join('');
++    const boundPowerProofScopes = (modelButton) => {
++      const controlledRoots = String(modelButton.getAttribute?.('aria-controls') ?? '')
++        .trim().split(/\s+/).filter(Boolean)
++        .map((id) => document.getElementById(id))
++        .filter(isPowerProofVisible);
++      const buttonMenu = modelButton?.closest?.('[role="menu"]');
++      const ownedControlledRoots = controlledRoots.filter((root) =>
++        buttonMenu?.contains?.(root));
++      if (buttonMenu && ownedControlledRoots.length &&
++          isPowerProofVisible(buttonMenu)) {
++        return [buttonMenu];
++      }
++      return controlledRoots.map((root) => {
++        const menu = root?.matches?.('[role="menu"]') ? root :
++          root?.closest?.('[role="menu"]');
++        return menu && isPowerProofVisible(menu) ? menu : root;
++      });
++    };
++    // Power proof belongs to one visible effort pill and its controlled picker.
++    // A controlled subtree may use sibling proof only inside its same visible menu.
++    const collectGpt56PowerProofDiagnostic = () => {
++      if (POWER_TARGET === null || !TARGET_IS_GPT56_MODEL) return { passed: false };
++      const targetEffort = POWER_TARGET === 5 ? 'pro' : 'extrahigh';
++      const modelButtons = Array.from(document.querySelectorAll(MODEL_BUTTON_SELECTOR))
++        .filter(isPowerProofVisible);
++      const proofTrees = modelButtons.flatMap((modelButton) => {
++        if (!compactNodeText(modelButton).includes(targetEffort)) return [];
++        return boundPowerProofScopes(modelButton)
++          .map((root) => {
++            const sliders = Array.from(root.querySelectorAll(
++              '[data-testid="composer-model-picker-slider-simple-view"]',
++            )).filter((candidate) => isPowerProofVisible(candidate, true));
++            const advancedViews = Array.from(root.querySelectorAll(
++              '[data-testid="composer-model-picker-slider-advanced-view"]',
++            )).filter(isPowerProofVisible);
++            const sliderMatches = sliders.some((candidate) =>
++              readPowerValue(candidate) === POWER_TARGET &&
++              compactNodeText(candidate).includes(targetEffort));
++            const advancedMatches = advancedViews.some((advanced) => {
++              const compact = compactNodeText(advanced);
++              return compact.includes('modelgpt56sol') &&
++                compact.includes('effort' + targetEffort);
++            });
++            return { sliders, advancedViews, sliderMatches, advancedMatches };
++          });
++      });
++      return {
++        passed: proofTrees.some((tree) => tree.sliderMatches && tree.advancedMatches),
++        targetPower: POWER_TARGET,
++        visibleModelButtons: modelButtons.length,
++        sliderCandidates: proofTrees.flatMap((tree) => tree.sliders).length,
++        advancedCandidates: proofTrees.flatMap((tree) => tree.advancedViews).length,
++      };
++    };
++    const waitForStableGpt56PowerProof = async () => {
++      if (POWER_TARGET === null || !TARGET_IS_GPT56_MODEL) return true;
++      const deadline = performance.now() + INTELLIGENCE_WAIT_MS;
++      let consecutive = 0;
++      while (performance.now() < deadline) {
++        consecutive = collectGpt56PowerProofDiagnostic().passed ? consecutive + 1 : 0;
++        if (consecutive >= 2) return true;
++        await sleep(100);
++      }
++      return false;
++    };
++    const failure = (status, extra = {}) => {
++      const diagnostic = collectPickerDiagnostic();
++      if (POWER_TARGET !== null) {
++        diagnostic.powerProof = collectGpt56PowerProofDiagnostic();
++      }
++      return {
++        status,
++        modelKind: effectiveTargetModelKind(),
++        ...extra,
++        diagnostic,
++      };
++    };
++    const finishVerifiedSelection = async (status, label, modelKind) => {
++      if (await waitForStableGpt56PowerProof()) {
++        closeOpenMenus();
++        return { status, label };
++      }
++      const result = failure('selection-unverified', {
++        modelKind,
++        power: collectGpt56PowerProofDiagnostic(),
++      });
++      closeOpenMenus();
++      return result;
++    };
+     const findOptionInMenu = (menu, modelKindOverride = null) => {
+       // Container controls reveal other controls; they are not tiers you can pick.
+       // Two shapes exist and both can collide with a tier label: a submenu opener
+@@ -468,6 +740,14 @@
+         (item) => !isContainerControl(item),
+       );
+       const modelKind = modelKindOverride || effectiveTargetModelKind();
++      if (TARGET_IS_GPT56_MODEL && TARGET_LEVEL === 'heavy') {
++        for (const item of items) {
++          const itemText = normalize(
++            (item.textContent ?? '') + ' ' + (item.getAttribute?.('aria-label') ?? ''),
++          );
++          if (itemText === 'pro') return item;
++        }
++      }
+       if (modelKind === 'pro') {
+         // GPT-5.6's unified Intelligence picker exposes Pro as the highest
+         // effort radio directly. It no longer has a nested "Pro Extended"
+@@ -742,8 +1022,11 @@
+           hasToken(pillLabel, 'pro') ||
+           currentEffortPillMatchesTarget(trigger, triggerModelKind)
+         ) {
+-          closeOpenMenus();
+-          return { status: 'already-selected', label: trigger.textContent?.trim?.() || null };
++          return finishVerifiedSelection(
++            'already-selected',
++            trigger.textContent?.trim?.() || null,
++            triggerModelKind,
++          );
+         }
+       }
+       if (!option) return failure('option-not-found', { modelKind: triggerModelKind });
+@@ -765,20 +1048,21 @@
+         return result;
+       }
+       if (optionIsSelected(option)) {
+-        closeOpenMenus();
+-        return { status: 'already-selected', label };
++        return finishVerifiedSelection('already-selected', label, triggerModelKind);
+       }
+ 
+       dispatchClickSequence(option);
+       await sleep(STEP_WAIT_MS);
+       const refreshed = findOption();
+       if (refreshed && optionIsSelected(refreshed)) {
+-        closeOpenMenus();
+-        return { status: 'switched', label: refreshed.textContent?.trim?.() || label };
++        return finishVerifiedSelection(
++          'switched',
++          refreshed.textContent?.trim?.() || label,
++          triggerModelKind,
++        );
+       }
+       if (currentEffortPillMatchesTarget(trigger, triggerModelKind)) {
+-        closeOpenMenus();
+-        return { status: 'switched', label };
++        return finishVerifiedSelection('switched', label, triggerModelKind);
+       }
+ 
+       const reopenTrigger = freshComposerTrigger(trigger) || trigger;
+@@ -790,12 +1074,14 @@
+       while (performance.now() < deadline) {
+         const selected = findOption();
+         if (selected && optionIsSelected(selected)) {
+-          closeOpenMenus();
+-          return { status: 'switched', label: selected.textContent?.trim?.() || label };
++          return finishVerifiedSelection(
++            'switched',
++            selected.textContent?.trim?.() || label,
++            triggerModelKind,
++          );
+         }
+         if (currentEffortPillMatchesTarget(trigger, triggerModelKind)) {
+-          closeOpenMenus();
+-          return { status: 'switched', label };
++          return finishVerifiedSelection('switched', label, triggerModelKind);
+         }
+         await sleep(100);
+       }

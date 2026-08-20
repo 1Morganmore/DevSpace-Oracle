@@ -16,7 +16,7 @@ From this repository, preview the plan and check the roots:
 python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py setup --root C:\projects\one --root C:\projects\two --hostname your-device.your-tailnet.ts.net --dry-run
 ```
 
-After reviewing the plan, use `--apply`. It invokes `devspace init` through Git Bash, then starts `devspace serve` and configures a Tailscale HTTPS Funnel to the local default port (7676). DevSpace asks you to select roots and enter the public origin. Enter exactly the reviewed roots and `https://your-device.your-tailnet.ts.net`, without `/mcp`.
+After reviewing the plan, use `--apply`. It invokes `devspace init` through Git Bash, then starts `devspace serve`, configures a Tailscale HTTPS Funnel to the local default port (7676), and starts the persistent login watchdog described below. DevSpace asks you to select roots and enter the public origin. Enter exactly the reviewed roots and `https://your-device.your-tailnet.ts.net`, without `/mcp`.
 
 The helper pins DevSpace `1.0.7` and applies its exact hash-validated Windows
 compatibility patch before starting the service.
@@ -39,6 +39,51 @@ python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py setup 
 
 DevSpace prints an Owner password during initialization and stores it in its standard local configuration. Do not put that password in a script, manifest, issue, or repository.
 
+## Persistent Windows watchdog
+
+Setup replaces the existing per-user
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value named exactly
+`DevSpace MCP Server`; it does not create another startup value. That value
+launches `pythonw.exe ... devspace_tailscale_setup.py watchdog`, so the process
+has no console window. Setup also starts the same watchdog immediately. A
+Windows named mutex permits only one watchdog in the login session.
+
+The production watchdog runs continuously with a 300-second interval. Every
+cycle re-reads the live `~/.devspace/config.json`, including the complete
+`allowedRoots`, local port, and `publicBaseUrl`; the Run command does not embed
+stale copies. The local `/healthz` response is necessary but never sufficient:
+before the watchdog reports `READY`, keeps an existing Funnel, or creates one,
+the compatibility probe must prove that the listening PID command names the
+tested DevSpace package root, that the pinned files have their validated
+patched hashes, and that no restart marker remains.
+
+A healthy cycle is read-only. If the exact listener is absent or verified but
+needs repair, the watchdog prepares pinned `@waishnav/devspace@1.0.7`, applies
+the hash-validated compatibility lifecycle, stops only a process independently
+proven to be that exact service, starts it hidden, and confirms the restart. It
+creates and reads back an absent exact Funnel slot only after another listener
+proof. A spoofed health response, unknown listener, conflicting mapping, or
+failed proof fails closed. An unknown listener is never stopped. If the exact
+configured Funnel slot maps to its untrusted local port, only that slot is
+turned off with the matching `tailscale funnel ... off` command; unrelated
+Serve and Funnel slots are never reset or changed.
+
+After every cycle, including permanent failures, the hidden process atomically
+replaces `%CODEX_HOME%\state\devspace-watchdog\status.json` (defaulting to
+`%USERPROFILE%\.codex`) with restrictive permissions. The heartbeat contains
+only its schema, timestamp, success flag, result code, verification statuses,
+and the last verified PID/port/Funnel identity. It never contains allowed or
+package roots, commands, URLs with credentials, stderr, tokens, passwords, or
+Owner secrets. Fatal watchdog startup, configuration, and mutex failures are
+also recorded before a nonzero exit. Failures remain paced at the normal
+interval and are not repeatedly logged.
+
+The watchdog never rewrites `config.json`, `auth.json`, Owner credentials,
+OAuth clients or tokens, allowed roots, ChatGPT registration, or ChatGPT
+settings. The hidden `--interval-seconds` and `--max-cycles` switches exist only
+to bound focused diagnostics and tests; the registered production command uses
+the persistent defaults.
+
 ## Change allowed roots without reinitializing
 
 The `roots` command replaces the complete allowed-root list without reading or
@@ -53,21 +98,22 @@ python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py roots 
 Omit `--restart` to persist the change for the next service start. The command
 preserves all other `config.json` keys and verifies the exact saved list.
 
-## Restore an approved Funnel route
+## Request an immediate approved Funnel check
 
-After DevSpace or Tailscale restarts, explicitly restore only the reviewed
-route:
+The watchdog ordinarily restores an absent reviewed route on its next cycle.
+To request the same check immediately, run:
 
 ```powershell
 python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py ensure --root C:\projects\one --hostname your-device.your-tailnet.ts.net
 ```
 
-`ensure` waits up to 30 seconds for the exact local DevSpace `/healthz`
-identity. It reuses a matching Funnel, creates the exact mapping only when it
-is absent, refuses a conflicting mapping, reads the mapping back after any
-change, and requires the same exact identity through the public `/healthz`
-endpoint. It does not start DevSpace, change roots, register startup tasks, or
-touch ChatGPT settings or app registration.
+`ensure` waits up to 30 seconds for the local DevSpace health identity, then
+independently requires the same exact PID/command/package-hash proof used by the
+watchdog. It reuses a matching Funnel or creates the exact mapping only after
+that proof, reads back any change, verifies again before `READY`, and turns off
+only the exact matching slot if listener identity becomes untrusted. It refuses
+a conflicting mapping and does not start DevSpace, change roots, register
+startup tasks, or touch ChatGPT settings or app registration.
 
 ## Manual ChatGPT registration
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 from pathlib import Path
 
 
@@ -18,12 +20,25 @@ def text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def load_oracle_state():
+    name = "chatgpt_oracle_state_global_policy_test"
+    spec = importlib.util.spec_from_file_location(
+        name,
+        ROOT / "bin/chatgpt_oracle_state.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_regular_modes_route_only_through_oracle_and_devspace() -> None:
     value = text(THINKING)
     assert "chatgpt_oracle_dispatch.py" in value
     assert "@DevSpace" in value and "never attaches files" in value
     assert "another backend, Playwright, in-app Browser, or Chrome" in value
-    assert "Oracle `0.17.3`" in value and "`Extra High`" in value
+    assert "Oracle `0.18.0`" in value and "`Extra High`" in value
 
 
 def test_pro_evidence_route_is_oracle_attachment_only_heavy_and_has_no_app_fallback() -> None:
@@ -85,9 +100,21 @@ def test_oracle_recovery_is_exact_slug_monotonic_and_version_specific() -> None:
     value = text(THINKING)
     assert "stored slug" in value and "never restarts/resubmits" in value
     assert "never downgrades durable COMPLETE" in value
-    source = text(ROOT / "bin/chatgpt_oracle_state.py")
-    assert 'ORACLE_RECOVERABLE_VERSIONS = ("0.16.1", "0.17.0", "0.17.1", "0.17.2", ORACLE_ACTIVE_VERSION)' in source
-    assert 'WAIT_CAPABLE_VERSIONS = {"0.17.0", "0.17.1", ORACLE_ACTIVE_VERSION}' in source
+    state = load_oracle_state()
+    assert state.ORACLE_RECOVERABLE_VERSIONS == (
+        "0.16.1",
+        "0.17.0",
+        "0.17.1",
+        "0.17.2",
+        "0.17.3",
+        "0.18.0",
+    )
+    assert state.WAIT_CAPABLE_VERSIONS == {
+        "0.17.0",
+        "0.17.1",
+        "0.17.3",
+        "0.18.0",
+    }
 
 
 def test_manifest_exposes_only_active_routing_authorities() -> None:

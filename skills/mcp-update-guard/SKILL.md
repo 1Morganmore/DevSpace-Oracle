@@ -21,14 +21,21 @@ preserve unrelated local customizations.
    ChatGPT run uses Oracle:
    - regular modes, Deep Research, comprehensive stages, and Web Multi use
      Oracle plus the manually registered DevSpace app;
-   - Pro uses Oracle attachment-only and no app;
-   - no alternate browser backend is a fallback.
+   - explicitly requested qualified Pro uses `pro-devspace`; explicitly
+     requested immutable-evidence Pro uses `pro-attachment-only` with no app;
+   - no route promotes itself to Pro, and no alternate browser backend is a
+     fallback.
 4. Prefer small compatibility changes over wholesale replacement. Preserve
    local ports, names, roots, tokens, routing, and hooks unless the task
    explicitly changes them.
-5. Batch coherent edits, inspect the final diff once, run focused regression
+5. For an upstream package check, treat npm latest/version integrity/`gitHead`,
+   the annotated source-tag object and peeled commit plus signature state,
+   GitHub Release, and default-branch head as independent evidence. Never call
+   `releases/latest` a tag or substitute source-main bytes for the exact npm
+   dist.
+6. Batch coherent edits, inspect the final diff once, run focused regression
    tests, then broader tests according to blast radius.
-6. Synchronize reusable GPT automation changes to the authoritative
+7. Synchronize reusable GPT automation changes to the authoritative
    `codexpro-automation` source, install the verified bytes, commit with a
    descriptive message, push public-safe changes, and check CI.
 

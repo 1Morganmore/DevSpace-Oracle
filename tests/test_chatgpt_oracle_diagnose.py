@@ -32,6 +32,7 @@ def write_run(
     session_authority: str = "",
     terminal_harvested: bool = False,
     task_outcome: str = "",
+    task_outcome_contract: str = "legacy",
     project_root: Path | None = None,
 ) -> Path:
     run_dir = state_root / "projects" / "projectkey" / "runs" / run_id
@@ -51,6 +52,7 @@ def write_run(
         "session_authority": session_authority,
         "terminal_harvested": terminal_harvested,
         "task_outcome": task_outcome,
+        "task_outcome_contract": task_outcome_contract,
         "artifacts": {"output": str(output_path), "stdout": str(stdout_path), "stderr": str(stderr_path)},
     }), encoding="utf-8")
     return run_dir
@@ -111,32 +113,151 @@ def test_unsettled_app_route_marker_remains_submission_uncertain(tmp_path: Path)
     assert report["unresolved_runs"] == []
 
 
-def test_durable_terminal_run_is_complete_and_not_executed_is_separated(tmp_path: Path) -> None:
+def test_durable_terminal_outcomes_classify_before_complete_lifecycle(tmp_path: Path) -> None:
     module = load()
     state_root = tmp_path / "oracle-state"
     write_run(
         state_root,
         "e" * 8,
         status="complete",
-        output="answer",
+        output="answer\nTASK_OUTCOME: EXECUTED",
         session_authority="terminal",
         terminal_harvested=True,
         task_outcome="executed",
+        task_outcome_contract="v1",
     )
     write_run(
         state_root,
         "f" * 8,
         status="complete",
-        output="TASK_OUTCOME: not_executed",
+        output="workspace access denied\nTASK_OUTCOME: BLOCKED",
+        session_authority="terminal",
+        terminal_harvested=True,
+        task_outcome="blocked",
+        task_outcome_contract="v1",
+    )
+    write_run(
+        state_root,
+        "g" * 8,
+        status="complete",
+        output="TASK_OUTCOME: NOT_EXECUTED",
         session_authority="terminal",
         terminal_harvested=True,
         task_outcome="not_executed",
+        task_outcome_contract="v1",
     )
 
     report = module.diagnose(state_root)
 
-    assert report["bucket_counts"] == {"complete": 1, "terminal-task-not-executed": 1}
-    assert [run["bucket"] for run in report["unresolved_runs"]] == ["terminal-task-not-executed"]
+    assert report["bucket_counts"] == {"complete": 1, "terminal-task-not-executed": 2}
+    unresolved = {
+        Path(run["run_dir"]).name: (run["bucket"], run["signature"])
+        for run in report["unresolved_runs"]
+    }
+    assert unresolved == {
+        "f" * 8: ("terminal-task-not-executed", "durable-output-reports-blocked"),
+        "g" * 8: (
+            "terminal-task-not-executed",
+            "durable-output-reports-no-execution",
+        ),
+    }
+    assert report["safe_for_fresh_run_buckets"] == []
+
+
+def test_oauth_token_request_503_uses_durable_output_evidence(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    write_run(
+        state_root,
+        "oauth503",
+        status="attention_required",
+        output="DevSpace: OAuth token request failed (HTTP 503 Service Unavailable)",
+        session_authority="terminal",
+        terminal_harvested=True,
+        task_outcome="unknown",
+        task_outcome_contract="v1",
+    )
+
+    report = module.diagnose(state_root)
+    run = report["unresolved_runs"][0]
+
+    assert run["bucket"] == "post-submit-provider-incomplete"
+    assert run["signature"] == "registered-app-oauth-token-request-503"
+    assert report["safe_for_fresh_run_buckets"] == []
+
+
+@pytest.mark.parametrize(
+    "output_text",
+    (
+        "DevSpace: OAuth token request failed (HTTP 502 Bad Gateway)",
+        "DevSpace: OAuth token request failure (HTTP 503 Service Unavailable)",
+        "DevSpace: oauth token request failed (HTTP 503 Service Unavailable)",
+    ),
+)
+def test_oauth_token_request_503_signature_requires_both_exact_markers(
+    output_text: str,
+) -> None:
+    module = load()
+
+    verdict = module.classify_run(
+        {
+            "status": "attention_required",
+            "session_authority": "terminal",
+            "terminal_harvested": True,
+            "task_outcome_contract": "v1",
+            "task_outcome": "unknown",
+        },
+        stdout_text="",
+        output_text=output_text,
+        has_output=True,
+    )
+
+    assert verdict == {
+        "bucket": "post-submit-provider-incomplete",
+        "signature": "output-present-without-terminal-settlement",
+    }
+
+
+@pytest.mark.parametrize(
+    "output_text",
+    (
+        "TASK_OUTCOME: EXECUTED\nActually no files were changed.",
+        "TASK_OUTCOME: EXECUTED\nTASK_OUTCOME: BLOCKED",
+        "The phrase TASK_OUTCOME: EXECUTED is quoted prose, not a terminal marker.",
+    ),
+)
+def test_unknown_or_missing_v1_outcome_never_gains_complete_status(
+    tmp_path: Path,
+    output_text: str,
+) -> None:
+    module = load()
+    output_path = tmp_path / "output.md"
+    output_path.write_text(output_text, encoding="utf-8")
+    parsed_outcome = module.STATE.classify_task_outcome(
+        output_path,
+        contract="v1",
+        transport="devspace",
+    )
+    assert parsed_outcome == "unknown"
+
+    for persisted_outcome in ("", parsed_outcome):
+        verdict = module.classify_run(
+            {
+                "status": "complete",
+                "session_authority": "terminal",
+                "terminal_harvested": True,
+                "task_outcome_contract": "v1",
+                "task_outcome": persisted_outcome,
+            },
+            stdout_text="",
+            output_text=output_text,
+            has_output=True,
+        )
+
+        assert verdict == {
+            "bucket": "post-submit-provider-incomplete",
+            "signature": "output-present-without-terminal-settlement",
+        }
 
 
 def test_live_run_keeps_ownership_and_is_not_reported_as_failure(tmp_path: Path) -> None:
@@ -557,6 +678,16 @@ def test_watch_returns_terminal_codes_bells_and_never_mutates_state(tmp_path: Pa
         terminal_harvested=True,
         task_outcome="executed",
     )
+    blocked = write_run(
+        state_root,
+        "blocked0",
+        status="complete",
+        output="TASK_OUTCOME: BLOCKED",
+        session_authority="terminal",
+        terminal_harvested=True,
+        task_outcome="blocked",
+        task_outcome_contract="v1",
+    )
     attention = write_run(state_root, "attentn0", status="failed")
     before = (complete / "state.json").read_bytes()
 
@@ -568,6 +699,7 @@ def test_watch_returns_terminal_codes_bells_and_never_mutates_state(tmp_path: Pa
     assert stderr.getvalue() == "\a"
     assert (complete / "state.json").read_bytes() == before
     assert module.watch(attention, state_root=state_root, emit=lambda value: None) == 2
+    assert module.watch(blocked, state_root=state_root, emit=lambda value: None) == 2
 
 
 def test_watch_timeout_emits_one_snapshot_and_timeout(tmp_path: Path) -> None:

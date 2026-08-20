@@ -303,3 +303,154 @@ def test_oauth_discovery_patch_exposes_chatgpt_path_specific_metadata() -> None:
     )
     assert 'req.path === "/.well-known/oauth-authorization-server/mcp"' in patch
     assert 'req.url = "/.well-known/oauth-authorization-server"' in patch
+
+
+def test_oauth_refresh_replay_patch_is_exact_and_bounded() -> None:
+    compat = load_compat()
+    patch_path = (
+        MODULE_PATH.parent
+        / "devspace-compat"
+        / compat.SUPPORTED_VERSION
+        / "oauth-refresh-replay.patch"
+    )
+    patch = patch_path.read_text(encoding="utf-8")
+    parsed = subprocess.run(
+        ["git", "apply", "--numstat", "--", str(patch_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    contract = compat.PATCHES["dist/oauth-provider.js"]
+
+    assert parsed.returncode == 0, parsed.stderr
+    assert contract == {
+        "patch": "oauth-refresh-replay.patch",
+        "pristine": "90ff3fd116735e98af5751de1065538964f6eaae913171223e8e19337b9831b8",
+        "patched": "30790b1c4e83e7865b3519e4c4a99ca3a182264f405f0eea26c80f0c471252dc",
+    }
+    assert "const REFRESH_REPLAY_GRACE_MS = 30 * 1000;" in patch
+    assert "const MAX_REFRESH_REPLAYS = 32;" in patch
+    assert "sameStringSet(requestedScopes, replay.scopes)" in patch
+    assert "leftSet.size !== left.length" in patch
+    assert "rightSet.size !== right.length" in patch
+    assert "leftSet.size !== rightSet.size" in patch
+    assert "requestedResource === replay.resource" in patch
+    assert "replay.expiresAtMs > nowMs" in patch
+    assert "record.expiresAt * 1000 <= nowMs" in patch
+    assert (
+        "Math.min(nowMs + REFRESH_REPLAY_GRACE_MS, record.expiresAt * 1000)"
+        in patch
+    )
+    assert "hashToken(replay.tokens.refresh_token) === refreshTokenHash" in patch
+    assert "replay.expiresAtMs <= nowMs" in patch
+    assert "this.refreshReplays.clear();" in patch
+
+
+def test_oauth_refresh_replay_probe_is_isolated_and_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compat = load_compat()
+    package = tmp_path / "devspace"
+    package.mkdir()
+    monkeypatch.setattr(compat.shutil, "which", lambda name: "node")
+    calls: list[tuple[list[str], dict]] = []
+    expected = {
+        "ok": True,
+        "replayed_same_pair": True,
+        "wrong_client_rejected": True,
+        "scope_mismatch_rejected": True,
+        "resource_mismatch_rejected": True,
+        "scope_order_independent": True,
+        "duplicate_requested_scopes_rejected": True,
+        "duplicate_cached_scopes_rejected": True,
+        "ancestor_replay_invalidated": True,
+        "revoke_invalidated": True,
+        "near_expiry_capped": True,
+        "near_expiry_boundary_rejected": True,
+        "source_boundary_rejected": True,
+        "replay_expired_rejected": True,
+        "source_expired_rejected": True,
+        "capacity_bounded": True,
+        "oldest_evicted": True,
+    }
+
+    def passing(argv, **kwargs):
+        calls.append((list(argv), dict(kwargs)))
+        return subprocess.CompletedProcess(argv, 0, json.dumps(expected), "")
+
+    report = compat.check_oauth_refresh_replay(package_root=package, runner=passing)
+
+    assert report["status"] == "bounded-replay-verified"
+    assert calls[0][1]["cwd"] == str(package.resolve())
+    source = calls[0][0][-1]
+    assert 'from "./dist/oauth-provider.js"' in source
+    assert "fs.mkdtempSync" in source
+    assert "fs.rmSync(state" in source
+    assert '"wrong-client"' in source
+    assert '"https://other.test/mcp"' in source
+    assert '["offline_access", "devspace"]' in source
+    assert source.count('["devspace", "devspace"]') == 2
+    assert "ancestorSeed.refresh_token" in source
+    assert "firstGeneration.refresh_token" in source
+    assert "nearExpiryReplay?.expiresAtMs" in source
+    assert "sourceBoundarySeed.refresh_token" in source
+    assert "value.expiresAtMs = 0" in source
+    assert "provider.refreshReplays.size, 32" in source
+    assert "capacitySeeds[0]" in source
+    assert "process.env" not in source
+    assert "fetch(" not in source
+
+    def failing(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "synthetic failure")
+
+    with pytest.raises(compat.DevSpaceCompatError) as failure:
+        compat.check_oauth_refresh_replay(package_root=package, runner=failing)
+    assert failure.value.code == "DEVSPACE_OAUTH_REFRESH_REPLAY_CHECK_FAILED"
+
+    incomplete = {**expected, "oldest_evicted": False}
+
+    def incomplete_result(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, json.dumps(incomplete), "")
+
+    with pytest.raises(compat.DevSpaceCompatError) as failure:
+        compat.check_oauth_refresh_replay(package_root=package, runner=incomplete_result)
+    assert failure.value.code == "DEVSPACE_OAUTH_REFRESH_REPLAY_CHECK_INCOMPLETE"
+
+    def timeout(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    with pytest.raises(compat.DevSpaceCompatError) as timed_out:
+        compat.check_oauth_refresh_replay(package_root=package, runner=timeout)
+    assert timed_out.value.code == "DEVSPACE_OAUTH_REFRESH_REPLAY_CHECK_TIMEOUT"
+    assert timed_out.value.evidence == {
+        "root": str(package.resolve()),
+        "timeout_seconds": 30,
+    }
+
+    def unavailable(argv, **kwargs):
+        raise OSError(2, "synthetic node launch failure")
+
+    with pytest.raises(compat.DevSpaceCompatError) as unavailable_error:
+        compat.check_oauth_refresh_replay(package_root=package, runner=unavailable)
+    assert unavailable_error.value.code == "DEVSPACE_OAUTH_REFRESH_REPLAY_CHECK_UNAVAILABLE"
+    assert unavailable_error.value.evidence["root"] == str(package.resolve())
+    assert unavailable_error.value.evidence["errno"] == 2
+    assert "synthetic node launch failure" in unavailable_error.value.evidence["error"]
+
+
+def test_restart_marker_inventory_includes_oauth_refresh_patch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compat = load_compat()
+    package = tmp_path / "devspace"
+    monkeypatch.setenv("CODEX_DEVSPACE_COMPAT_STATE_ROOT", str(tmp_path / "state"))
+
+    marker = compat._write_restart_marker([package])
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+
+    oauth_target = str(package / "dist" / "oauth-provider.js")
+    assert payload["patched_files"][oauth_target] == (
+        "30790b1c4e83e7865b3519e4c4a99ca3a182264f405f0eea26c80f0c471252dc"
+    )

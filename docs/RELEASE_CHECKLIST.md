@@ -1,11 +1,16 @@
 # Release checklist
 
-- Confirm package metadata remains `1.9.0` with Node.js `>=24 <27`.
-- Confirm new runs pin Oracle `0.17.3`; exact recovery accepts only `0.16.1`, `0.17.0`, `0.17.1`, `0.17.2`, and `0.17.3`.
-- Confirm DevSpace setup pins `1.0.7` and both npm integrities match `install-manifest.json`.
+- Confirm package metadata remains `1.10.0` with Node.js `>=24 <27`.
+- Confirm new runs pin Oracle `0.18.0`; exact recovery accepts only `0.16.1`, `0.17.0`, `0.17.1`, `0.17.2`, `0.17.3`, and `0.18.0`.
+- Confirm DevSpace setup pins `1.0.7`, all three exact compatibility patch assets are installed, and both npm integrities match `install-manifest.json`.
 - Confirm regular routes use `GPT-5.6 Sol` and `extra-high` with the visible `Power 4 of 5` proof and never promote to Pro automatically; both Pro transports use `gpt-5.6-sol` and `heavy` with the `Power 5 of 5` proof — qualified `pro-devspace` (DevSpace mention, mission-scoped writes inside the exact root) and evidence `pro-attachment-only` (hash-frozen attachments, no app).
 - Confirm every launch contract carries `pro_selection_policy: explicit-only`, including `manual`, and that the comprehensive manifest requires `allow_pro: true` for any plan-to-Pro transition.
 - Confirm no route enters Web Multi automatically or uses another backend as a fallback, and that `pro-attachment-only` is never an automatic fallback.
+- Confirm regular composer input remains bare `@DevSpace <absolute mission path>`, no Ultra GPT route/profile/skill is installed, and neither omission is silently replaced by parent behavior.
+- Confirm exact recovery uses its per-run writer mutex without waiting for the project submission mutex, while unresolved ownership still blocks fresh submissions and late observers cannot regress terminal harvested state.
+- Confirm persisted `blocked`/`not_executed` diagnosis precedes lifecycle complete, OAuth token-request 503 has its distinct unresolved signature, and malformed/unknown task outcomes remain unresolved.
+- Confirm the one HKCU Run value `DevSpace MCP Server` launches the hidden singleton watchdog, live config is reread each cycle, and repair cannot mutate credentials, OAuth state, ChatGPT registration/settings, or roots.
+- Confirm upstream drift output keeps npm latest/`gitHead`, source tag object/peeled commit/signature, GitHub Release, and default-branch head as independent identities.
 - Confirm WAL v3 and receipt v4 removal migration, crash recovery, rollback, and uninstall in a temporary `CODEX_HOME`.
 - Confirm modified, symlinked, unowned, active-run, and ambiguous-receipt inputs fail before mutation and preserve user bytes.
 - Confirm removed paths have zero imports, callers, manifest/package/workflow entries, fixture/schema references, and tests.

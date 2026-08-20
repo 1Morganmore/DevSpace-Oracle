@@ -5,7 +5,7 @@
 Codex가 웹 ChatGPT에 계획·리서치·검토·코드 구현을 맡기고, 로컬 Codex는
 제출·복구·해시·최종 테스트만 담당하도록 만드는 Windows용 자동화 도구입니다.
 
-현재 릴리스는 `1.9.0`입니다.
+현재 릴리스는 `1.10.0`입니다.
 
 이 프로젝트는 다음 두 도구를 연결합니다.
 
@@ -113,13 +113,14 @@ SHA-256을 하위 프로세스 시작 전에 검사합니다. 작업 상태는 �
 - 브라우저에서 ChatGPT에 로그인된 Oracle 프로필
 - ChatGPT Developer Mode에 최초 한 번 수동 등록한 DevSpace 앱
 
-현재 검증된 조합은 Oracle `0.17.3`와 DevSpace `1.0.7`입니다. 설치기는
+현재 검증된 조합은 Oracle `0.18.0`과 DevSpace `1.0.7`입니다. 설치기는
 정확한 파일 해시가 일치할 때만 Windows 호환 패치를 적용합니다. Oracle
-0.17.3의 상위 변경(답변 placeholder 제한, manual-login 재연결의 명시적
-쿠키 동기화 opt-in, 일본어 picker 라벨, 명시적 headless 처리)은 로컬
-hash-gated 패치 아래 그대로 보존하며 아직 라이브 브라우저 검증은 하지
-않았습니다. Oracle `0.16.1`, `0.17.0`, `0.17.1`, `0.17.2`는 이미 저장된
-해당 버전 실행의 정확한 복구에만 사용할 수 있습니다.
+0.18.0의 upstream disabled-tier 감지와 manual-login 재연결 cookie-sync
+opt-in은 그대로 보존합니다. 로컬 hash-gated 패치는 보이는 `Power 4 of 5`와
+`Power 5 of 5`의 엄격한 증명, 실행별 복사 프로필, 하나의 전체 응답 timeout
+예산을 유지합니다. 이 릴리스에서는 라이브 브라우저 검증을 수행하지
+않았습니다. Oracle `0.16.1`, `0.17.0`, `0.17.1`, `0.17.2`, `0.17.3`은 이미
+저장된 해당 버전 실행의 정확한 복구에만 사용할 수 있습니다.
 
 ## 설치
 
@@ -174,6 +175,15 @@ python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py roots 
 
 `roots`는 `config.json`의 `allowedRoots`만 원자적으로 교체하고 다른 설정과
 `auth.json`은 보존합니다. `--restart`를 생략하면 다음 DevSpace 재시작 때 반영됩니다.
+
+DevSpace 1.0.7 호환 레이어는 동시에 회전한 refresh token 중 이미 소비된
+token을 동일 client·scope·resource 요청에만 30초 동안 최대 32개 메모리
+항목으로 재생합니다. revoke·만료·불일치는 계속 fail-closed이며 자격 증명과
+OAuth DB schema는 바꾸지 않습니다. 기존 HKCU Run 값 `DevSpace MCP Server`
+하나가 숨김 단일-instance watchdog을 시작합니다. watchdog은 health cycle마다
+`~/.devspace/config.json`을 다시 읽고 정확한 DevSpace service identity와
+Funnel만 복구하며 Owner 자격 증명, OAuth client/token, ChatGPT 등록·설정,
+허용 root를 변경하지 않습니다.
 
 ## 일반 GPT 실행 예시
 
@@ -241,6 +251,9 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
 - 비Pro의 무거운 작업은 1차 90분과 복구 90분, 실효 약 180분까지 기다립니다.
 - 브라우저나 로컬 프로세스 종료는 웹 작업 실패의 증거가 아닙니다.
 - 복구는 저장된 정확한 Oracle slug와 대화 URL만 사용하며 재제출하지 않습니다.
+- 정확 복구 writer는 실행별 mutex로만 직렬화되고 프로젝트 submit mutex를
+  기다리지 않습니다. unresolved 실행은 새 제출을 계속 차단하며, 늦게 끝난
+  원래 observer는 이미 terminal harvest된 durable state를 덮어쓸 수 없습니다.
 - 완료에는 Oracle 종료 코드 0과 비어 있지 않은 새 결과 파일이 모두 필요합니다.
 
 정확한 실행을 회수하려면:
@@ -281,6 +294,11 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_diagnose.py" watch --run-dir 
 정상 완료 데스크톱 알림은 기존 Oracle이 담당합니다. `watch`는
 `attention_required`를 포함한 host 상태 변화를 NDJSON으로 알리며 복구하거나
 재제출하지 않습니다.
+
+진단은 persisted `blocked`/`not_executed` 결과를 complete lifecycle보다 먼저
+분류하고, 같은 artifact의 `OAuth token request failed` + `503`을 별도
+registered-app OAuth 시그니처로 보고합니다. malformed/ambiguous v1 marker와
+persisted `unknown`은 정산하지 않고 unresolved로 유지합니다.
 
 ## 업데이트와 제거
 

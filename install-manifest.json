@@ -1,11 +1,12 @@
 {
   "schema": "codexpro.install-manifest/v1",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "include": [
     "bin/chatgpt_oracle_run.py",
     "bin/chatgpt_devspace_compat.py",
     "bin/devspace-compat/1.0.7/server.patch",
     "bin/devspace-compat/1.0.7/workspaces.patch",
+    "bin/devspace-compat/1.0.7/oauth-refresh-replay.patch",
     "bin/chatgpt_oracle_compat.py",
     "bin/oracle-compat/0.16.1/assistantResponse.patch",
     "bin/oracle-compat/0.16.1/browserTabs.patch",
@@ -79,6 +80,14 @@
     "bin/oracle-compat/0.17.3/promptComposer.patch",
     "bin/oracle-compat/0.17.3/recoverConversation.patch",
     "bin/oracle-compat/0.17.3/thinkingTime.strict.patch",
+    "bin/oracle-compat/0.18.0/assistantResponse.patch",
+    "bin/oracle-compat/0.18.0/browserConfig.patch",
+    "bin/oracle-compat/0.18.0/browserIndex.patch",
+    "bin/oracle-compat/0.18.0/chromeLifecycle.patch",
+    "bin/oracle-compat/0.18.0/profileCopy.patch",
+    "bin/oracle-compat/0.18.0/promptComposer.patch",
+    "bin/oracle-compat/0.18.0/recoverConversation.patch",
+    "bin/oracle-compat/0.18.0/thinkingTime.strict.patch",
     "bin/chatgpt_oracle_state.py",
     "bin/chatgpt_oracle_profiles.py",
     "bin/chatgpt_oracle_projects.py",
@@ -130,10 +139,10 @@
   "external": {
     "oracle": {
       "package": "@steipete/oracle",
-      "tested_version": "0.17.3",
+      "tested_version": "0.18.0",
       "license": "MIT",
-      "integrity": "sha512-xoziw8brto9rEtOROHcMr4vHu70DDGQJ41bwMHpkJgA77MIZ11B+IQtGqKpZ48WkihmHkEUVEvWsf+eDwxtwgg==",
-      "installation": "npx -y @steipete/oracle@0.17.3",
+      "integrity": "sha512-o8KFd66zNt36jw5zdtQAV74bgrOlJibbyvnLsVikIWDamesYtez/dIUhQ4zqtD9jkx+7A6vcP9+JgcJt0H5pOw==",
+      "installation": "npx -y @steipete/oracle@0.18.0",
       "repository": "steipete/oracle",
       "release_tag_convention": "v{version}"
     },
@@ -142,7 +151,7 @@
       "tested_version": "1.0.7",
       "license": "MIT",
       "integrity": "sha512-kP+Wk52qiMRwdqAP+nV4OZ4HU8feivZQ0k6u4ZUkvqxu8j0Rp/AU8H0K4T43G+zmu9WJKlYLTet7vIUeZHU72A==",
-      "installation": "resolved by the explicit setup skill; exact server.js and workspaces.js hashes are compatibility-patched",
+      "installation": "resolved by the explicit setup skill; exact server.js, workspaces.js, and oauth-provider.js hashes are compatibility-patched",
       "repository": "waishnav/devspace",
       "release_tag_convention": "v{version}"
     }

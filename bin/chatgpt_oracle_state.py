@@ -46,18 +46,34 @@ def is_attachment_transport(transport: str) -> bool:
 REGULAR_MODEL = "gpt-5.6"
 REGULAR_MODEL_STRATEGY = "select"
 REGULAR_THINKING_TIME = "extra-high"
-ORACLE_ACTIVE_VERSION = "0.17.3"
-ORACLE_RECOVERABLE_VERSIONS = ("0.16.1", "0.17.0", "0.17.1", "0.17.2", ORACLE_ACTIVE_VERSION)
-WAIT_CAPABLE_VERSIONS = {"0.17.0", "0.17.1", ORACLE_ACTIVE_VERSION}
-ORACLE_UI_FAILURE_SETTLEMENT_VERSIONS = {"0.17.1", "0.17.2", ORACLE_ACTIVE_VERSION}
-# Each strict pre-submit proof binds markers emitted by exactly two runtime
-# generations: 0.17.2 (the previous active runtime, now exact-recovery-only)
-# and the current active runtime.  These are explicit per-marker sets on
-# purpose — never an ORACLE_ACTIVE_VERSION alias, or promotion silently drops
-# stored 0.17.2 runs from settlement. Older runtimes remain deliberately
+ORACLE_ACTIVE_VERSION = "0.18.0"
+ORACLE_RECOVERABLE_VERSIONS = (
+    "0.16.1",
+    "0.17.0",
+    "0.17.1",
+    "0.17.2",
+    "0.17.3",
+    ORACLE_ACTIVE_VERSION,
+)
+WAIT_CAPABLE_VERSIONS = {"0.17.0", "0.17.1", "0.17.3", ORACLE_ACTIVE_VERSION}
+ORACLE_UI_FAILURE_SETTLEMENT_VERSIONS = {
+    "0.17.1",
+    "0.17.2",
+    "0.17.3",
+    ORACLE_ACTIVE_VERSION,
+}
+# Each strict pre-submit proof binds markers emitted by the three runtime
+# generations that shipped them: exact-recovery-only 0.17.2 and 0.17.3,
+# plus the current active runtime. These are explicit per-marker sets on
+# purpose — never only an ORACLE_ACTIVE_VERSION alias, or promotion silently
+# drops stored runs from settlement. Older runtimes remain deliberately
 # excluded from automatic proof and from every marker except the separate
 # explicit-user-confirmation exception below.
-ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
+ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_PROOF_VERSIONS = {
+    "0.17.2",
+    "0.17.3",
+    ORACLE_ACTIVE_VERSION,
+}
 ORACLE_LEGACY_USER_CONFIRMATION_VERSIONS = {"0.17.1"}
 ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_USER_CONFIRMATION_VERSIONS = (
     ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_PROOF_VERSIONS
@@ -70,13 +86,38 @@ ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_RECORDED_VERSIONS = {
     "0.17.1",
     "0.17.2",
     "0.17.3",
+    "0.18.0",
 }
-ORACLE_CHATGPT_SESSION_ABSENT_RECORDED_VERSIONS = {"0.17.2", "0.17.3"}
-ORACLE_THINKING_TIME_STRICT_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
-ORACLE_MODEL_SWITCHER_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
-ORACLE_COPY_PROFILE_MANUAL_LOGIN_CONFLICT_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
-ORACLE_PROFILE_COPY_RSYNC_MISSING_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
-ORACLE_CHATGPT_SESSION_ABSENT_PROOF_VERSIONS = {"0.17.2", ORACLE_ACTIVE_VERSION}
+ORACLE_CHATGPT_SESSION_ABSENT_RECORDED_VERSIONS = {
+    "0.17.2",
+    "0.17.3",
+    "0.18.0",
+}
+ORACLE_THINKING_TIME_STRICT_PROOF_VERSIONS = {
+    "0.17.2",
+    "0.17.3",
+    ORACLE_ACTIVE_VERSION,
+}
+ORACLE_MODEL_SWITCHER_PROOF_VERSIONS = {
+    "0.17.2",
+    "0.17.3",
+    ORACLE_ACTIVE_VERSION,
+}
+ORACLE_COPY_PROFILE_MANUAL_LOGIN_CONFLICT_PROOF_VERSIONS = {
+    "0.17.2",
+    "0.17.3",
+    ORACLE_ACTIVE_VERSION,
+}
+ORACLE_PROFILE_COPY_RSYNC_MISSING_PROOF_VERSIONS = {
+    "0.17.2",
+    "0.17.3",
+    ORACLE_ACTIVE_VERSION,
+}
+ORACLE_CHATGPT_SESSION_ABSENT_PROOF_VERSIONS = {
+    "0.17.2",
+    "0.17.3",
+    ORACLE_ACTIVE_VERSION,
+}
 ORACLE_PACKAGE = "@steipete/oracle"
 STATE_SCHEMA = "codex.chatgpt.oracle-run-state/v1"
 STATUSES = {"prepared", "running", "complete", "failed", "attention_required", "abandoned"}
@@ -185,8 +226,8 @@ ORACLE_MANUAL_LOGIN_PROFILE_UNINITIALIZED_RE = re.compile(
     r"Browser mode is using Oracle's private Chrome profile at (?P<profile>[^,\r\n]+), "
     r"separate from your normal Chrome profile\. Run first-time setup, sign in there, then retry:"
 )
-# Oracle 0.17.3 stopped copying cookies from a live Chrome profile by default,
-# so a stale signed-in seed profile now refuses before the composer is opened.
+# Oracle 0.17.3 stopped copying live-profile cookies by default; 0.18.0 keeps
+# that explicit opt-in, so a stale signed-in seed can refuse before the composer opens.
 # Both the plain and the `User error (browser-automation)` line must be present:
 # that pair is Oracle's own terminal pre-send refusal for a missing session.
 ORACLE_CHATGPT_SESSION_ABSENT_RE = re.compile(
@@ -3390,6 +3431,11 @@ def submit_mutex_name(project_root: Path) -> str:
     return f"Local\\codexpro-oracle-submit-{digest}"
 
 
+def recovery_mutex_name(run_dir: Path) -> str:
+    digest = hashlib.sha256(str(run_dir).casefold().encode("utf-8")).hexdigest()[:32]
+    return f"Local\\codexpro-oracle-recovery-{digest}"
+
+
 class WindowsSubmitMutex(AbstractContextManager["WindowsSubmitMutex"]):
     def __init__(self, name: str, timeout_seconds: float):
         self.name, self.timeout_seconds, self.handle, self.acquired = name, timeout_seconds, None, False
@@ -3478,6 +3524,19 @@ def project_submit_mutex(
     platform_name: str | None = None,
 ) -> AbstractContextManager[Any]:
     name = submit_mutex_name(project_root)
+    platform = os.name if platform_name is None else platform_name
+    if platform == "nt":
+        return WindowsSubmitMutex(name, timeout_seconds)
+    return FileSubmitMutex(name, timeout_seconds)
+
+
+def exact_run_recovery_mutex(
+    run_dir: Path,
+    *,
+    timeout_seconds: float,
+    platform_name: str | None = None,
+) -> AbstractContextManager[Any]:
+    name = recovery_mutex_name(run_dir)
     platform = os.name if platform_name is None else platform_name
     if platform == "nt":
         return WindowsSubmitMutex(name, timeout_seconds)

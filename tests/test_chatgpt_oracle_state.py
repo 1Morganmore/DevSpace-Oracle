@@ -148,7 +148,7 @@ def manifest(tmp_path: Path, mission_path: Path | str, **extra) -> Path:
         "mission_path": str(mission_path),
         "app_name": "DevSpace",
         "mode": "browser",
-        "oracle_command": ["npx", "-y", "@steipete/oracle@0.17.3"],
+        "oracle_command": ["npx", "-y", "@steipete/oracle@0.18.0"],
     }
     candidate_mission = Path(str(mission_path))
     if candidate_mission.is_absolute() and candidate_mission.is_file():
@@ -895,23 +895,35 @@ def test_pro_devspace_composer_fails_closed_on_a_degraded_install(
 def test_oracle_commands_pin_the_active_and_recoverable_versions() -> None:
     state = load_state()
 
-    assert state.ORACLE_ACTIVE_VERSION == "0.17.3"
-    assert state.ORACLE_RECOVERABLE_VERSIONS == ("0.16.1", "0.17.0", "0.17.1", "0.17.2", "0.17.3")
-    assert state.WAIT_CAPABLE_VERSIONS == {"0.17.0", "0.17.1", "0.17.3"}
-    assert state.ORACLE_UI_FAILURE_SETTLEMENT_VERSIONS == {"0.17.1", "0.17.2", "0.17.3"}
+    assert state.ORACLE_ACTIVE_VERSION == "0.18.0"
+    assert state.ORACLE_RECOVERABLE_VERSIONS == (
+        "0.16.1",
+        "0.17.0",
+        "0.17.1",
+        "0.17.2",
+        "0.17.3",
+        "0.18.0",
+    )
+    assert state.WAIT_CAPABLE_VERSIONS == {"0.17.0", "0.17.1", "0.17.3", "0.18.0"}
+    assert state.ORACLE_UI_FAILURE_SETTLEMENT_VERSIONS == {
+        "0.17.1",
+        "0.17.2",
+        "0.17.3",
+        "0.18.0",
+    }
     assert state.default_oracle_command(platform_name="nt") == (
-        "npx.cmd", "-y", "@steipete/oracle@0.17.3",
+        "npx.cmd", "-y", "@steipete/oracle@0.18.0",
     )
-    assert state.pinned_oracle_command("oracle 0.16.1", platform_name="posix") == (
-        "npx", "-y", "@steipete/oracle@0.16.1",
+    assert state.pinned_oracle_command("oracle 0.17.3", platform_name="posix") == (
+        "npx", "-y", "@steipete/oracle@0.17.3",
     )
-    assert state.validate_oracle_command(["npx", "--yes", "@steipete/oracle@0.17.3"])
+    assert state.validate_oracle_command(["npx", "--yes", "@steipete/oracle@0.18.0"])
 
     for command in (
         ["oracle"],
         ["npx", "-y", "@steipete/oracle"],
         ["npx", "-y", "@steipete/oracle@0.16.1"],
-        ["npx", "-y", "@steipete/oracle@0.18.0"],
+        ["npx", "-y", "@steipete/oracle@0.17.3"],
     ):
         with pytest.raises(state.OracleStateError) as exc:
             state.validate_oracle_command(command)
@@ -938,6 +950,38 @@ def test_nonempty_output_mutex_and_windows_flags(tmp_path: Path) -> None:
     assert state.mutex_wait_succeeded(state.WAIT_ABANDONED) is True
     assert state.mutex_wait_succeeded(state.WAIT_TIMEOUT) is False
     assert state.windows_subprocess_kwargs(platform_name="nt")["creationflags"] & state.CREATE_NO_WINDOW
+
+
+def test_exact_run_recovery_mutex_is_separate_and_run_scoped(tmp_path: Path) -> None:
+    state = load_state()
+    first_run = tmp_path / "runs" / "first"
+    second_run = tmp_path / "runs" / "second"
+    first_run.mkdir(parents=True)
+    second_run.mkdir()
+
+    first_name = state.recovery_mutex_name(first_run.resolve())
+    second_name = state.recovery_mutex_name(second_run.resolve())
+    assert first_name.startswith("Local\\codexpro-oracle-recovery-")
+    assert first_name != second_name
+    assert first_name != state.submit_mutex_name(tmp_path.resolve())
+
+    windows_mutex = state.exact_run_recovery_mutex(
+        first_run.resolve(),
+        timeout_seconds=7,
+        platform_name="nt",
+    )
+    posix_mutex = state.exact_run_recovery_mutex(
+        first_run.resolve(),
+        timeout_seconds=7,
+        platform_name="posix",
+    )
+    project_mutex = state.project_submit_mutex(
+        tmp_path.resolve(),
+        timeout_seconds=7,
+        platform_name="posix",
+    )
+    assert windows_mutex.name == first_name
+    assert posix_mutex.path != project_mutex.path
 
 
 def test_run_owned_browser_temp_is_removed_and_prior_boot_orphans_are_swept(
@@ -1357,21 +1401,40 @@ def test_pro_shapes_do_not_cross_settle_between_transports(tmp_path: Path) -> No
     assert state.proven_pre_submit_ui_failure(state_path) is None
 
 
-def test_pro_devspace_proof_additions_leave_version_sets_unchanged() -> None:
+def test_pro_devspace_proof_version_sets_preserve_recovery_generations() -> None:
     state = load_state()
 
-    assert state.ORACLE_THINKING_TIME_STRICT_PROOF_VERSIONS == {"0.17.2", "0.17.3"}
-    assert state.ORACLE_UI_FAILURE_SETTLEMENT_VERSIONS == {"0.17.1", "0.17.2", "0.17.3"}
-    assert state.ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_PROOF_VERSIONS == {"0.17.2", "0.17.3"}
+    active_proof_versions = {"0.17.2", "0.17.3", "0.18.0"}
+    assert state.ORACLE_THINKING_TIME_STRICT_PROOF_VERSIONS == active_proof_versions
+    assert state.ORACLE_UI_FAILURE_SETTLEMENT_VERSIONS == {
+        "0.17.1",
+        "0.17.2",
+        "0.17.3",
+        "0.18.0",
+    }
+    assert state.ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_PROOF_VERSIONS == active_proof_versions
     assert state.ORACLE_LEGACY_USER_CONFIRMATION_VERSIONS == {"0.17.1"}
     assert state.ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_USER_CONFIRMATION_VERSIONS == {
         "0.17.1",
         "0.17.2",
         "0.17.3",
+        "0.18.0",
     }
-    assert state.ORACLE_MODEL_SWITCHER_PROOF_VERSIONS == {"0.17.2", "0.17.3"}
-    assert state.ORACLE_COPY_PROFILE_MANUAL_LOGIN_CONFLICT_PROOF_VERSIONS == {"0.17.2", "0.17.3"}
-    assert state.ORACLE_PROFILE_COPY_RSYNC_MISSING_PROOF_VERSIONS == {"0.17.2", "0.17.3"}
+    assert state.ORACLE_APP_MENTION_ROUTE_UNCONFIRMED_RECORDED_VERSIONS == {
+        "0.17.1",
+        "0.17.2",
+        "0.17.3",
+        "0.18.0",
+    }
+    assert state.ORACLE_CHATGPT_SESSION_ABSENT_RECORDED_VERSIONS == {
+        "0.17.2",
+        "0.17.3",
+        "0.18.0",
+    }
+    assert state.ORACLE_MODEL_SWITCHER_PROOF_VERSIONS == active_proof_versions
+    assert state.ORACLE_COPY_PROFILE_MANUAL_LOGIN_CONFLICT_PROOF_VERSIONS == active_proof_versions
+    assert state.ORACLE_PROFILE_COPY_RSYNC_MISSING_PROOF_VERSIONS == active_proof_versions
+    assert state.ORACLE_CHATGPT_SESSION_ABSENT_PROOF_VERSIONS == active_proof_versions
 
 
 def test_submission_authority_class_vocabulary_is_fixed() -> None:
@@ -1650,9 +1713,9 @@ def test_bound_oracle_version_mismatch_invalidates_confirmation(
     payload["oracle"]["resolved_version"] = "oracle 0.17.3"
     settlement_path = state_path.parent / "user-confirmed-no-submission.json"
     recorded = json.loads(settlement_path.read_text(encoding="utf-8"))
-    recorded["oracle_version"] = "0.18.0"
+    recorded["oracle_version"] = "0.19.0"
     state.write_json_atomic(settlement_path, recorded)
-    payload["oracle"]["resolved_version"] = "oracle 0.18.0"
+    payload["oracle"]["resolved_version"] = "oracle 0.19.0"
     payload["user_confirmed_no_submission"]["sha256"] = state.sha256_file(settlement_path)
     state.write_json_atomic(state_path, payload)
 

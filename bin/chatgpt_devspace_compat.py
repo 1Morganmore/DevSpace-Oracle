@@ -24,6 +24,11 @@ PATCHES = {
         "pristine": "e11517f291cac33e37a66e84aeb80e1664a5abd0b6eb1e9bdb933d84c186efad",
         "patched": "68a4c61ae0f509bd40d2a682e0b9bbbac72cb00dc96693f7646e6a535cc872ed",
     },
+    "dist/oauth-provider.js": {
+        "patch": "oauth-refresh-replay.patch",
+        "pristine": "90ff3fd116735e98af5751de1065538964f6eaae913171223e8e19337b9831b8",
+        "patched": "30790b1c4e83e7865b3519e4c4a99ca3a182264f405f0eea26c80f0c471252dc",
+    },
 }
 
 
@@ -74,6 +79,221 @@ def resolve_package_roots(version: str = SUPPORTED_VERSION) -> list[Path]:
             {"version": version, "candidates": [str(path) for path in _candidate_roots()[:8]]},
         )
     return roots
+
+
+def check_oauth_refresh_replay(
+    *,
+    package_root: Path,
+    runner: Any = subprocess.run,
+) -> dict[str, Any]:
+    """Exercise the bounded refresh-token replay grace against an isolated database."""
+    root = package_root.expanduser().resolve(strict=True)
+    node = shutil.which("node")
+    if not node:
+        raise DevSpaceCompatError("DEVSPACE_NODE_MISSING", "Node.js is required for DevSpace")
+    source = r"""
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { SingleUserOAuthProvider } from "./dist/oauth-provider.js";
+const state = fs.mkdtempSync(path.join(os.tmpdir(), "codex-devspace-oauth-replay-"));
+const realDateNow = Date.now;
+let provider;
+try {
+  const resource = new URL("https://example.test/mcp");
+  provider = new SingleUserOAuthProvider({
+    ownerToken: "synthetic-test-only",
+    accessTokenTtlSeconds: 60,
+    refreshTokenTtlSeconds: 600,
+    scopes: ["devspace", "offline_access"],
+    allowedRedirectHosts: ["chatgpt.com"],
+  }, resource, state);
+  const client = await provider.clientsStore.registerClient({
+    redirect_uris: ["https://chatgpt.com/connector/oauth/callback"],
+    client_name: "DevSpace isolated refresh replay check",
+  });
+
+  const seed = provider.issueTokens(client.client_id, ["devspace"], resource);
+  const first = await provider.exchangeRefreshToken(client, seed.refresh_token);
+  const replay = await provider.exchangeRefreshToken(client, seed.refresh_token);
+  assert.deepEqual(replay, first);
+  await assert.rejects(() => provider.exchangeRefreshToken(
+    { ...client, client_id: "wrong-client" }, seed.refresh_token));
+  await assert.rejects(() => provider.exchangeRefreshToken(
+    client, seed.refresh_token, ["offline_access"]));
+  await assert.rejects(() => provider.exchangeRefreshToken(
+    client, seed.refresh_token, undefined, new URL("https://other.test/mcp")));
+
+  const exactScopeSeed = provider.issueTokens(
+    client.client_id, ["devspace", "offline_access"], resource);
+  const exactScopeFirst = await provider.exchangeRefreshToken(
+    client, exactScopeSeed.refresh_token);
+  const reorderedScopeReplay = await provider.exchangeRefreshToken(
+    client, exactScopeSeed.refresh_token, ["offline_access", "devspace"]);
+  assert.deepEqual(reorderedScopeReplay, exactScopeFirst);
+  await assert.rejects(() => provider.exchangeRefreshToken(
+    client, exactScopeSeed.refresh_token, ["devspace", "devspace"]));
+
+  const duplicateScopeSeed = provider.issueTokens(
+    client.client_id, ["devspace", "offline_access"], resource);
+  await provider.exchangeRefreshToken(
+    client, duplicateScopeSeed.refresh_token, ["devspace", "devspace"]);
+  await assert.rejects(() => provider.exchangeRefreshToken(
+    client, duplicateScopeSeed.refresh_token, ["devspace", "offline_access"]));
+
+  const ancestorSeed = provider.issueTokens(client.client_id, ["devspace"], resource);
+  const firstGeneration = await provider.exchangeRefreshToken(
+    client, ancestorSeed.refresh_token);
+  const secondGeneration = await provider.exchangeRefreshToken(
+    client, firstGeneration.refresh_token);
+  await assert.rejects(() => provider.exchangeRefreshToken(client, ancestorSeed.refresh_token));
+  const secondGenerationReplay = await provider.exchangeRefreshToken(
+    client, firstGeneration.refresh_token);
+  assert.deepEqual(secondGenerationReplay, secondGeneration);
+
+  await provider.verifyAccessToken(first.access_token);
+  await provider.revokeToken(client, { token: first.refresh_token });
+  await assert.rejects(() => provider.exchangeRefreshToken(client, seed.refresh_token));
+
+  const originalTtl = provider.config.refreshTokenTtlSeconds;
+  let testNowMs = Math.floor(realDateNow() / 1000) * 1000;
+  Date.now = () => testNowMs;
+  let nearExpirySeed;
+  let sourceBoundarySeed;
+  try {
+    provider.config.refreshTokenTtlSeconds = 1;
+    nearExpirySeed = provider.issueTokens(client.client_id, ["devspace"], resource);
+    sourceBoundarySeed = provider.issueTokens(client.client_id, ["devspace"], resource);
+  } finally {
+    provider.config.refreshTokenTtlSeconds = originalTtl;
+  }
+  const nearExpiryFirst = await provider.exchangeRefreshToken(
+    client, nearExpirySeed.refresh_token);
+  const nearExpiryReplay = [...provider.refreshReplays.values()].find(
+    (value) => value.tokens.refresh_token === nearExpiryFirst.refresh_token);
+  assert.equal(nearExpiryReplay?.expiresAtMs, testNowMs + 1000);
+  testNowMs += 1000;
+  await assert.rejects(() => provider.exchangeRefreshToken(client, nearExpirySeed.refresh_token));
+  await assert.rejects(() => provider.exchangeRefreshToken(client, sourceBoundarySeed.refresh_token));
+  Date.now = realDateNow;
+
+  const expiringSeed = provider.issueTokens(client.client_id, ["devspace"], resource);
+  await provider.exchangeRefreshToken(client, expiringSeed.refresh_token);
+  for (const value of provider.refreshReplays.values()) value.expiresAtMs = 0;
+  await assert.rejects(() => provider.exchangeRefreshToken(client, expiringSeed.refresh_token));
+
+  let expiredSeed;
+  try {
+    provider.config.refreshTokenTtlSeconds = -1;
+    expiredSeed = provider.issueTokens(client.client_id, ["devspace"], resource);
+  } finally {
+    provider.config.refreshTokenTtlSeconds = originalTtl;
+  }
+  await assert.rejects(() => provider.exchangeRefreshToken(client, expiredSeed.refresh_token));
+
+  const capacitySeeds = [];
+  for (let index = 0; index < 33; index += 1) {
+    const capacitySeed = provider.issueTokens(client.client_id, ["devspace"], resource);
+    capacitySeeds.push(capacitySeed.refresh_token);
+    await provider.exchangeRefreshToken(client, capacitySeed.refresh_token);
+  }
+  assert.equal(provider.refreshReplays.size, 32);
+  await assert.rejects(() => provider.exchangeRefreshToken(client, capacitySeeds[0]));
+  await provider.exchangeRefreshToken(client, capacitySeeds.at(-1));
+
+  console.log(JSON.stringify({
+    ok: true,
+    replayed_same_pair: true,
+    wrong_client_rejected: true,
+    scope_mismatch_rejected: true,
+    resource_mismatch_rejected: true,
+    scope_order_independent: true,
+    duplicate_requested_scopes_rejected: true,
+    duplicate_cached_scopes_rejected: true,
+    ancestor_replay_invalidated: true,
+    revoke_invalidated: true,
+    near_expiry_capped: true,
+    near_expiry_boundary_rejected: true,
+    source_boundary_rejected: true,
+    replay_expired_rejected: true,
+    source_expired_rejected: true,
+    capacity_bounded: true,
+    oldest_evicted: true,
+  }));
+} finally {
+  Date.now = realDateNow;
+  try {
+    if (provider) provider.close();
+  } finally {
+    fs.rmSync(state, { recursive: true, force: true });
+  }
+}
+"""
+    try:
+        completed = runner(
+            [node, "--input-type=module", "-e", source],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=30,
+            **_git_kwargs(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DevSpaceCompatError(
+            "DEVSPACE_OAUTH_REFRESH_REPLAY_CHECK_TIMEOUT",
+            "DevSpace OAuth refresh replay compatibility check timed out",
+            {"root": str(root), "timeout_seconds": exc.timeout},
+        ) from exc
+    except OSError as exc:
+        raise DevSpaceCompatError(
+            "DEVSPACE_OAUTH_REFRESH_REPLAY_CHECK_UNAVAILABLE",
+            "DevSpace OAuth refresh replay compatibility check could not start",
+            {"root": str(root), "errno": exc.errno, "error": str(exc)},
+        ) from exc
+    if completed.returncode != 0:
+        raise DevSpaceCompatError(
+            "DEVSPACE_OAUTH_REFRESH_REPLAY_CHECK_FAILED",
+            "DevSpace OAuth refresh replay compatibility check failed",
+            {"root": str(root), "stderr": (completed.stderr or "").strip()[-1200:]},
+        )
+    try:
+        result = json.loads((completed.stdout or "").strip())
+    except json.JSONDecodeError as exc:
+        raise DevSpaceCompatError(
+            "DEVSPACE_OAUTH_REFRESH_REPLAY_CHECK_INVALID",
+            "DevSpace OAuth refresh replay check did not return valid JSON",
+            {"root": str(root)},
+        ) from exc
+    expected = {
+        "ok": True,
+        "replayed_same_pair": True,
+        "wrong_client_rejected": True,
+        "scope_mismatch_rejected": True,
+        "resource_mismatch_rejected": True,
+        "scope_order_independent": True,
+        "duplicate_requested_scopes_rejected": True,
+        "duplicate_cached_scopes_rejected": True,
+        "ancestor_replay_invalidated": True,
+        "revoke_invalidated": True,
+        "near_expiry_capped": True,
+        "near_expiry_boundary_rejected": True,
+        "source_boundary_rejected": True,
+        "replay_expired_rejected": True,
+        "source_expired_rejected": True,
+        "capacity_bounded": True,
+        "oldest_evicted": True,
+    }
+    if result != expected:
+        raise DevSpaceCompatError(
+            "DEVSPACE_OAUTH_REFRESH_REPLAY_CHECK_INCOMPLETE",
+            "DevSpace OAuth refresh replay check did not prove every safety boundary",
+            {"root": str(root), "result": result},
+        )
+    return {**result, "root": str(root), "status": "bounded-replay-verified"}
 
 
 def patch_root() -> Path:
@@ -391,12 +611,18 @@ def ensure_devspace_compatibility(
     marker = restart_marker_path()
     if changed:
         marker = _write_restart_marker(roots)
+    oauth_checks = (
+        [check_oauth_refresh_replay(package_root=root) for root in roots]
+        if "dist/oauth-provider.js" in PATCHES
+        else []
+    )
     return {
         "ok": True,
         "version": SUPPORTED_VERSION,
         "package_roots": [str(root) for root in roots],
         "changed": changed,
         "already_patched": already,
+        "oauth_refresh_replay_checks": oauth_checks,
         "service_restart_required": marker.is_file(),
         "restart_marker": str(marker),
     }
@@ -485,15 +711,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--package-root", type=Path)
     parser.add_argument("--confirm-service-restarted", action="store_true")
     parser.add_argument("--stop-exact-service", action="store_true")
+    parser.add_argument("--check-oauth-refresh-replay", action="store_true")
     parser.add_argument("--local-port", type=int, default=7676)
     args = parser.parse_args(argv)
     try:
-        if args.confirm_service_restarted and args.stop_exact_service:
+        selected = sum(bool(value) for value in (
+            args.confirm_service_restarted,
+            args.stop_exact_service,
+            args.check_oauth_refresh_replay,
+        ))
+        if selected > 1:
             raise DevSpaceCompatError(
                 "DEVSPACE_COMPAT_ACTION_CONFLICT",
                 "choose only one DevSpace compatibility action",
             )
-        if args.confirm_service_restarted:
+        if args.check_oauth_refresh_replay:
+            roots = (
+                [args.package_root.expanduser().resolve(strict=True)]
+                if args.package_root is not None
+                else resolve_package_roots()
+            )
+            result = {
+                "ok": True,
+                "version": SUPPORTED_VERSION,
+                "checks": [check_oauth_refresh_replay(package_root=root) for root in roots],
+            }
+        elif args.confirm_service_restarted:
             result = confirm_service_restarted(
                 package_root=args.package_root,
                 local_port=args.local_port,

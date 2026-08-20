@@ -1,0 +1,15 @@
+diff --git a/dist/src/cli/browserConfig.js b/dist/src/cli/browserConfig.js
+index f50af9d..c7d9a7c 100644
+--- a/dist/src/cli/browserConfig.js
++++ b/dist/src/cli/browserConfig.js
+@@ -88,7 +88,9 @@
+         throw new Error("--copy-profile cannot be combined with --browser-keep-browser: the copied profile is a throwaway that is deleted after the run, so it must not be retained.");
+     }
+     if (options.copyProfile && options.browserManualLogin) {
+-        throw new Error("--copy-profile cannot be combined with --browser-manual-login: choose either a throwaway copied profile or the persistent manual-login profile.");
++        // Windows defaults to the persistent manual-login profile. An explicit
++        // copy-profile request is the isolation authority for this run.
++        options.browserManualLogin = false;
+     }
+     if (options.copyProfile && options.remoteChrome) {
+         throw new Error("--copy-profile cannot be combined with --remote-chrome: copied profiles require a locally launched Chrome instance.");

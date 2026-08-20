@@ -23,13 +23,17 @@ Only after the user approves the interactive DevSpace initialization and public 
 python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py setup --root C:\projects\example --hostname your-device.your-tailnet.ts.net --apply
 ```
 
-`--apply` runs DevSpace through Git Bash without a visible Windows console, starts `devspace serve`, registers the per-user `DevSpace MCP Server` Windows login entry, and creates an HTTPS Funnel to `127.0.0.1:7676`. During `devspace init`, enter only the listed roots and the public origin `https://<hostname>` (without `/mcp`).
+`--apply` runs DevSpace through Git Bash without a visible Windows console, starts `devspace serve`, keeps exactly one per-user HKCU Run value named `DevSpace MCP Server`, and creates an HTTPS Funnel to `127.0.0.1:7676`. That existing Run value launches a hidden single-instance watchdog; no second startup entry is created. During `devspace init`, enter only the listed roots and the public origin `https://<hostname>` (without `/mcp`).
 
 Managed `serve` launches set
 `DEVSPACE_OAUTH_SCOPES=devspace,offline_access`. DevSpace 1.0.7 uses that value
 in OAuth discovery and already issues refresh tokens. If an older app was
 created before `offline_access` was advertised, the user may need one manual
 reconnect or recreation; never automate that ChatGPT settings action.
+The DevSpace 1.0.7 compatibility layer also bounds consumed refresh-token
+replay to the same client, scope, and resource for 30 seconds and at most 32
+in-memory entries. Expired, revoked, or mismatched requests fail closed. It
+does not change credentials or the OAuth database schema.
 
 ## Change allowed roots
 
@@ -48,10 +52,19 @@ the persisted readback, and restarts only when `--restart` is explicit.
 
 Before starting or restarting DevSpace 1.0.7, run the installed
 `bin/chatgpt_devspace_compat.py`. It hash-validates the exact upstream
-`dist/workspaces.js`, backs it up, and applies bounded concurrent discovery
-that skips transient `.pytest-*` and cache trees. If it reports
-`service_restart_required=true`, restart DevSpace before any Oracle
-submission. Unknown versions or hashes fail closed.
+`dist/server.js`, `dist/workspaces.js`, and `dist/oauth-provider.js`, backs
+them up, and applies only the exact compatibility contracts: OAuth discovery,
+bounded workspace traversal, and bounded consumed-refresh replay. If it reports
+`service_restart_required=true`, restart DevSpace before any Oracle submission.
+Unknown versions or hashes fail closed.
+
+The managed watchdog rereads live `~/.devspace/config.json` on every health
+cycle, including roots, local port, and `publicBaseUrl`. It repairs only an
+unhealthy exact `{ok:true,name:"devspace"}` service through the pinned
+DevSpace 1.0.7 compatibility lifecycle and an absent exact Funnel mapping;
+mapping conflicts fail closed. It never changes roots, the Owner credential,
+OAuth clients/tokens, ChatGPT registration/settings, or any other config or
+authentication state.
 
 The only app information to enter manually in ChatGPT Developer Mode is:
 

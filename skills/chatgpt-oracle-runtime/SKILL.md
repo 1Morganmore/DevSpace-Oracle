@@ -10,13 +10,13 @@ DevSpace. Qualified Pro uses the `pro-devspace` transport — the DevSpace
 mention plus the absolute mission path, with mission-scoped file writes and
 command execution confined to the exact project root. Explicit
 immutable-evidence Pro uses the `pro-attachment-only` transport without any
-app. New runs pin Oracle
-`0.17.3`; Oracle `0.16.1`, `0.17.0`, `0.17.1`, and `0.17.2` are accepted only
-when recovering an exact run already persisted with that version.
-Oracle 0.17.3's upstream answer-placeholder bounding, manual-login reattach
-cookie-sync opt-in, Japanese Advanced/Effort labels, and explicit
-`--browser-headless` handling are preserved under the local hash-gated
-patches; live browser validation is not yet performed.
+app. New runs pin Oracle `0.18.0`; Oracle `0.16.1`, `0.17.0`, `0.17.1`,
+`0.17.2`, and `0.17.3` are accepted only when recovering an exact run already
+persisted with that version. Oracle 0.18.0's upstream disabled-tier detection
+and manual-login reattach cookie-sync opt-in are preserved under the local
+hash-gated patches together with strict visible Power proof, per-run copied
+profiles, and the existing timeout budgets; live browser validation is not yet
+performed.
 
 `chatgpt_oracle_dispatch.py` supports exactly `direct`, `plan`, `review`, `edit`,
 `orchestrator`, `deep-research`, `manual`, and `pro`. `manual` is a supported
@@ -131,8 +131,14 @@ action and `watch --run-dir <exact-run>` for read-only NDJSON lifecycle changes.
 Only execute the returned exact recovery argv when triage identifies that action;
 an active session is watched, never recovered or replaced. The aggregate bucket
 overview is `chatgpt_oracle_diagnose.py --summary-only` (no subcommand); that
-flag is rejected with `triage`/`watch`, which are single-run forms. An unsettled
-Oracle `session not detected` refusal that exited before send is reported by
+flag is rejected with `triage`/`watch`, which are single-run forms.
+Persisted nonempty `blocked` and `not_executed` outcomes classify as terminal
+task non-execution before a complete lifecycle can classify the run as complete.
+Exact same-artifact `OAuth token request failed` plus `503` evidence has its own
+registered-app OAuth signature. Persisted `unknown` and malformed or ambiguous
+v1 marker output remain unresolved; diagnosis never invents a loose marker-only
+settlement.
+An unsettled Oracle `session not detected` refusal that exited before send is reported by
 triage as `session-absent-awaiting-user-confirmation` with a
 `settle_no_submission` argv: run that exact settle command
 (`chatgpt_oracle_run.py settle-no-submission --run-dir <exact-run> --confirmation user-confirmed-no-submission --reason <reason>`)
@@ -152,6 +158,11 @@ The CLI keeps `--action live` inside one exact-slug recovery process for up to
 states keep the same live authority and project lock; they do not return every
 few minutes for Codex-side polling. When the exact session becomes terminal,
 the same process performs one harvest and returns once.
+Every exact recovery writer is serialized by a mutex derived from that run
+directory. It never acquires or waits for the project submission mutex:
+unresolved project ownership still blocks every fresh submission independently.
+After its normal observer wait, an original run rereads durable state and cannot
+overwrite a terminal harvested result written by exact recovery.
 If Oracle proves both that no live tab matches the exact slug and that its
 metadata has no recoverable canonical conversation URL, the runner returns
 `recovery_binding_unavailable` immediately instead of repeating that invariant

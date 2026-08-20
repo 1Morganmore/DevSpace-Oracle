@@ -1188,12 +1188,12 @@ def test_doctor_rejects_exact_case_package_mismatch(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize('mutation, fragment', [
     (
-        lambda source: source + '\nORACLE_ACTIVE_VERSION = "0.17.3"\n',
+        lambda source: source + '\nORACLE_ACTIVE_VERSION = "0.18.0"\n',
         'DUPLICATE:ORACLE_ACTIVE_VERSION',
     ),
     (
         lambda source: source.replace(
-            'ORACLE_ACTIVE_VERSION = "0.17.3"',
+            'ORACLE_ACTIVE_VERSION = "0.18.0"',
             'ORACLE_ACTIVE_VERSION = REGULAR_MODEL',
         ),
         'NONLITERAL:ORACLE_ACTIVE_VERSION',
@@ -1211,7 +1211,7 @@ def test_doctor_rejects_exact_case_package_mismatch(tmp_path: Path) -> None:
         'DELETE:ORACLE_ACTIVE_VERSION',
     ),
     (
-        lambda source: source + '\ndef _rebind():\n    ORACLE_ACTIVE_VERSION = "0.17.3"\n',
+        lambda source: source + '\ndef _rebind():\n    ORACLE_ACTIVE_VERSION = "0.18.0"\n',
         'NESTED:ORACLE_ACTIVE_VERSION',
     ),
     (

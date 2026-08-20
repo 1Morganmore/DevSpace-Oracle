@@ -6,7 +6,7 @@ A Windows automation toolkit that delegates planning, research, review, code
 changes, and testing to web ChatGPT while keeping local Codex work focused on
 transport, recovery, identity, hashes, and the final deterministic gate.
 
-The current release is `1.9.0`.
+The current release is `1.10.0`.
 
 It connects two upstream tools:
 
@@ -117,13 +117,14 @@ backpressure queue: four by default, configurable from 1 through 20 with
 - An Oracle browser profile signed in to ChatGPT
 - One manually registered DevSpace app in ChatGPT Developer Mode
 
-The validated combination is Oracle `0.17.3` and DevSpace `1.0.7`. The installer
+The validated combination is Oracle `0.18.0` and DevSpace `1.0.7`. The installer
 applies Windows compatibility patches only when exact upstream file hashes
-match. Oracle 0.17.3's upstream answer-placeholder bounding, manual-login
-reattach cookie-sync opt-in, Japanese picker labels, and explicit headless
-handling are preserved under the local hash-gated patches; live browser
-validation is not yet performed. Oracle `0.16.1`, `0.17.0`, `0.17.1`, and
-`0.17.2` remain available only for exact recovery of runs already persisted
+match. Oracle 0.18.0's upstream disabled-tier detection and manual-login
+reattach cookie-sync opt-in remain intact. The local hash-gated patches retain
+strict visible `Power 4 of 5` and `Power 5 of 5` proof, a copied per-run
+profile, and one overall answer-timeout budget. This release has not performed
+live browser validation. Oracle `0.16.1`, `0.17.0`, `0.17.1`, `0.17.2`, and
+`0.17.3` remain available only for exact recovery of runs already persisted
 with those versions.
 
 ## Install
@@ -164,6 +165,16 @@ project only changes the DevSpace allowed roots.
 
 See [DevSpace and Tailscale setup](docs/DEVSPACE_TAILSCALE_SETUP.md) for the
 complete procedure.
+
+The DevSpace 1.0.7 compatibility layer replays an already-consumed rotated
+refresh token only for the same client, scope, and resource, for 30 seconds and
+at most 32 in-memory entries. Revocation, expiry, and mismatch remain
+fail-closed; credentials and the OAuth database schema are unchanged. The one
+existing HKCU Run value, `DevSpace MCP Server`, starts a hidden single-instance
+watchdog. Every health cycle rereads `~/.devspace/config.json` and repairs only
+the exact DevSpace service identity and Funnel. It never changes the Owner
+credential, OAuth clients/tokens, ChatGPT registration/settings, or allowed
+roots.
 
 ## Regular GPT example
 
@@ -227,6 +238,10 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_dispatch.py" `
 - A browser or local-process exit is not proof that the web task failed.
 - Recovery uses only the persisted Oracle slug and exact conversation URL. It
   never resubmits the task.
+- Exact recovery writers serialize on a per-run mutex and never wait for the
+  project submission mutex. The unresolved run still blocks every fresh
+  submission, and a late original observer cannot overwrite already harvested
+  terminal durable state.
 - Completion requires Oracle exit code zero and a fresh, nonempty durable output.
 
 Recover one exact run with:
@@ -268,6 +283,11 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_oracle_diagnose.py" watch --run-dir 
 Oracle continues to own normal desktop completion notifications. `watch` adds
 host-state visibility for `attention_required`, emits NDJSON only on meaningful
 state changes, and never recovers or resubmits.
+
+Diagnosis classifies persisted `blocked` and `not_executed` outcomes before a
+complete lifecycle and reports same-artifact `OAuth token request failed` plus
+`503` evidence under a distinct registered-app OAuth signature. Malformed or
+ambiguous v1 markers and persisted `unknown` remain unresolved.
 
 ## Update, rollback, and uninstall
 

@@ -129,6 +129,7 @@ def classify_run(
     stdout_text: str,
     has_output: bool,
     transcript_text: str = "",
+    output_text: str = "",
     user_confirmed_no_submission: bool = False,
     pre_submit_host_failure: dict[str, Any] | None = None,
     submission_authority: dict[str, Any] | None = None,
@@ -199,14 +200,45 @@ def classify_run(
                 else "oracle-version-resolution-prelaunch-timeout"
             ),
         }
+    if lifecycle == "abandoned":
+        return {"bucket": ACTIVE, "signature": "explicitly-abandoned"}
+    if has_output and outcome in {"blocked", "not_executed"}:
+        return {
+            "bucket": TASK_NOT_EXECUTED,
+            "signature": (
+                "durable-output-reports-blocked"
+                if outcome == "blocked"
+                else "durable-output-reports-no-execution"
+            ),
+        }
+    evidence_texts = (stdout_text, transcript_text, output_text)
+    if outcome not in {"executed", "legacy_unclassified", "not_applicable"} and any(
+        "OAuth token request failed" in text and "503" in text
+        for text in evidence_texts
+    ):
+        return {
+            "bucket": PROVIDER_INCOMPLETE,
+            "signature": "registered-app-oauth-token-request-503",
+        }
+    if lifecycle == "complete" and outcome in {
+        "executed",
+        "legacy_unclassified",
+        "not_applicable",
+    }:
+        if source == "exact-terminal-evidence":
+            return {"bucket": COMPLETE, "signature": "terminal-harvested-output"}
+        return {"bucket": LEGACY_COMPLETE, "signature": "legacy-ledger-durable-output"}
+    if lifecycle == "complete" and has_output and (
+        outcome or str(state.get("task_outcome_contract") or "") == "v1"
+    ):
+        return {
+            "bucket": PROVIDER_INCOMPLETE,
+            "signature": "output-present-without-terminal-settlement",
+        }
     if lifecycle == "complete":
         if source == "exact-terminal-evidence":
             return {"bucket": COMPLETE, "signature": "terminal-harvested-output"}
         return {"bucket": LEGACY_COMPLETE, "signature": "legacy-ledger-durable-output"}
-    if lifecycle == "abandoned":
-        return {"bucket": ACTIVE, "signature": "explicitly-abandoned"}
-    if outcome == "not_executed" and has_output:
-        return {"bucket": TASK_NOT_EXECUTED, "signature": "durable-output-reports-no-execution"}
     if user_confirmed_no_submission:
         if (
             str(state.get("task_outcome_reason") or "")
@@ -294,12 +326,15 @@ def _run_record(run_dir: Path) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         }
     artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
     output_path = Path(str(artifacts.get("output") or (run_dir / "output.md")))
-    lifecycle = STATE.resolve_lifecycle(state, output_is_present=_output_is_nonempty(output_path))
+    has_output = _output_is_nonempty(output_path)
+    output_text = _read_text(output_path)
+    lifecycle = STATE.resolve_lifecycle(state, output_is_present=has_output)
     verdict = classify_run(
         state,
         stdout_text=_read_text(run_dir / "stdout.log"),
-        has_output=_output_is_nonempty(output_path),
+        has_output=has_output,
         transcript_text=_read_text(run_dir / "transcript.md"),
+        output_text=output_text,
         user_confirmed_no_submission=(
             STATE.proven_user_confirmed_no_submission(state_path) is not None
         ),
@@ -507,7 +542,7 @@ def watch(
             if getattr(stderr, "isatty", lambda: False)():
                 stderr.write("\a")
                 stderr.flush()
-            return 0 if lifecycle == "complete" else 2
+            return 0 if record["bucket"] in {COMPLETE, LEGACY_COMPLETE} else 2
         elapsed = clock() - started
         if timeout_seconds and elapsed >= timeout_seconds:
             writer({
@@ -541,11 +576,13 @@ def diagnose(state_root: Path | None = None) -> dict[str, Any]:
         authority = STATE.classify_submission_authority(run_dir)
         artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
         output_path = Path(str(artifacts.get("output") or (run_dir / "output.md")))
+        has_output = _output_is_nonempty(output_path)
         verdict = classify_run(
             state,
             stdout_text=_read_text(run_dir / "stdout.log"),
-            has_output=_output_is_nonempty(output_path),
+            has_output=has_output,
             transcript_text=_read_text(run_dir / "transcript.md"),
+            output_text=_read_text(output_path),
             user_confirmed_no_submission=(
                 STATE.proven_user_confirmed_no_submission(run_dir / "state.json") is not None
             ),
