@@ -46,6 +46,7 @@ ORACLE_0180_FIXTURE_FILES = {
     "dist/src/browser/actions/assistantResponse.js": "assistantResponse.pristine.js",
     "dist/src/browser/actions/promptComposer.js": "promptComposer.pristine.js",
     "dist/src/browser/actions/thinkingTime.js": "thinkingTime.pristine.js",
+    "dist/src/cli/browserTabs.js": "browserTabs.pristine.js",
 }
 PRISTINE_0180_FIXTURES = {
     relative: (
@@ -2104,7 +2105,7 @@ def test_exact_app_suggestion_with_wrong_semantic_decorator_fails_before_send(
     assert "APP_MENTION_ROUTE_UNCONFIRMED" in stderr
 
 
-def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> None:
+def test_oracle_0171_has_the_exact_nine_hash_gated_compatibility_patches() -> None:
     compat = load_compat()
     contracts = compat.VERSION_PATCHES["0.17.1"]
 
@@ -2122,6 +2123,7 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         path: (contract["pristine"], contract["patched"])
         for path, contract in contracts.items()
     } == {
+        "dist/src/cli/browserTabs.js": ("05256692ffa9b35415346963adde5ff42aeacd78ce46dd6f484496678f5d0281", "9329e259f030ecb4a935fb9e368bf55074bf0afe7ed5e5a0c6206a5f2bbacee4"),
         "dist/src/browser/chromeLifecycle.js": ("312b45c44d4cd69a3a057e7bd1584b58182b4b37bc88f6ce6c7d11e216267c81", "61440e467d51031efb7bfc319aef05de7c9061585e5eec148d0e353938eb2093"),
         "dist/src/browser/recoverConversation.js": ("d7e39d21acf07e6d227e761944519e11cd8d93930629cc87555d7de75a42d1ca", "cc2a036f6e2409ae7edceee1f381a5062cd6cc5cd1618af465a1b384081ed69e"),
         "dist/src/browser/profileCopy.js": ("06c692861f8a4c1a8769f957b9c582426a13bf4972262c47c1f24a87b239064f", "71459a25b7c46f57bae6f23a5498301f6f6a1d39addf0c1cd4eee1d99b03372c"),
@@ -2136,6 +2138,21 @@ def test_oracle_0171_has_the_exact_eight_hash_gated_compatibility_patches() -> N
         path: (compat.patch_root("0.17.1") / contract["patch"]).read_text(encoding="utf-8")
         for path, contract in contracts.items()
     }
+    browser_tabs = contracts["dist/src/cli/browserTabs.js"]
+    assert browser_tabs == {
+        "patch": "browserTabs.live-terminal-timeout.patch",
+        "pristine": "05256692ffa9b35415346963adde5ff42aeacd78ce46dd6f484496678f5d0281",
+        "patched": "9329e259f030ecb4a935fb9e368bf55074bf0afe7ed5e5a0c6206a5f2bbacee4",
+    }
+    assert digest(
+        (compat.patch_root("0.17.1") / "browserTabs.live-terminal-timeout.patch")
+        .read_bytes()
+        .replace(b"\r\n", b"\n")
+    ) == digest(
+        (compat.patch_root("0.16.1") / "browserTabs.patch").read_bytes().replace(b"\r\n", b"\n")
+    )
+    assert "ORACLE_LIVE_TERMINAL_TIMEOUT_MS" in patches["dist/src/cli/browserTabs.js"]
+    assert "holdRecoveredConnection" in patches["dist/src/cli/browserTabs.js"]
     assert 'process.platform === "win32"' in patches["dist/src/browser/profileCopy.js"]
     assert "options.browserManualLogin = false" in patches["dist/src/cli/browserConfig.js"]
     assert "config = { ...config, manualLogin: false" in patches["dist/src/browser/index.js"]
@@ -2291,6 +2308,7 @@ def test_oracle_0172_has_exact_hash_gated_patches_and_preserves_0171_recovery(
         path: (contract["pristine"], contract["patched"])
         for path, contract in contracts.items()
     } == {
+        "dist/src/cli/browserTabs.js": ("05256692ffa9b35415346963adde5ff42aeacd78ce46dd6f484496678f5d0281", "9329e259f030ecb4a935fb9e368bf55074bf0afe7ed5e5a0c6206a5f2bbacee4"),
         "dist/src/browser/chromeLifecycle.js": ("312b45c44d4cd69a3a057e7bd1584b58182b4b37bc88f6ce6c7d11e216267c81", "61440e467d51031efb7bfc319aef05de7c9061585e5eec148d0e353938eb2093"),
         "dist/src/browser/recoverConversation.js": ("d7e39d21acf07e6d227e761944519e11cd8d93930629cc87555d7de75a42d1ca", "cc2a036f6e2409ae7edceee1f381a5062cd6cc5cd1618af465a1b384081ed69e"),
         "dist/src/browser/profileCopy.js": ("06c692861f8a4c1a8769f957b9c582426a13bf4972262c47c1f24a87b239064f", "71459a25b7c46f57bae6f23a5498301f6f6a1d39addf0c1cd4eee1d99b03372c"),
@@ -2452,6 +2470,7 @@ def test_oracle_0173_has_exact_hash_gated_patches_and_preserves_0172_recovery(
         path: (contract["pristine"], contract["patched"])
         for path, contract in contracts.items()
     } == {
+        "dist/src/cli/browserTabs.js": ("05256692ffa9b35415346963adde5ff42aeacd78ce46dd6f484496678f5d0281", "9329e259f030ecb4a935fb9e368bf55074bf0afe7ed5e5a0c6206a5f2bbacee4"),
         "dist/src/browser/chromeLifecycle.js": ("312b45c44d4cd69a3a057e7bd1584b58182b4b37bc88f6ce6c7d11e216267c81", "61440e467d51031efb7bfc319aef05de7c9061585e5eec148d0e353938eb2093"),
         "dist/src/browser/recoverConversation.js": ("d7e39d21acf07e6d227e761944519e11cd8d93930629cc87555d7de75a42d1ca", "cc2a036f6e2409ae7edceee1f381a5062cd6cc5cd1618af465a1b384081ed69e"),
         "dist/src/browser/profileCopy.js": ("06c692861f8a4c1a8769f957b9c582426a13bf4972262c47c1f24a87b239064f", "71459a25b7c46f57bae6f23a5498301f6f6a1d39addf0c1cd4eee1d99b03372c"),
@@ -2510,6 +2529,10 @@ def test_oracle_0180_patches_the_exact_pristine_dist_and_preserves_0173_recovery
     compat = load_compat()
     contracts = compat.VERSION_PATCHES["0.18.0"]
     expected = {
+        "dist/src/cli/browserTabs.js": (
+            "05256692ffa9b35415346963adde5ff42aeacd78ce46dd6f484496678f5d0281",
+            "9329e259f030ecb4a935fb9e368bf55074bf0afe7ed5e5a0c6206a5f2bbacee4",
+        ),
         "dist/src/browser/chromeLifecycle.js": (
             "312b45c44d4cd69a3a057e7bd1584b58182b4b37bc88f6ce6c7d11e216267c81",
             "61440e467d51031efb7bfc319aef05de7c9061585e5eec148d0e353938eb2093",
@@ -2610,6 +2633,28 @@ def test_oracle_0180_patches_the_exact_pristine_dist_and_preserves_0173_recovery
         (compat.patch_root("0.17.3") / contract["patch"]).is_file()
         for contract in recovery.values()
     )
+
+
+def test_browser_tabs_live_terminal_timeout_patch_covers_all_recoverable_versions() -> None:
+    # The 0.17.1+ live-terminal-timeout fix targets the exact same published
+    # browserTabs.js bytes as 0.16.1 (verified pristine 05256692... in the
+    # published 0.17.1/0.17.2/0.17.3/0.18.0 tarballs), so every recoverable
+    # version from 0.17.1 on carries the same hash-gated row and the exact
+    # same patch file bytes as the 0.16.1 contract.
+    compat = load_compat()
+    legacy_patch = (
+        compat.patch_root("0.16.1") / "browserTabs.patch"
+    ).read_bytes().replace(b"\r\n", b"\n")
+    for version in ("0.17.1", "0.17.2", "0.17.3", "0.18.0"):
+        contract = compat.VERSION_PATCHES[version]["dist/src/cli/browserTabs.js"]
+        assert contract == {
+            "patch": "browserTabs.live-terminal-timeout.patch",
+            "pristine": "05256692ffa9b35415346963adde5ff42aeacd78ce46dd6f484496678f5d0281",
+            "patched": "9329e259f030ecb4a935fb9e368bf55074bf0afe7ed5e5a0c6206a5f2bbacee4",
+        }
+        patch_path = compat.patch_root(version) / contract["patch"]
+        assert patch_path.is_file(), patch_path
+        assert digest(patch_path.read_bytes().replace(b"\r\n", b"\n")) == digest(legacy_patch)
 
 
 def test_oracle_0180_unknown_dist_bytes_fail_closed_before_patching(

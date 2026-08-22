@@ -281,6 +281,11 @@ PATCHES_0171 = {
                 "thinkingTime.strict.pre-ancestor-opacity-proof.patch",
         },
     },
+    "dist/src/cli/browserTabs.js": {
+        "patch": "browserTabs.live-terminal-timeout.patch",
+        "pristine": "05256692ffa9b35415346963adde5ff42aeacd78ce46dd6f484496678f5d0281",
+        "patched": "9329e259f030ecb4a935fb9e368bf55074bf0afe7ed5e5a0c6206a5f2bbacee4",
+    },
 }
 
 PATCHES_0172 = {
@@ -348,6 +353,11 @@ PATCHES_0172 = {
         },
         "legacy_patch": "thinkingTime.strict.pre-picker-menu-scope.patch",
     },
+    "dist/src/cli/browserTabs.js": {
+        "patch": "browserTabs.live-terminal-timeout.patch",
+        "pristine": "05256692ffa9b35415346963adde5ff42aeacd78ce46dd6f484496678f5d0281",
+        "patched": "9329e259f030ecb4a935fb9e368bf55074bf0afe7ed5e5a0c6206a5f2bbacee4",
+    },
 }
 
 PATCHES_0173 = {
@@ -391,6 +401,11 @@ PATCHES_0173 = {
         "pristine": "6ff4420e81570f6c0a4e277bdd993caf66739c3f633a7cdb733ed645bec2acda",
         "patched": "98724eaf24e27d6f75b3eb7795c49650aee0be6a9a3698e09882c6d3a06c3185",
     },
+    "dist/src/cli/browserTabs.js": {
+        "patch": "browserTabs.live-terminal-timeout.patch",
+        "pristine": "05256692ffa9b35415346963adde5ff42aeacd78ce46dd6f484496678f5d0281",
+        "patched": "9329e259f030ecb4a935fb9e368bf55074bf0afe7ed5e5a0c6206a5f2bbacee4",
+    },
 }
 
 PATCHES_0180 = {
@@ -433,6 +448,11 @@ PATCHES_0180 = {
         "patch": "thinkingTime.strict.patch",
         "pristine": "3d9d06b08417bca3b2d646eb4d46887d26c5de7c068d1e995c73b6b6e2f61199",
         "patched": "e58fcd1f50cac2fdfb9334df485e035896586182acddbb46d846c12bdbdeb424",
+    },
+    "dist/src/cli/browserTabs.js": {
+        "patch": "browserTabs.live-terminal-timeout.patch",
+        "pristine": "05256692ffa9b35415346963adde5ff42aeacd78ce46dd6f484496678f5d0281",
+        "patched": "9329e259f030ecb4a935fb9e368bf55074bf0afe7ed5e5a0c6206a5f2bbacee4",
     },
 }
 

@@ -1,0 +1,324 @@
+import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
+import chalk from "chalk";
+import { sessionStore } from "../sessionStore.js";
+import { collectChatGptTabs, DEFAULT_REMOTE_CHROME_HOST, DEFAULT_REMOTE_CHROME_PORT, extractConversationIdFromUrl, formatBrowserTabState, harvestChatGptTab, sessionMatchesTab, } from "../browser/liveTabs.js";
+import { isRecoveredConversationHarvestReady, recoverConversationTab, } from "../browser/recoverConversation.js";
+import { resolveOutputPath } from "./writeOutputPath.js";
+const LIVE_POLL_MS = 2000;
+const DEFAULT_STALL_THRESHOLD_MS = 60_000;
+function isRecoverableMissingTabError(message) {
+    return (message.includes("No ChatGPT tab matched") ||
+        message.includes("No live ChatGPT tabs found") ||
+        message.includes("ECONNREFUSED") ||
+        message.includes("Could not connect"));
+}
+function finishRecoveredChrome(recoveredChrome, closeAfterRecover) {
+    if (!recoveredChrome) {
+        return;
+    }
+    try {
+        if (closeAfterRecover) {
+            recoveredChrome.kill();
+        }
+        else {
+            recoveredChrome.process?.unref?.();
+        }
+    }
+    catch {
+        // best-effort cleanup
+    }
+}
+function sessionBrowserEndpoint(meta) {
+    const runtime = meta?.browser?.runtime ?? {};
+    const remote = meta?.browser?.config?.remoteChrome ?? {};
+    const host = runtime.chromeHost ?? remote.host;
+    const port = runtime.chromePort ?? remote.port;
+    if (!host || !port) {
+        return null;
+    }
+    return { host, port };
+}
+function collectUniqueEndpoints(metas) {
+    const entries = new Map();
+    entries.set(`${DEFAULT_REMOTE_CHROME_HOST}:${DEFAULT_REMOTE_CHROME_PORT}`, {
+        host: DEFAULT_REMOTE_CHROME_HOST,
+        port: DEFAULT_REMOTE_CHROME_PORT,
+    });
+    for (const meta of metas) {
+        const endpoint = sessionBrowserEndpoint(meta);
+        if (!endpoint) {
+            continue;
+        }
+        entries.set(`${endpoint.host}:${endpoint.port}`, endpoint);
+    }
+    return Array.from(entries.values());
+}
+function buildSessionIndex(metas) {
+    return metas
+        .filter((meta) => meta?.mode === "browser")
+        .sort((left, right) => String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? "")));
+}
+function resolveLinkedSession(tab, metas) {
+    return buildSessionIndex(metas).find((meta) => sessionMatchesTab(meta, tab)) ?? null;
+}
+function snippet(text, max = 120) {
+    const normalized = String(text ?? "")
+        .replace(/\s+/g, " ")
+        .trim();
+    if (normalized.length <= max) {
+        return normalized;
+    }
+    return `${normalized.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
+}
+function resolveSessionTabRef(meta) {
+    const runtime = meta?.browser?.runtime ?? {};
+    const harvest = meta?.browser?.harvest ?? {};
+    return (harvest.url ??
+        runtime.tabUrl ??
+        harvest.conversationId ??
+        runtime.conversationId ??
+        harvest.targetId ??
+        runtime.chromeTargetId ??
+        "current");
+}
+export function resolveSessionTabRefForTest(meta) {
+    return resolveSessionTabRef(meta);
+}
+async function persistHarvest(sessionId, meta, harvested) {
+    const hash = createHash("sha1")
+        .update(harvested.lastAssistantMarkdown ?? harvested.lastAssistantText ?? "")
+        .digest("hex");
+    const browser = {
+        ...(meta.browser ?? {}),
+        harvest: {
+            targetId: harvested.targetId,
+            url: harvested.url,
+            conversationId: harvested.conversationId ?? extractConversationIdFromUrl(harvested.url),
+            harvestedAt: new Date().toISOString(),
+            assistantHash: hash,
+            state: harvested.state,
+            stopExists: harvested.stopExists,
+            sendExists: harvested.sendExists,
+            assistantCount: harvested.assistantCount,
+            currentModelLabel: harvested.currentModelLabel,
+            lastAssistantSnippet: harvested.lastAssistantSnippet,
+        },
+    };
+    await sessionStore.updateSession(sessionId, { browser });
+}
+function printHarvestSummary(sessionId, harvested) {
+    console.log(chalk.bold(`Session: ${sessionId}`));
+    console.log(`Target: ${harvested.targetId}`);
+    console.log(`State: ${formatBrowserTabState(harvested)}`);
+    console.log(`Model: ${harvested.currentModelLabel || "(unknown)"}`);
+    console.log(`URL: ${harvested.url}`);
+    console.log(`Assistant turns: ${harvested.assistantCount}`);
+    console.log(`Signals: stop=${harvested.stopExists ? "yes" : "no"} send=${harvested.sendExists ? "yes" : "no"}`);
+    if (harvested.lastUserSnippet) {
+        console.log(`Last user: ${harvested.lastUserSnippet}`);
+    }
+    console.log(chalk.dim("---"));
+}
+async function maybeWriteHarvestOutput(pathInput, cwd, content) {
+    const resolved = resolveOutputPath(pathInput, cwd);
+    if (!resolved) {
+        return;
+    }
+    const payload = content ?? "";
+    if (resolved === "-" || resolved === "/dev/stdout") {
+        process.stdout.write(`${payload}${payload.endsWith("\n") ? "" : "\n"}`);
+        return;
+    }
+    await fs.writeFile(resolved, payload, "utf8");
+    console.log(chalk.dim(`Wrote harvested assistant output to ${resolved}`));
+}
+export async function showBrowserTabsStatus() {
+    const metas = await sessionStore.listSessions().catch(() => []);
+    const endpoints = collectUniqueEndpoints(metas);
+    let printedAny = false;
+    for (const endpoint of endpoints) {
+        let tabs;
+        try {
+            tabs = await collectChatGptTabs(endpoint);
+        }
+        catch {
+            continue;
+        }
+        if (tabs.length === 0) {
+            continue;
+        }
+        printedAny = true;
+        console.log(chalk.bold(`Browser Tabs ${endpoint.host}:${endpoint.port}`));
+        for (const tab of tabs) {
+            const linkedSession = resolveLinkedSession({ ...tab, host: endpoint.host, port: endpoint.port }, metas);
+            console.log(`- ${tab.targetId} ${formatBrowserTabState(tab)} model=${tab.currentModelLabel || "(unknown)"} turns=${tab.assistantCount} stop=${tab.stopExists ? "yes" : "no"} send=${tab.sendExists ? "yes" : "no"}`);
+            console.log(`  title=${tab.title || "(untitled)"}`);
+            console.log(`  url=${tab.url}`);
+            if (linkedSession) {
+                console.log(`  session=${linkedSession.id}`);
+            }
+            if (tab.lastAssistantSnippet) {
+                console.log(`  last=${snippet(tab.lastAssistantSnippet)}`);
+            }
+        }
+    }
+    if (!printedAny) {
+        console.log("No live ChatGPT tabs found on known Chrome DevTools endpoints.");
+    }
+}
+export async function harvestSessionBrowserOutput(sessionId, options = {}) {
+    const meta = await sessionStore.readSession(sessionId);
+    if (!meta) {
+        throw new Error(`No session found with ID ${sessionId}.`);
+    }
+    const recordedEndpoint = sessionBrowserEndpoint(meta);
+    const initialEndpoint = recordedEndpoint ?? {
+        host: DEFAULT_REMOTE_CHROME_HOST,
+        port: DEFAULT_REMOTE_CHROME_PORT,
+    };
+    const ref = options.browserTabRef ?? resolveSessionTabRef(meta);
+    const recoverIfMissing = options.recoverIfMissing !== false && !options.browserTabRef;
+    let recoveredChrome = null;
+    try {
+        let harvested;
+        try {
+            harvested = await harvestChatGptTab({
+                host: initialEndpoint.host,
+                port: initialEndpoint.port,
+                ref,
+                stallWindowMs: options.stallWindowMs,
+            });
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (!isRecoverableMissingTabError(message) || !recoverIfMissing) {
+                throw error;
+            }
+            console.log(chalk.yellow(`No live ChatGPT tab matched session "${sessionId}". Attempting recovery by reopening the saved conversation URL.`));
+            const recovered = await recoverConversationTab(meta, (line) => console.log(line), {
+                existingEndpoint: recordedEndpoint ?? undefined,
+            });
+            recoveredChrome = recovered.chrome;
+            harvested = await harvestChatGptTab({
+                host: recovered.host,
+                port: recovered.port,
+                ref: recovered.ref,
+                stallWindowMs: options.stallWindowMs,
+            });
+        }
+        await persistHarvest(sessionId, meta, harvested);
+        printHarvestSummary(sessionId, harvested);
+        const output = harvested.lastAssistantMarkdown ?? harvested.lastAssistantText ?? "";
+        if (options.writeOutputPath) {
+            await maybeWriteHarvestOutput(options.writeOutputPath, meta.cwd ?? process.cwd(), output);
+        }
+        if (!options.quietOutput && output) {
+            process.stdout.write(`${output}${output.endsWith("\n") ? "" : "\n"}`);
+        }
+        return harvested;
+    }
+    finally {
+        finishRecoveredChrome(recoveredChrome, options.closeAfterRecover);
+    }
+}
+export async function liveTailSessionBrowserOutput(sessionId, options = {}) {
+    const meta = await sessionStore.readSession(sessionId);
+    if (!meta) {
+        throw new Error(`No session found with ID ${sessionId}.`);
+    }
+    const recordedEndpoint = sessionBrowserEndpoint(meta);
+    let endpoint = recordedEndpoint ?? {
+        host: DEFAULT_REMOTE_CHROME_HOST,
+        port: DEFAULT_REMOTE_CHROME_PORT,
+    };
+    let browserTabRef = options.browserTabRef ?? resolveSessionTabRef(meta);
+    const recoverIfMissing = options.recoverIfMissing !== false && !options.browserTabRef;
+    let recoveredChrome = null;
+    const stallThresholdMs = options.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
+    let lastHash = null;
+    let unchangedSince = Date.now();
+    let requireRecoveredContent = false;
+    let recoveredContentDeadlineMs = 0;
+    try {
+        // Probe once to see if the live tab is still alive; recover if not.
+        try {
+            await harvestChatGptTab({
+                host: endpoint.host,
+                port: endpoint.port,
+                ref: browserTabRef,
+            });
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (!isRecoverableMissingTabError(message) || !recoverIfMissing) {
+                throw error;
+            }
+            console.log(chalk.yellow(`No live ChatGPT tab matched session "${sessionId}". Attempting recovery by reopening the saved conversation URL.`));
+            const recovered = await recoverConversationTab(meta, (line) => console.log(line), {
+                existingEndpoint: recordedEndpoint ?? undefined,
+                waitForReady: false,
+            });
+            recoveredChrome = recovered.chrome;
+            endpoint = { host: recovered.host, port: recovered.port };
+            browserTabRef = recovered.ref;
+            requireRecoveredContent = true;
+            recoveredContentDeadlineMs = Date.now() + stallThresholdMs;
+        }
+        while (true) {
+            const harvested = await harvestChatGptTab({
+                host: endpoint.host,
+                port: endpoint.port,
+                ref: browserTabRef,
+            });
+            const fullText = harvested.lastAssistantMarkdown ?? harvested.lastAssistantText ?? "";
+            if (requireRecoveredContent && !isRecoveredConversationHarvestReady(harvested)) {
+                if (Date.now() < recoveredContentDeadlineMs) {
+                    await new Promise((resolve) => setTimeout(resolve, LIVE_POLL_MS));
+                    continue;
+                }
+                throw new Error("Recovered ChatGPT conversation did not become ready in time.");
+            }
+            requireRecoveredContent = false;
+            const hash = createHash("sha1").update(fullText).digest("hex");
+            if (hash !== lastHash) {
+                lastHash = hash;
+                unchangedSince = Date.now();
+                const statusLine = `[${new Date().toISOString()}] state=${harvested.state} stop=${harvested.stopExists ? "yes" : "no"} ` +
+                    `send=${harvested.sendExists ? "yes" : "no"} model=${harvested.currentModelLabel || "(unknown)"} ` +
+                    `snippet=${snippet(harvested.lastAssistantSnippet || fullText, 160)}`;
+                console.log(statusLine);
+                await persistHarvest(sessionId, meta, harvested);
+            }
+            const derivedState = harvested.stopExists
+                ? Date.now() - unchangedSince >= stallThresholdMs
+                    ? "stalled"
+                    : "running"
+                : harvested.authenticated
+                    ? "completed"
+                    : "detached";
+            if (derivedState === "completed" ||
+                derivedState === "stalled" ||
+                derivedState === "detached") {
+                const finalHarvest = {
+                    ...harvested,
+                    state: derivedState,
+                };
+                await persistHarvest(sessionId, meta, finalHarvest);
+                printHarvestSummary(sessionId, finalHarvest);
+                const output = finalHarvest.lastAssistantMarkdown ?? finalHarvest.lastAssistantText ?? "";
+                if (options.writeOutputPath) {
+                    await maybeWriteHarvestOutput(options.writeOutputPath, meta.cwd ?? process.cwd(), output);
+                }
+                if (output) {
+                    process.stdout.write(`${output}${output.endsWith("\n") ? "" : "\n"}`);
+                }
+                return finalHarvest;
+            }
+            await new Promise((resolve) => setTimeout(resolve, LIVE_POLL_MS));
+        }
+    }
+    finally {
+        finishRecoveredChrome(recoveredChrome, options.closeAfterRecover);
+    }
+}
