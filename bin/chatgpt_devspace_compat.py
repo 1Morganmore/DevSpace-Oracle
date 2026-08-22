@@ -15,9 +15,9 @@ SUPPORTED_VERSION = "1.0.7"
 CREATE_NO_WINDOW = 0x08000000
 PATCHES = {
     "dist/server.js": {
-        "patch": "server.patch",
+        "patch": "delete-trash.patch",
         "pristine": "42d340924421182eea7f2580f96c8d1d5aae459061a6a90804e6900905ef2d72",
-        "patched": "5bd899c33e5db3afd1f41eb220c6346ee27d29421fb58c47db498ae3b691a8f7",
+        "patched": "9485795c98de9ecc29c86113b0e726d2ddf1b1abe1817b3656a37ce5fd84d02f",
     },
     "dist/workspaces.js": {
         "patch": "workspaces.patch",

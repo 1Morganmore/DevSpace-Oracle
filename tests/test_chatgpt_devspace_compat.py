@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +26,20 @@ def load_compat():
 
 def digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+@pytest.fixture(autouse=True)
+def isolate_compat_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never touch the real user restart marker; every test gets a private root."""
+    monkeypatch.setenv("CODEX_DEVSPACE_COMPAT_STATE_ROOT", str(tmp_path / "compat-state"))
+
+
+def test_compat_tests_use_an_isolated_restart_marker(tmp_path: Path) -> None:
+    compat = load_compat()
+    state_root = compat.compat_state_root()
+    assert tmp_path in state_root.parents
+    marker = compat.restart_marker_path()
+    assert tmp_path in marker.parents
 
 
 def test_exact_devspace_patch_is_hash_gated_idempotent_and_backed_up(
@@ -284,7 +300,7 @@ def test_oauth_discovery_patch_exposes_chatgpt_path_specific_metadata() -> None:
         MODULE_PATH.parent
         / "devspace-compat"
         / compat.SUPPORTED_VERSION
-        / "server.patch"
+        / "delete-trash.patch"
     )
     patch = patch_path.read_text(encoding="utf-8")
     parsed = subprocess.run(
@@ -295,11 +311,12 @@ def test_oauth_discovery_patch_exposes_chatgpt_path_specific_metadata() -> None:
     )
 
     assert parsed.returncode == 0, parsed.stderr
+    assert compat.PATCHES["dist/server.js"]["patch"] == "delete-trash.patch"
     assert compat.PATCHES["dist/server.js"]["pristine"] == (
         "42d340924421182eea7f2580f96c8d1d5aae459061a6a90804e6900905ef2d72"
     )
     assert compat.PATCHES["dist/server.js"]["patched"] == (
-        "5bd899c33e5db3afd1f41eb220c6346ee27d29421fb58c47db498ae3b691a8f7"
+        "9485795c98de9ecc29c86113b0e726d2ddf1b1abe1817b3656a37ce5fd84d02f"
     )
     assert 'req.path === "/.well-known/oauth-authorization-server/mcp"' in patch
     assert 'req.url = "/.well-known/oauth-authorization-server"' in patch
@@ -454,3 +471,136 @@ def test_restart_marker_inventory_includes_oauth_refresh_patch(
     assert payload["patched_files"][oauth_target] == (
         "30790b1c4e83e7865b3519e4c4a99ca3a182264f405f0eea26c80f0c471252dc"
     )
+
+
+def test_delete_trash_patch_is_hash_gated_and_preserves_registrations() -> None:
+    compat = load_compat()
+    patch_path = (
+        MODULE_PATH.parent
+        / "devspace-compat"
+        / compat.SUPPORTED_VERSION
+        / "delete-trash.patch"
+    )
+    patch = patch_path.read_text(encoding="utf-8")
+    parsed = subprocess.run(
+        ["git", "apply", "--numstat", "--", str(patch_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert parsed.returncode == 0, parsed.stderr
+    assert digest(patch_path.read_bytes()) == (
+        "c65e4f4f8baa5a19ad72e36229f7ae136bd49bff68e9faee3de623720dd25ee3"
+    )
+    assert compat.PATCHES["dist/server.js"] == {
+        "patch": "delete-trash.patch",
+        "pristine": "42d340924421182eea7f2580f96c8d1d5aae459061a6a90804e6900905ef2d72",
+        "patched": "9485795c98de9ecc29c86113b0e726d2ddf1b1abe1817b3656a37ce5fd84d02f",
+    }
+    assert 'delete: "delete_file"' in patch
+    assert 'trash: "trash_file"' in patch
+    assert "function isStrictChildPath" in patch
+    assert "await unlink(target);" in patch
+    assert "await rename(target, destination);" in patch
+    assert "existsAfter: false" in patch
+    assert "originalRelativePath: segments.join" in patch
+    assert "trashRelativePath:" in patch
+    assert "before.sha256 !== after.sha256" in patch
+    assert '"DELETE_ABSOLUTE_PATH_FORBIDDEN"' in patch
+    assert '"DELETE_TRAVERSAL_FORBIDDEN"' in patch
+    assert '"DELETE_PROTECTED_TARGET"' in patch
+    assert '"DELETE_OUTSIDE_WORKSPACE"' in patch
+    assert '"DELETE_REPARSE_FORBIDDEN"' in patch
+    assert '"DELETE_TARGET_NOT_REGULAR_FILE"' in patch
+    assert '"DELETE_REPARSE_ESCAPE"' in patch
+    assert '"DELETE_POSTCHECK_FAILED"' in patch
+    assert '"TRASH_ABSOLUTE_PATH_FORBIDDEN"' in patch
+    assert '"TRASH_TRAVERSAL_FORBIDDEN"' in patch
+    assert '"TRASH_PROTECTED_TARGET"' in patch
+    assert '"TRASH_OUTSIDE_WORKSPACE"' in patch
+    assert '"TRASH_REPARSE_FORBIDDEN"' in patch
+    assert '"TRASH_TARGET_NOT_REGULAR_FILE"' in patch
+    assert '"TRASH_DESTINATION_COLLISION"' in patch
+    assert '"TRASH_CONTENT_MISMATCH"' in patch
+    assert '"TRASH_POSTCHECK_FAILED"' in patch
+    assert "annotations: DELETE_TOOL_ANNOTATIONS" in patch
+    assert "annotations: TRASH_TOOL_ANNOTATIONS" in patch
+    assert "destructiveHint: true" in patch
+    assert "readOnlyHint: false" in patch
+    assert 'registerAppTool(server, toolNames.delete' in patch
+    assert 'registerAppTool(server, toolNames.trash' in patch
+    assert 'req.path === "/.well-known/oauth-authorization-server/mcp"' in patch
+
+
+def test_delete_trash_patch_safety_contract_on_temporary_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compat = load_compat()
+    try:
+        source_root = compat.resolve_package_roots()[0]
+    except compat.DevSpaceCompatError as exc:
+        pytest.skip(f"DevSpace {compat.SUPPORTED_VERSION} package unavailable: {exc.code}")
+    package = tmp_path / "devspace"
+    (package / "dist").mkdir(parents=True)
+    shutil.copy2(source_root / "dist" / "server.js", package / "dist" / "server.js")
+    (package / "package.json").write_text(json.dumps({"version": "1.0.7"}), encoding="utf-8")
+    monkeypatch.setenv("CODEX_DEVSPACE_COMPAT_STATE_ROOT", str(tmp_path / "state"))
+    compat.PATCHES = {"dist/server.js": compat.PATCHES["dist/server.js"]}
+    compat.ensure_devspace_compatibility(package_root=package, backup_root=tmp_path / "backup")
+    server = (package / "dist" / "server.js").read_text(encoding="utf-8")
+    assert compat.sha256_file(package / "dist" / "server.js") == compat.PATCHES["dist/server.js"]["patched"]
+    assert 'registerAppTool(server, toolNames.read' in server
+    assert 'registerAppTool(server, toolNames.write' in server
+    assert 'registerAppTool(server, toolNames.edit' in server
+    assert 'registerAppTool(server, toolNames.delete' in server
+    assert 'registerAppTool(server, toolNames.trash' in server
+    write_annotations = re.search(r"const WRITE_TOOL_ANNOTATIONS = \{([^}]+)\};", server)
+    delete_annotations = re.search(r"const DELETE_TOOL_ANNOTATIONS = \{([^}]+)\};", server)
+    trash_annotations = re.search(r"const TRASH_TOOL_ANNOTATIONS = \{([^}]+)\};", server)
+    assert write_annotations is not None and delete_annotations is not None
+    assert trash_annotations is not None
+    assert delete_annotations.group(1) == write_annotations.group(1)
+    assert trash_annotations.group(1) == write_annotations.group(1)
+    start = server.index("function deleteFailure")
+    end = server.index("const workspaceSkillOutputSchema", start)
+    helper = server[start:end].replace("export async function", "async function")
+    harness = tmp_path / "delete-trash-safety.mjs"
+    harness.write_text(
+        'import assert from "node:assert/strict";\n'
+        'import {createHash, randomUUID} from "node:crypto";\n'
+        'import {createReadStream} from "node:fs";\n'
+        'import {lstat, mkdir, readFile, realpath, rename, symlink, unlink, writeFile} from "node:fs/promises";\n'
+        'import {isAbsolute, join, relative, resolve, sep} from "node:path";\n'
+        + helper
+        + '\nconst root=process.argv[2], outside=process.argv[3], linkRoot=process.argv[4]; await mkdir(join(root,"nested"),{recursive:true}); await mkdir(outside,{recursive:true}); await mkdir(linkRoot,{recursive:true});\n'
+        + 'const bytes=Buffer.from([0,1,2,3,255,128,64]); await writeFile(join(root,"nested","ordinary.bin"),bytes); await writeFile(join(root,"neighbor.txt"),"keep");\n'
+        + 'const moved=await trashWorkspaceFile({root},"nested/ordinary.bin",{uniqueId:"fixed-id"}); assert.deepEqual(moved,{originalRelativePath:"nested/ordinary.bin",trashRelativePath:".webjjongku-trash/fixed-id/nested/ordinary.bin",trashId:"fixed-id",moved:true,originalExistsAfter:false,trashExistsAfter:true,bytes:bytes.length,sha256:createHash("sha256").update(bytes).digest("hex")}); await assert.rejects(lstat(join(root,"nested","ordinary.bin"))); assert.deepEqual(await readFile(join(root,...moved.trashRelativePath.split("/"))),bytes); assert.equal(await readFile(join(root,"neighbor.txt"),"utf8"),"keep");\n'
+        + 'const deleted=await deleteWorkspaceFile({root},moved.trashRelativePath); assert.deepEqual(deleted,{requestedPath:moved.trashRelativePath,existedBefore:true,deleted:true,existsAfter:false});\n'
+        + 'const reject=async(path,code)=>assert.rejects(()=>deleteWorkspaceFile({root},path),new RegExp(code)); await reject("missing.txt","DELETE_TARGET_NOT_FOUND"); await mkdir(join(root,"directory")); await reject("directory","DELETE_TARGET_NOT_REGULAR_FILE");\n'
+        + 'for(const path of ["../outside.txt","foo/../../outside.txt","..\\\\outside.txt","foo\\\\..\\\\..\\\\outside.txt"]){await reject(path,"DELETE_TRAVERSAL_FORBIDDEN");}\n'
+        + 'await reject("C:\\\\outside.txt","DELETE_ABSOLUTE_PATH_FORBIDDEN"); await reject("\\\\\\\\server\\\\share\\\\outside.txt","DELETE_ABSOLUTE_PATH_FORBIDDEN"); await reject(".","DELETE_TRAVERSAL_FORBIDDEN");\n'
+        + 'await mkdir(join(root,".git")); await writeFile(join(root,".git","config"),"x"); await reject(".git","DELETE_PROTECTED_TARGET"); await reject(".git/config","DELETE_PROTECTED_TARGET");\n'
+        + 'const rejectTrash=async(path,code,options)=>assert.rejects(()=>trashWorkspaceFile({root},path,options),new RegExp(code)); await rejectTrash("missing.txt","TRASH_TARGET_NOT_FOUND"); await rejectTrash("directory","TRASH_TARGET_NOT_REGULAR_FILE");\n'
+        + 'for(const path of ["../outside.txt","foo/../../outside.txt","..\\\\outside.txt","foo\\\\..\\\\..\\\\outside.txt"]){await rejectTrash(path,"TRASH_TRAVERSAL_FORBIDDEN");}\n'
+        + 'await rejectTrash("C:\\\\outside.txt","TRASH_ABSOLUTE_PATH_FORBIDDEN"); await rejectTrash("\\\\\\\\server\\\\share\\\\outside.txt","TRASH_ABSOLUTE_PATH_FORBIDDEN"); await rejectTrash(".","TRASH_TRAVERSAL_FORBIDDEN");\n'
+        + 'await rejectTrash(".git/config","TRASH_PROTECTED_TARGET"); await rejectTrash(".webjjongku-trash/fixed-id/nested/ordinary.bin","TRASH_PROTECTED_TARGET"); await rejectTrash("nested/ordinary.bin","TRASH_INVALID_ID",{uniqueId:"bad id!"});\n'
+        + 'const collision=join(root,"collision.txt"); await writeFile(collision,"source"); await mkdir(join(root,".webjjongku-trash","collision")); await rejectTrash("collision.txt","TRASH_DESTINATION_COLLISION",{uniqueId:"collision"}); assert.equal(await readFile(collision,"utf8"),"source");\n'
+        + 'await writeFile(join(outside,"victim.txt"),"safe"); await writeFile(join(linkRoot,"source.txt"),"source"); let linkStatus="PASS"; try{await symlink(outside,join(linkRoot,"escape"),process.platform==="win32"?"junction":"dir"); await assert.rejects(()=>deleteWorkspaceFile({root:linkRoot},"escape/victim.txt"),/DELETE_REPARSE_FORBIDDEN/); assert.equal(await readFile(join(outside,"victim.txt"),"utf8"),"safe"); await assert.rejects(()=>trashWorkspaceFile({root:linkRoot},"escape/victim.txt"),/TRASH_REPARSE_FORBIDDEN/); assert.equal(await readFile(join(outside,"victim.txt"),"utf8"),"safe"); const trashLinkRoot=join(linkRoot,"trash-link-workspace"); await mkdir(trashLinkRoot); await writeFile(join(trashLinkRoot,"source.txt"),"source"); await symlink(outside,join(trashLinkRoot,".webjjongku-trash"),process.platform==="win32"?"junction":"dir"); await assert.rejects(()=>trashWorkspaceFile({root:trashLinkRoot},"source.txt"),/TRASH_REPARSE_FORBIDDEN/); assert.equal(await readFile(join(trashLinkRoot,"source.txt"),"utf8"),"source");}catch(error){if(error?.code==="EPERM"||error?.code==="EACCES")linkStatus="SKIPPED:"+error.code;else throw error;}\n'
+        + 'console.log(JSON.stringify({ok:true,linkStatus}));\n',
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        ["node", str(harness), str(tmp_path / "workspace"), str(tmp_path / "outside"), str(tmp_path / "links")],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["ok"] is True
+    if result["linkStatus"].startswith("SKIPPED:"):
+        pytest.skip(f"junction/symlink creation unavailable: {result['linkStatus']}")
