@@ -54,6 +54,7 @@ def write_run(
         "task_outcome": task_outcome,
         "task_outcome_contract": task_outcome_contract,
         "artifacts": {"output": str(output_path), "stdout": str(stdout_path), "stderr": str(stderr_path)},
+        "oracle": {"slug": f"oracle-project-{run_id[:10]}"},
     }), encoding="utf-8")
     return run_dir
 
@@ -216,6 +217,170 @@ def test_oauth_token_request_503_signature_requires_both_exact_markers(
         "bucket": "post-submit-provider-incomplete",
         "signature": "output-present-without-terminal-settlement",
     }
+
+
+def test_terminal_recursive_self_observation_has_bounded_signature(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    run_id = "r" * 12
+    slug = f"oracle-project-{run_id[:10]}"
+    output = (
+        f"run ID: {run_id}\nexact slug: {slug}\nstatus: running\n"
+        "task_outcome: pending\noutput.md absent\n"
+        "observe-or-recover-exact-session-only\n"
+        "observe the original process or recover the exact slug\n"
+        "TASK_OUTCOME: BLOCKED\n"
+    )
+    write_run(
+        state_root,
+        run_id,
+        status="attention_required",
+        output=output,
+        session_authority="terminal",
+        terminal_harvested=True,
+        task_outcome="blocked",
+    )
+
+    report = module.diagnose(state_root)
+
+    assert report["unresolved_runs"][0]["signature"] == "post-submit-recursive-self-observation"
+
+
+def test_classify_run_returns_recursive_signature_for_matching_evidence() -> None:
+    module = load()
+    run_id = "w" * 12
+    slug = f"oracle-project-{run_id[:10]}"
+    output = (
+        f"run ID: {run_id}\nexact slug: {slug}\nstatus: running\n"
+        "task_outcome: pending\noutput.md absent\n"
+        "observe-or-recover-exact-session-only\n"
+        "observe the original process or recover the exact slug\n"
+        "TASK_OUTCOME: BLOCKED\n"
+    )
+
+    verdict = module.classify_run(
+        {
+            "status": "attention_required",
+            "session_authority": "terminal",
+            "terminal_harvested": True,
+            "task_outcome": "blocked",
+            "run_id": run_id,
+            "oracle": {"slug": slug},
+        },
+        stdout_text="",
+        output_text=output,
+        has_output=True,
+    )
+
+    assert verdict == {
+        "bucket": "terminal-task-not-executed",
+        "signature": "post-submit-recursive-self-observation",
+    }
+
+
+def test_recursive_self_observation_preempts_oauth_503_evidence(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    run_id = "v" * 12
+    slug = f"oracle-project-{run_id[:10]}"
+    output = (
+        f"run ID: {run_id}\nexact slug: {slug}\nstatus: running\n"
+        "task_outcome: pending\noutput.md absent\n"
+        "observe-or-recover-exact-session-only\n"
+        "observe the original process or recover the exact slug\n"
+        "TASK_OUTCOME: BLOCKED\n"
+        "DevSpace: OAuth token request failed (HTTP 503 Service Unavailable)\n"
+    )
+    write_run(
+        state_root,
+        run_id,
+        status="attention_required",
+        output=output,
+        session_authority="terminal",
+        terminal_harvested=True,
+        task_outcome="blocked",
+    )
+
+    report = module.diagnose(state_root)
+
+    assert report["unresolved_runs"][0]["signature"] == "post-submit-recursive-self-observation"
+
+
+def test_general_terminal_blocked_or_simple_identity_mention_stays_generic(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    run_id = "s" * 12
+    slug = f"oracle-project-{run_id[:10]}"
+    write_run(
+        state_root,
+        run_id,
+        status="attention_required",
+        output=f"run ID: {run_id}\nexact slug: {slug}\nconcrete project blocker\nTASK_OUTCOME: BLOCKED\n",
+        session_authority="terminal",
+        terminal_harvested=True,
+        task_outcome="blocked",
+    )
+
+    report = module.diagnose(state_root)
+
+    assert report["unresolved_runs"][0]["signature"] == "durable-output-reports-blocked"
+
+
+@pytest.mark.parametrize(
+    "missing_line",
+    [
+        "status: running",
+        "task_outcome: pending",
+        "output.md absent",
+        "observe-or-recover-exact-session-only",
+        "observe the original process or recover the exact slug",
+        "TASK_OUTCOME: BLOCKED",
+    ],
+)
+def test_recursive_signature_requires_every_bounded_self_observation_line(
+    tmp_path: Path, missing_line: str
+) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    run_id = "t" * 12
+    slug = f"oracle-project-{run_id[:10]}"
+    lines = [
+        f"run ID: {run_id}", f"exact slug: {slug}", "status: running",
+        "task_outcome: pending", "output.md absent",
+        "observe-or-recover-exact-session-only",
+        "observe the original process or recover the exact slug",
+        "TASK_OUTCOME: BLOCKED",
+    ]
+    output = "\n".join(line for line in lines if line != missing_line) + "\n"
+    write_run(
+        state_root, run_id, status="attention_required", output=output,
+        session_authority="terminal", terminal_harvested=True, task_outcome="blocked",
+    )
+
+    report = module.diagnose(state_root)
+
+    assert report["unresolved_runs"][0]["signature"] == "durable-output-reports-blocked"
+
+
+def test_recursive_signature_rejects_a_different_slug(tmp_path: Path) -> None:
+    module = load()
+    state_root = tmp_path / "oracle-state"
+    run_id = "u" * 12
+    output = (
+        f"run ID: {run_id}\nexact slug: oracle-project-someoneelse\nstatus: running\n"
+        "task_outcome: pending\noutput.md absent\n"
+        "observe-or-recover-exact-session-only\n"
+        "observe the original process or recover the exact slug\n"
+        "TASK_OUTCOME: BLOCKED\n"
+    )
+    write_run(
+        state_root, run_id, status="attention_required", output=output,
+        session_authority="terminal", terminal_harvested=True, task_outcome="blocked",
+    )
+
+    report = module.diagnose(state_root)
+
+    assert report["unresolved_runs"][0]["signature"] == "durable-output-reports-blocked"
 
 
 @pytest.mark.parametrize(

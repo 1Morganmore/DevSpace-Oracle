@@ -42,6 +42,18 @@ SCHEMA = "codex.chatgpt.oracle-incident/v1"
 MAINTENANCE_OWNER = "automation-maintenance-session"
 REPORTER_ROLE = "project-session"
 
+# Append-only authority receipt written by ``settle-recursive-self-observation``
+# next to the run state; it is the only artifact that makes a recursive
+# self-observation run safe to continue with a fresh run.
+RECURSIVE_SELF_OBSERVATION_SCHEMA = "codex.chatgpt.oracle-recursive-self-observation/v1"
+RECURSIVE_SELF_OBSERVATION_SIDECAR = "recursive-self-observation.json"
+RECURSIVE_SELF_OBSERVATION_REQUIRED_FIELDS = (
+    "confirmation_token",
+    "expected_state_sha256",
+    "expected_output_sha256",
+    "expected_transcript_sha256",
+)
+
 REQUIRED_FIELDS = (
     "schema",
     "run_dir",
@@ -60,6 +72,31 @@ class IncidentError(RuntimeError):
 
     def envelope(self) -> dict[str, Any]:
         return {"ok": False, "error": {"code": self.code, "message": str(self), "evidence": self.evidence}}
+
+
+def _proven_recursive_self_observation_sidecar(directory: Path) -> bool:
+    """True only when the run carries a validated recursive-observation receipt.
+
+    The receipt is append-only: it is written once by the exact settlement
+    flow, binds the run's state/output/transcript hashes, and names the
+    explicit confirmation token.  A missing, symlinked, unreadable, or
+    schema-less file never grants fresh-run authority (fail closed).
+    """
+    sidecar_path = directory / RECURSIVE_SELF_OBSERVATION_SIDECAR
+    if not sidecar_path.is_file() or sidecar_path.is_symlink():
+        return False
+    try:
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(sidecar, dict):
+        return False
+    if sidecar.get("schema") != RECURSIVE_SELF_OBSERVATION_SCHEMA:
+        return False
+    return all(
+        str(sidecar.get(field) or "").strip()
+        for field in RECURSIVE_SELF_OBSERVATION_REQUIRED_FIELDS
+    )
 
 
 def build_packet(run_dir: Path, *, reporter_role: str = REPORTER_ROLE) -> dict[str, Any]:
@@ -87,6 +124,7 @@ def build_packet(run_dir: Path, *, reporter_role: str = REPORTER_ROLE) -> dict[s
         stdout_text=DIAGNOSE._read_text(directory / "stdout.log"),
         has_output=DIAGNOSE._output_is_nonempty(output_path),
         transcript_text=DIAGNOSE._read_text(directory / "transcript.md"),
+        output_text=DIAGNOSE._read_text(output_path),
         user_confirmed_no_submission=(
             STATE.proven_user_confirmed_no_submission(state_path) is not None
         ),
@@ -103,6 +141,8 @@ def build_packet(run_dir: Path, *, reporter_role: str = REPORTER_ROLE) -> dict[s
         project_root,
         exclude_run_id=str(state.get("run_id") or ""),
     )
+    fresh_run_authority = _proven_recursive_self_observation_sidecar(directory)
+    recursive_fresh_safe = fresh_run_authority and not owners
     return {
         "schema": SCHEMA,
         "run_dir": str(directory),
@@ -126,6 +166,8 @@ def build_packet(run_dir: Path, *, reporter_role: str = REPORTER_ROLE) -> dict[s
             bucket in {DIAGNOSE.PRE_SUBMIT_HOST, DIAGNOSE.PRE_SUBMIT_UI} and not owners
         ),
         "unresolved_owners": owners,
+        "fresh_run_authority": fresh_run_authority,
+        "recursive_fresh_safe": recursive_fresh_safe,
         "remediation": DIAGNOSE.REMEDIATION.get(bucket, ""),
         "evidence_paths": sorted(
             str(path)

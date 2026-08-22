@@ -48,9 +48,51 @@ def write_run(
         "project_root": str(project_root),
         "session_authority": session_authority,
         "terminal_harvested": terminal_harvested,
+        "task_outcome": "blocked" if output and "TASK_OUTCOME: BLOCKED" in output else "",
         "artifacts": {"output": str(output_path), "stdout": str(stdout_path), "stderr": str(stderr_path)},
         "oracle": {"slug": "oracle-project-abc", "conversation_url": "https://chatgpt.com/c/exact"},
     }), encoding="utf-8")
+    return run_dir
+
+
+def write_recursive_self_observation_run(
+    root: Path,
+    run_id: str,
+    *,
+    with_sidecar: bool = False,
+) -> Path:
+    """Persist a run whose durable output reports recursive self-observation.
+
+    The output names the run's own identity and both fork-native preserve
+    phrase groups, so diagnosis classifies it as
+    ``post-submit-recursive-self-observation``; ``with_sidecar`` also writes
+    the append-only authority receipt that ``build_packet`` validates.
+    """
+    slug = "oracle-project-abc"
+    output = (
+        f"run ID: {run_id}\nexact slug: {slug}\nstatus: running\n"
+        "task_outcome: pending\noutput.md absent\n"
+        "observe-or-recover-exact-session-only\n"
+        "observe the original process or recover the exact slug\n"
+        "TASK_OUTCOME: BLOCKED\n"
+    )
+    run_dir = write_run(
+        root,
+        run_id,
+        status="attention_required",
+        output=output,
+        session_authority="terminal",
+        terminal_harvested=True,
+    )
+    if with_sidecar:
+        (run_dir / "recursive-self-observation.json").write_text(json.dumps({
+            "schema": "codex.chatgpt.oracle-recursive-self-observation/v1",
+            "confirmation_token": "user-authorized-fresh-run-after-recursive-self-observation",
+            "reason": "user authorized continued progress",
+            "expected_state_sha256": "a" * 64,
+            "expected_output_sha256": "b" * 64,
+            "expected_transcript_sha256": "c" * 64,
+        }), encoding="utf-8")
     return run_dir
 
 
@@ -208,6 +250,80 @@ def test_active_run_is_not_marked_safe_for_a_fresh_run(tmp_path: Path) -> None:
 
     assert packet["lifecycle"] == "running"
     assert packet["safe_for_fresh_run"] is False
+
+
+def test_recursive_self_observation_sidecar_absent_never_grants_fresh_authority(tmp_path: Path) -> None:
+    module = load()
+    run_dir = write_recursive_self_observation_run(tmp_path, "recursive1234")
+
+    packet = module.build_packet(run_dir)
+
+    assert packet["signature"] == "post-submit-recursive-self-observation"
+    assert packet["fresh_run_authority"] is False
+    assert packet["recursive_fresh_safe"] is False
+
+
+def test_recursive_self_observation_valid_sidecar_grants_fresh_run_authority(tmp_path: Path) -> None:
+    module = load()
+    run_dir = write_recursive_self_observation_run(tmp_path, "recursive1235", with_sidecar=True)
+
+    packet = module.build_packet(run_dir)
+
+    assert packet["signature"] == "post-submit-recursive-self-observation"
+    assert packet["fresh_run_authority"] is True
+    assert packet["recursive_fresh_safe"] is True
+    assert packet["safe_for_fresh_run"] is False
+
+
+def test_recursive_fresh_run_stays_unsafe_while_another_session_owns_project(tmp_path: Path) -> None:
+    module = load()
+    run_dir = write_recursive_self_observation_run(tmp_path, "recursive1236", with_sidecar=True)
+    write_run(
+        tmp_path,
+        "owner0000",
+        status="running",
+        session_authority="submitted_unknown",
+    )
+
+    packet = module.build_packet(run_dir)
+
+    assert packet["fresh_run_authority"] is True
+    assert packet["recursive_fresh_safe"] is False
+    assert [item["run_id"] for item in packet["unresolved_owners"]] == ["owner0000"]
+
+
+def test_recursive_self_observation_sidecar_requires_exact_schema(tmp_path: Path) -> None:
+    module = load()
+    run_dir = write_recursive_self_observation_run(tmp_path, "recursive1237")
+    (run_dir / "recursive-self-observation.json").write_text(json.dumps({
+        "schema": "codex.chatgpt.oracle-other-schema/v1",
+        "confirmation_token": "user-authorized-fresh-run-after-recursive-self-observation",
+        "expected_state_sha256": "a" * 64,
+        "expected_output_sha256": "b" * 64,
+        "expected_transcript_sha256": "c" * 64,
+    }), encoding="utf-8")
+
+    packet = module.build_packet(run_dir)
+
+    assert packet["fresh_run_authority"] is False
+    assert packet["recursive_fresh_safe"] is False
+
+
+def test_recursive_self_observation_sidecar_requires_all_binding_fields(tmp_path: Path) -> None:
+    module = load()
+    run_dir = write_recursive_self_observation_run(tmp_path, "recursive1238")
+    (run_dir / "recursive-self-observation.json").write_text(json.dumps({
+        "schema": "codex.chatgpt.oracle-recursive-self-observation/v1",
+        "confirmation_token": "",
+        "expected_state_sha256": "a" * 64,
+        "expected_output_sha256": "b" * 64,
+        "expected_transcript_sha256": "c" * 64,
+    }), encoding="utf-8")
+
+    packet = module.build_packet(run_dir)
+
+    assert packet["fresh_run_authority"] is False
+    assert packet["recursive_fresh_safe"] is False
 
 
 def test_packet_build_requires_the_exact_persisted_run(tmp_path: Path) -> None:

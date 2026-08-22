@@ -123,6 +123,58 @@ def _output_is_nonempty(path: Path) -> bool:
         return False
 
 
+# A DevSpace web worker with host shell access can read its own controller
+# run's persisted state.  When it echoes that state back into its own output,
+# the run's evidence shows its own run_id and oracle slug together with the
+# fork-native preserve markers.  Both phrase groups must appear: the
+# ``host_watchdog`` next-action written into state, and the ``next_action``
+# returned by ``wait_for_oracle_process`` (run.py:1348/:1358).
+RECURSIVE_SELF_OBSERVATION_PHRASE_GROUPS = (
+    "observe-or-recover-exact-session-only",
+    "observe the original process or recover the exact slug",
+)
+# The bounded self-observation report describes the exact session it observed:
+# still running, task still pending, no durable output yet, and the observed
+# terminal state as BLOCKED.  Every line is required; a generic blocked run
+# that merely mentions its own identity must keep the durable-output signature.
+RECURSIVE_SELF_OBSERVATION_STATE_MARKERS = (
+    "status: running",
+    "task_outcome: pending",
+    "output.md absent",
+    "TASK_OUTCOME: BLOCKED",
+)
+
+
+def _evidence_recursive_self_observation(
+    state: dict[str, Any],
+    *,
+    stdout_text: str,
+    transcript_text: str,
+    output_text: str,
+) -> bool:
+    """Return True when the run's own evidence shows recursive self-observation.
+
+    The evidence is the persisted output itself: the run reports its own
+    run_id and oracle slug alongside the fork-native preserve phrases and the
+    observed session state (running, pending, output absent, terminal BLOCKED).
+    """
+    run_id = str(state.get("run_id") or "")
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    slug = str(oracle.get("slug") or oracle.get("session_locator") or "")
+    if not run_id or not slug:
+        return False
+    evidence = "\n".join((stdout_text, transcript_text, output_text))
+    if f"run ID: {run_id}" not in evidence:
+        return False
+    if f"exact slug: {slug}" not in evidence:
+        return False
+    if any(phrase not in evidence for phrase in RECURSIVE_SELF_OBSERVATION_PHRASE_GROUPS):
+        return False
+    if any(marker not in evidence for marker in RECURSIVE_SELF_OBSERVATION_STATE_MARKERS):
+        return False
+    return True
+
+
 def classify_run(
     state: dict[str, Any],
     *,
@@ -143,7 +195,12 @@ def classify_run(
     provided: a run the authority layer proved was never submitted must never
     be reported as an uncertain live session, and an eligible-but-unconfirmed
     pre-submit refusal stays a host-side decision awaiting explicit user
-    confirmation.  No bucket beyond those two guarantees is re-derived here.
+    confirmed.  No bucket beyond those two guarantees is re-derived here.
+    A run whose own output reports its own exact session as still running,
+    pending, and output-absent with the fork-native preserve markers is
+    recursive self-observation: it is classified before the durable-output and
+    OAuth-503 interpretations so a self-observing worker can never be
+    reported as an ordinary blocked run or a provider defect.
     """
     outcome = str(state.get("task_outcome") or "")
     # Single authority source, shared with the runner, so the report and the
@@ -203,6 +260,16 @@ def classify_run(
     if lifecycle == "abandoned":
         return {"bucket": ACTIVE, "signature": "explicitly-abandoned"}
     if has_output and outcome in {"blocked", "not_executed"}:
+        if _evidence_recursive_self_observation(
+            state,
+            stdout_text=stdout_text,
+            transcript_text=transcript_text,
+            output_text=output_text,
+        ):
+            return {
+                "bucket": TASK_NOT_EXECUTED,
+                "signature": "post-submit-recursive-self-observation",
+            }
         return {
             "bucket": TASK_NOT_EXECUTED,
             "signature": (
