@@ -100,6 +100,124 @@ the exact project root. `54f1e2f2`'s isolated-worktree Ultra GPT mode is also
 deferred. No Ultra GPT route, skill, manifest profile, or startup entry is
 added in 1.10.0, and Pro remains explicit-only.
 
+The parent head was advanced and re-audited on 2026-08-22 at
+`bcf78feffb39970991adc64d3ff053338fdc2f7f` (parent 1.16.1). All 16 commits in
+`731aec0a`..`bcf78fef` were reviewed individually against the fork invariants
+in AGENTS.md and this document. Verdicts: 2 ADOPT, 8 ADAPT (separate fork
+implementation), 6 REJECT. Decisions are recorded here for the next release;
+no donor code was integrated in this audit.
+
+(i) ADOPT `559d3041` (preserve slow Oracle live recovery). The fork already
+carries this exact patch for 0.16.1 with identical pristine/patched hashes
+(`05256692...`/`9329e259...`), and the parent proves 0.17.1's published
+`browserTabs.js` is byte-identical to 0.16.1's, so the same row extends to
+0.17.1 and, after pristine-hash verification, to 0.17.2/0.17.3/0.18.0. This
+closes a real fork gap: live recovery on every version except 0.16.1 currently
+ignores the `ORACLE_LIVE_TERMINAL_TIMEOUT_MS` the fork itself sets
+(`run.py:1639`) and drops slow recovered tabs at the stock 60s stall limit.
+Implementation is one hash-gated row per version set plus manifest and compat
+tests; the 0.16.1 legacy-migration machinery must not be disturbed.
+
+(ii) ADOPT `9698fe74` (isolate DevSpace restart marker tests). Test-only
+autouse fixture that redirects `CODEX_DEVSPACE_COMPAT_STATE_ROOT` to a tmp
+path. The fork's `compat_state_root()`/`restart_marker_path()` names are
+identical, so it ports verbatim; only four fork tests currently set the env
+var individually, leaving the user's real `~/.codex/state/devspace-compat/
+1.0.7/restart-required.json` writable by any unguarded future test.
+
+(iii) ADAPT `2289ae3a` (release stale Oracle observer after exact recovery).
+The fork has the same stale-observer window: after a separate `recover_run`
+durably harvests terminal output, `execute_run` keeps waiting on the still-live
+original Oracle process and holds the project submit mutex until the host
+watchdog expires. Port the durable-terminal probe (`status` complete +
+`session_authority` terminal + `terminal_harvested` true + nonempty output)
+plus owned-tree termination (`taskkill /T /F`) onto the fork's
+`wait_for_oracle_process` contract; the monotonic guard already exists as
+`monotonic_race_preserved`. Termination is allowed only after durable harvest;
+partial observations are never authority to terminate.
+
+(iv) ADAPT `9cc8b59b` (prevent Oracle recursive self-observation). The fork
+shares the theoretical recursion surface (a DevSpace web worker with host
+shell access reading its own controller run's `state.json`). Port the bounded
+detection signature, `settle-recursive-self-observation` CLI (append-only,
+hash-bound sidecar modeled on `user-confirmed-no-submission`), the diagnose
+signature before the OAuth-503 branch, and comprehensive terminalization —
+with fork-native phrase groups (`observe-or-recover-exact-session-only`).
+The prompt-level guard goes only into comprehensive stage-mission protocol
+text; the regular one-line composer remains untouched (invariant 14).
+
+(v) ADAPT `fd597fef` (restore Luna Max and Oracle version preflight). The
+fork's multi-gpt server already pins `gpt-5.6-luna`/`max`
+(`mcp_servers/multi-gpt/server.mjs:16-25`), so only the fail-closed
+pre-persist CLI-accepts-contract canary (`LUNA_MAX_UNSUPPORTED_BY_CODEX_CLI`)
+is new. Port `cached_oracle_version` re-pinned to the fork's exact 0.18.0
+shape as the `--version` fallback, and add the `ORACLE_VERSION_FAILED`
+branch to `proven_pre_submit_host_failure` with the fork's strict bindings so
+the run settles instead of hanging unclassified. The setup-script half has no
+fork counterpart and is skipped.
+
+(vi) ADAPT `9456f8b5` (settle user-stopped comprehensive workflows). Generic
+settlement, not Ultra-only. Fork gap: a provider-UI user stop ends as a
+terminal harvest whose legacy outcome is `blocked`/`not_executed`/
+`legacy_unclassified`; the workflow stays `attention_required` with the scope
+locked and no settlement path (retirement refuses terminal records). Implement
+as a `--cancel-user-stopped` command modeled on `retire_workflow`
+(`comprehensive.py:2429-2533`) with confirmation
+`user-confirmed-provider-stop`, exact workflow/scope/run path+hash binding,
+the legacy outcome set `{blocked, not_executed, legacy_unclassified}`, and
+scope release through the fork's `released` status + `_released_scope_is_valid`.
+
+(vii) ADAPT `7ac2cb29` (settle DevSpace restart preflight failures). The fork
+emits the identical evidence string (`run.py:1130`) and auto-settles at the
+run level, but the comprehensive workflow lands `attention_required` with the
+scope locked. Fold into (vi): accept confirmation
+`user-confirmed-pre-submit-workflow-cancel` when run state is the auto-settled
+restart failure (`pre_submit` authority, `failed_pre_submit`, `pending`).
+Settlement never restarts the service; restart stays the separate
+`confirm_service_restarted` path.
+
+(viii) ADAPT `8ed6308c` (terminalize failed Ultra reviews). Generic
+review-stage fix. The fork already stops on FAIL/REVISE
+(`comprehensive.py:1075-1077`, `1578-1597`) but leaves the scope locked
+forever. Extend `_terminal_review_state` to write a hash-bound
+`codex.chatgpt.oracle-comprehensive-review-failed/v1` receipt (bound to the
+review receipt path+sha256 and critical findings) and release the scope via
+`released` + `_released_scope_is_valid`, keeping the existing
+`attention_required` workflow state and `_terminal_attention` blocker text.
+
+(ix) ADAPT `64f40b14` (safe delete and trash file tools). The fork exposes no
+delete/trash surface today and pins 1.0.7 (invariant 15); the parent's
+implementation is an upgrade-chain of 1.0.4 patches. Rework delete/trash onto
+the fork's 1.0.7 hash-gated patch set preserving the guards verbatim
+(`isStrictChildPath` lstat walk, `.git`/symlink rejection, trash byte
+identity inside the workspace root), and optionally port the upgrade-chain
+while-loop with `DEVSPACE_PATCH_CYCLE` detection. Drop the `read_chunk`/
+file-safety half — the fork bounds reads via `workspaces.patch` and never
+adopted the read bridge.
+
+(x) ADAPT `a9c64e14` (persist ChatGPT local network onboarding). The fork has
+no Local Network handling at all, and the throwaway-profile model loses the
+grant every run (invariant 12). Implement on the fork setup surface
+(`skills/chatgpt-workspace-setup`) as a consent-gated one-time step: HKCU
+Chrome policy `LocalNetworkAccessAllowedForUrls` for the exact
+`https://chatgpt.com` origin with readback verification, plus a fail-closed
+seed-profile `Preferences` check; app registration stays manual and no
+watchdog path is extended.
+
+(xi) REJECT `1a99ef04`, `b2e8764d`, `3fc9bad4`
+(actual sha `3fc9bad4f2161393a48dec80703c0c51173cc2bf`), `1d5c8b54`, and
+`bcf78fef`: the read-only web-stage bridge, bridge preflight isolation,
+strict workflow audit contract, lane receipts, and Strict Ultra guide are
+Ultra-profile machinery (invariant 3 — deferred in 1.10.0); the DevSpace
+patch parts also target the parent's 1.0.4 dist (invariant 15), and the
+fork's Web Multi v1 already binds run identities
+(`multi.py:345-356`, `560-588`). REJECT `191a8960`: the fork already settles
+`DEVSPACE_SERVICE_RESTART_REQUIRED` end-to-end through its readiness schema
+(`run.py:1090-1124`, `1362-1372`; `state.py:2520-2535`, `2936-2969`;
+`diagnose.py:191-192`) with the same outcome shape; the parent's stderr-text
+path and `oracle-pre-submit-host/v1` eligibility would duplicate fork
+architecture without fixing any fork bug.
+
 ```powershell
 git fetch https://github.com/ventianima-lab/codex-web-gpt-automation main
 git rev-parse HEAD
