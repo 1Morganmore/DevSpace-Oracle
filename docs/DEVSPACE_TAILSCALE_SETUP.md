@@ -124,6 +124,33 @@ Enable Developer Mode in ChatGPT and manually create the connector:
 
 Approve the initial Owner-password page when DevSpace asks. This tooling never opens settings, creates/deletes apps, picks permissions, inspects app lists, or selects an app in the composer.
 
+## Optional Chrome Local Network grant
+
+ChatGPT's DevSpace connector calls the local MCP endpoint on `127.0.0.1`, which
+Chrome may gate behind its Local Network Access permission. The setup helper
+exposes an explicit, consent-gated command for the narrow grant; it is never
+run automatically by setup, `ensure`, or the watchdog, and it never touches
+ChatGPT app registration or settings.
+
+```powershell
+python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py local-network
+python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py local-network --apply
+```
+
+The check is fail-closed: it passes only when the per-user Chrome policy
+(`HKCU\Software\Policies\Google\Chrome\LocalNetworkAccessAllowedForUrls`)
+contains exactly `https://chatgpt.com`, or when the signed-in Oracle browser
+profile (default `%USERPROFILE%\.oracle\browser-profile`, overridden by
+`ORACLE_BROWSER_PROFILE_DIR`) contains the
+`content_settings.exceptions.local_network` grant `https://chatgpt.com:443,*`
+with setting 1. `--apply` (Windows only) writes only the exact origin under the
+smallest free numeric policy value name, preserves unrelated entries, verifies
+the readback, and writes a receipt to
+`%CODEX_HOME%\state\chatgpt-local-network-policy-<timestamp>.json`. Other
+platforms report `supported: false`. The manual alternative is approving the
+one-time Local network access prompt in the dedicated profile and fully
+exiting Chrome when asked.
+
 ## Read-only diagnosis
 
 ```powershell

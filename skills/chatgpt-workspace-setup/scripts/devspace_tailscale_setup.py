@@ -4,6 +4,9 @@ from __future__ import annotations
 
 This module deliberately contains no ChatGPT UI or browser automation. Normal
 GPT execution consumes only its printed MCP URL and must not invoke it.
+The optional ``local-network`` subcommand manages the narrow Chrome Local
+Network Access grant for the ChatGPT origin behind explicit consent; it never
+runs automatically and never touches ChatGPT app registration or settings.
 """
 
 import argparse
@@ -33,6 +36,7 @@ DEVSPACE_VERSION = "1.0.7"
 DEVSPACE_PACKAGE = f"@waishnav/devspace@{DEVSPACE_VERSION}"
 DEVSPACE_OAUTH_SCOPES = "devspace,offline_access"
 DEVSPACE_COMPAT_PATH = Path(__file__).resolve().parents[3] / "bin" / "chatgpt_devspace_compat.py"
+CHROME_LOCAL_NETWORK_PATH = Path(__file__).resolve().parents[3] / "bin" / "chatgpt_chrome_local_network.py"
 SECRET_PATTERN = re.compile(r"(?i)(password|token|secret|authorization)\s*([:=])\s*[^\s,;]+")
 HOSTNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.-]*\.ts\.net$", re.IGNORECASE)
 RESULT_CODE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,79}$")
@@ -324,6 +328,49 @@ def load_devspace_compat_module() -> ModuleType:
         raise SetupError("DEVSPACE_COMPAT_MODULE_INVALID") from error
     _DEVSPACE_COMPAT_MODULE = module
     return module
+
+
+_CHROME_LOCAL_NETWORK_MODULE: ModuleType | None = None
+
+
+def load_chrome_local_network_module() -> ModuleType:
+    global _CHROME_LOCAL_NETWORK_MODULE
+    if _CHROME_LOCAL_NETWORK_MODULE is not None:
+        return _CHROME_LOCAL_NETWORK_MODULE
+    if not CHROME_LOCAL_NETWORK_PATH.is_file():
+        raise SetupError("CHROME_LOCAL_NETWORK_MODULE_MISSING")
+    spec = importlib.util.spec_from_file_location(
+        "chatgpt_chrome_local_network_setup_runtime",
+        CHROME_LOCAL_NETWORK_PATH,
+    )
+    if spec is None or spec.loader is None:
+        raise SetupError("CHROME_LOCAL_NETWORK_MODULE_MISSING")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as error:
+        sys.modules.pop(spec.name, None)
+        raise SetupError("CHROME_LOCAL_NETWORK_MODULE_INVALID") from error
+    _CHROME_LOCAL_NETWORK_MODULE = module
+    return module
+
+
+def chrome_local_network_report(
+    *,
+    apply: bool = False,
+    codex_home: Path | None = None,
+) -> dict[str, Any]:
+    """Explicit consent-gated Chrome Local Network grant (never automatic)."""
+    module = load_chrome_local_network_module()
+    try:
+        if apply:
+            return module.enable_policy(codex_home=codex_home)
+        return module.check_policy()
+    except PermissionError:
+        return {"ok": False, "error": "CHROME_POLICY_WRITE_DENIED"}
+    except RuntimeError as error:
+        return {"ok": False, "error": str(error)}
 
 
 def _result_code_from_exception(error: BaseException, fallback: str) -> str:
@@ -1449,6 +1496,12 @@ def parser() -> argparse.ArgumentParser:
     roots.add_argument("--dry-run", action="store_true")
     roots.add_argument("--apply", action="store_true")
     roots.add_argument("--restart", action="store_true", help="Restart the exact DevSpace service after applying")
+    local_network = sub.add_parser(
+        "local-network",
+        help="Check the explicit Chrome Local Network Access grant, or --apply to write it after consent",
+    )
+    local_network.add_argument("--apply", action="store_true", help="Write the narrow grant after explicit consent")
+    local_network.add_argument("--codex-home", type=Path, help=argparse.SUPPRESS)
     for name in ("setup", "ensure", "doctor"):
         command = sub.add_parser(name)
         command.add_argument("--root", action="append", default=[], help="Narrow allowed DevSpace root; repeat as needed")
@@ -1485,6 +1538,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise SetupError("RESTART_REQUIRES_APPLY")
             print(json.dumps(configure_roots(args.root, apply=args.apply, restart=args.restart), ensure_ascii=False, indent=2))
             return 0
+        if args.command == "local-network":
+            report = chrome_local_network_report(apply=args.apply, codex_home=args.codex_home)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return 0 if (report.get("enabled") is True or report.get("supported") is False) else 2
         config = validate_config(args.root, args.hostname, args.local_port, args.public_port)
         if args.command == "setup":
             if args.dry_run == args.apply:

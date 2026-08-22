@@ -99,3 +99,40 @@ The command waits for the exact local `/healthz` identity, reuses a matching
 Funnel, creates only an absent exact mapping, refuses conflicts, and proves the
 public `/healthz` identity. It does not start DevSpace, alter roots or startup,
 or inspect or mutate ChatGPT settings and registration.
+
+## Explicit Chrome Local Network grant (optional)
+
+ChatGPT's DevSpace connector reaches the local MCP endpoint on `127.0.0.1`,
+which Chrome may gate behind its Local Network Access permission. If the first
+chat tool call fails with a local network permission error, you may persist the
+narrow grant instead of answering the one-time prompt again. This is an
+explicit, consent-gated action: setup, `ensure`, and the watchdog never run it
+automatically, and it never touches ChatGPT app registration or settings.
+
+Read-only, fail-closed check:
+
+```powershell
+python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py local-network
+```
+
+The check passes only when the per-user Chrome policy
+(`HKCU\Software\Policies\Google\Chrome\LocalNetworkAccessAllowedForUrls`)
+contains exactly `https://chatgpt.com`, or when the signed-in Oracle browser
+profile (default `%USERPROFILE%\.oracle\browser-profile`, overridden by
+`ORACLE_BROWSER_PROFILE_DIR`) contains the
+`content_settings.exceptions.local_network` grant `https://chatgpt.com:443,*`
+with setting 1.
+
+Only after the user explicitly consents, write the policy entry (Windows only;
+a receipt is written under `%CODEX_HOME%\state\`):
+
+```powershell
+python skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py local-network --apply
+```
+
+`--apply` appends only the exact origin under the smallest free numeric policy
+value name, preserves unrelated policy entries, verifies the readback, and
+fails closed on any mismatch. Alternatively keep the manual flow: open ChatGPT
+in the dedicated profile, approve the one-time Local network access prompt,
+then fully exit Chrome when asked. On non-Windows the command reports
+`supported: false` and writes nothing.
