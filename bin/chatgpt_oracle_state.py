@@ -43,6 +43,10 @@ def is_attachment_transport(transport: str) -> bool:
     return str(transport or "").strip().casefold() == "pro-attachment-only"
 
 
+def is_devspace_transport(transport: str) -> bool:
+    return str(transport or "").strip().casefold() in DEVSPACE_TRANSPORTS
+
+
 REGULAR_MODEL = "gpt-5.6"
 REGULAR_MODEL_STRATEGY = "select"
 REGULAR_THINKING_TIME = "extra-high"
@@ -241,6 +245,18 @@ ORACLE_NO_RECOVERABLE_URL_MARKER = (
     "session metadata has no recoverable ChatGPT conversation URL"
 )
 USER_CONFIRMED_NO_SUBMISSION = "user-confirmed-no-submission"
+USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION = (
+    "user-authorized-fresh-run-after-recursive-self-observation"
+)
+# Append-only authority receipt written next to the run state by
+# ``settle_recursive_self_observation``; it is the only artifact that makes a
+# recursive self-observation run safe to continue with a fresh run.  The
+# settlement receipt uses the same sidecar schema as the incident packet
+# validator (``chatgpt_oracle_incident.py``), so one validated file grants
+# fresh-run authority to every consumer.
+RECURSIVE_SELF_OBSERVATION_SCHEMA = "codex.chatgpt.oracle-recursive-self-observation/v1"
+RECURSIVE_SELF_OBSERVATION_SETTLEMENT_SCHEMA = RECURSIVE_SELF_OBSERVATION_SCHEMA
+RECURSIVE_SELF_OBSERVATION_SIDECAR = "recursive-self-observation.json"
 SUBMISSION_AUTHORITY_SCHEMA = "codex.chatgpt.oracle-submission-authority/v1"
 # One bounded submission-authority vocabulary.  Every consumer (lock checks,
 # settlement, diagnosis) classifies through `classify_submission_authority`
@@ -1133,9 +1149,29 @@ def cleanup_prior_boot_browser_temps(
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
+    temporary = path.with_name(f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, path)
+
+
+def _write_json_atomic_fsync(path: Path, payload: dict[str, Any]) -> None:
+    """Atomic JSON write that fsyncs the file before the replace.
+
+    Directory fsync is best-effort (not supported on Windows).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -1224,6 +1260,368 @@ def output_is_nonempty(path: Path) -> bool:
         return bool(path.read_bytes().strip())
     except OSError:
         return False
+
+
+def recursive_self_observation_evidence(
+    run_dir: Path, state: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Recognize only a terminal answer that recursively reports its own live run.
+
+    The run's own output must name its exact run_id and oracle slug, quote
+    both fork-native preserve phrases, and report the session as running with
+    a pending task outcome and no output while the persisted state is
+    terminal-blocked and harvested.  Anything else is an ordinary blocked
+    run, not recursive self-observation.
+    """
+    run_id = str(state.get("run_id") or "").strip()
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    slug = str(oracle.get("slug") or "").strip()
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    output_path = Path(str(artifacts.get("output") or run_dir / "output.md"))
+    try:
+        output_text = output_path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
+        return None
+    folded = output_text.casefold()
+    if (
+        not run_id
+        or not slug
+        or run_id.casefold() not in folded
+        or slug.casefold() not in folded
+        or state.get("terminal_harvested") is not True
+        or str(state.get("session_authority") or "") != "terminal"
+        or str(state.get("task_outcome") or "") != "blocked"
+    ):
+        return None
+    # The fork-native preserve markers are quoted verbatim by a recursive
+    # observer; both must be present, never just one.
+    required_groups = (
+        ("running", "status=running", "status: running"),
+        ("task_outcome: pending", "task_outcome=pending", "task outcome: pending"),
+        ("output.md` 미생성", "output.md 미생성", "output absent", "output.md absent", "output 없음"),
+        ("continue-observing-same-exact-session",),
+        ("observe-or-recover-exact-session-only",),
+        ("observe the original process or recover the exact slug",),
+    )
+    if any(not any(needle in folded for needle in group) for group in required_groups):
+        return None
+    return {
+        "run_id": run_id,
+        "slug": slug,
+        "signature": "post-submit-recursive-self-observation",
+    }
+
+
+def proven_recursive_self_observation_fresh_run_authority(
+    run_dir: Path,
+    *,
+    expected_state_sha256: str,
+    expected_output_sha256: str,
+    expected_transcript_sha256: str,
+    confirmation_token: str,
+) -> dict[str, Any]:
+    """Revalidate the append-only hash-bound receipt without changing history.
+
+    The sidecar binds the confirmation token and the exact expected hashes
+    of state.json, output.md, and transcript.md; revalidation re-hashes the
+    current files and requires the persisted evidence signature to still
+    hold.  A missing, symlinked, tampered, or schema-less receipt never
+    grants fresh-run authority (fail closed).
+    """
+    directory = run_dir.expanduser().resolve()
+    sidecar_path = directory / RECURSIVE_SELF_OBSERVATION_SIDECAR
+    if not sidecar_path.is_file() or sidecar_path.is_symlink():
+        return {
+            "ok": False,
+            "decision": "fresh-run-authority-rejected",
+            "error": {
+                "code": "RECURSIVE_SELF_OBSERVATION_RECEIPT_MISSING",
+                "message": "no append-only recursive self-observation receipt exists for the run",
+                "path": str(sidecar_path),
+            },
+        }
+
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate settlement key: {key}")
+            value[key] = item
+        return value
+
+    try:
+        receipt_bytes = sidecar_path.read_bytes()
+        receipt = json.loads(
+            receipt_bytes.decode("utf-8", errors="strict"),
+            object_pairs_hook=reject_duplicate_keys,
+        )
+        state = load_state(directory / "state.json")
+        artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+        output_path = Path(str(artifacts.get("output") or directory / "output.md")).resolve(strict=True)
+        transcript_path = Path(
+            str(artifacts.get("transcript") or directory / "transcript.md")
+        ).resolve(strict=True)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, OracleStateError, ValueError):
+        return {
+            "ok": False,
+            "decision": "fresh-run-authority-rejected",
+            "error": {
+                "code": "RECURSIVE_SELF_OBSERVATION_RECEIPT_INVALID",
+                "message": "append-only receipt could not be read strictly",
+                "path": str(sidecar_path),
+            },
+        }
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    expected_hashes = {
+        "expected_state_sha256": expected_state_sha256.strip().casefold(),
+        "expected_output_sha256": expected_output_sha256.strip().casefold(),
+        "expected_transcript_sha256": expected_transcript_sha256.strip().casefold(),
+    }
+    # The state-side binding mirrors the user-confirmed settlement reference:
+    # state.json is legitimately updated (fresh_run_authority) when the
+    # receipt is appended, so the state file itself is never re-hashed.
+    # Instead the reference pins the receipt path and its exact byte hash.
+    reference = state.get("recursive_self_observation")
+    if (
+        state.get("fresh_run_authority") is not True
+        or not isinstance(reference, dict)
+        or reference.get("schema") != "codex.chatgpt.oracle-settlement-reference/v1"
+        or Path(str(reference.get("path") or "")).resolve() != sidecar_path.resolve()
+        or str(reference.get("sha256") or "") != hashlib.sha256(receipt_bytes).hexdigest()
+    ):
+        return {
+            "ok": False,
+            "decision": "fresh-run-authority-rejected",
+            "error": {
+                "code": "RECURSIVE_SELF_OBSERVATION_RECEIPT_INVALID",
+                "message": "state settlement reference does not bind the append-only receipt",
+                "path": str(sidecar_path),
+            },
+        }
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("schema") != RECURSIVE_SELF_OBSERVATION_SCHEMA
+        or str(receipt.get("confirmation_token") or "").strip().casefold()
+        != USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION
+        or confirmation_token.strip().casefold() != USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION
+        or receipt.get("run_id") != state.get("run_id")
+        or receipt.get("project_root") != state.get("project_root")
+        or receipt.get("slug") != oracle.get("slug")
+        or receipt.get("signature") != "post-submit-recursive-self-observation"
+        or output_path != (directory / "output.md").resolve()
+        or transcript_path != (directory / "transcript.md").resolve()
+        or any(receipt.get(key) != value for key, value in expected_hashes.items())
+    ):
+        return {
+            "ok": False,
+            "decision": "fresh-run-authority-rejected",
+            "error": {
+                "code": "RECURSIVE_SELF_OBSERVATION_RECEIPT_INVALID",
+                "message": "append-only receipt fields do not bind the exact run and expected hashes",
+                "path": str(sidecar_path),
+            },
+        }
+    try:
+        current_hashes = {
+            "expected_output_sha256": sha256_file(output_path),
+            "expected_transcript_sha256": sha256_file(transcript_path),
+        }
+    except OSError:
+        return {
+            "ok": False,
+            "decision": "fresh-run-authority-rejected",
+            "error": {
+                "code": "RECURSIVE_SELF_OBSERVATION_RECEIPT_INVALID",
+                "message": "run artifacts are no longer readable for revalidation",
+                "path": str(sidecar_path),
+            },
+        }
+    if any(
+        current_hashes[key] != expected_hashes[key]
+        for key in ("expected_output_sha256", "expected_transcript_sha256")
+    ):
+        return {
+            "ok": False,
+            "decision": "fresh-run-authority-rejected",
+            "error": {
+                "code": "RECURSIVE_SELF_OBSERVATION_HASH_MISMATCH",
+                "message": "run artifacts changed after the append-only receipt was written",
+                "path": str(sidecar_path),
+            },
+        }
+    evidence = recursive_self_observation_evidence(directory, state)
+    if evidence is None:
+        return {
+            "ok": False,
+            "decision": "fresh-run-authority-rejected",
+            "error": {
+                "code": "RECURSIVE_SELF_OBSERVATION_EVIDENCE_REQUIRED",
+                "message": "terminal output no longer satisfies the bounded self-observation signature",
+                "path": str(sidecar_path),
+            },
+        }
+    if receipt.get("auto_retry") is not False or receipt.get("submission_action") != "none":
+        return {
+            "ok": False,
+            "decision": "fresh-run-authority-rejected",
+            "error": {
+                "code": "RECURSIVE_SELF_OBSERVATION_RECEIPT_INVALID",
+                "message": "append-only receipt must forbid auto-retry and replacement submission",
+                "path": str(sidecar_path),
+            },
+        }
+    return {
+        "ok": True,
+        "decision": "fresh-run-authority-confirmed",
+        "receipt": receipt,
+        "path": str(sidecar_path),
+        "sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+        **expected_hashes,
+    }
+
+
+def settle_recursive_self_observation(
+    run_dir: Path,
+    *,
+    expected_state_sha256: str,
+    expected_output_sha256: str,
+    expected_transcript_sha256: str,
+    confirmation_token: str,
+) -> dict[str, Any]:
+    """Append one explicit user-authorized fresh-run receipt for a proven run.
+
+    Writes ``<run_dir>/recursive-self-observation.json`` exactly once
+    (append-only, fsync'd) and marks the run state with
+    ``fresh_run_authority: true``.  The sidecar binds the confirmation token
+    and the expected hashes of state.json, output.md, and transcript.md.
+    Replays are idempotent and never rewrite the receipt or historical state.
+    """
+    directory = run_dir.expanduser().resolve()
+    state_path = directory / "state.json"
+    if confirmation_token.strip().casefold() != USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION:
+        raise OracleStateError(
+            "RECURSIVE_SELF_OBSERVATION_CONFIRMATION_REQUIRED",
+            f"confirmation must be exactly {USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION}",
+        )
+    state = load_state(state_path)
+    existing = proven_recursive_self_observation_fresh_run_authority(
+        directory,
+        expected_state_sha256=expected_state_sha256,
+        expected_output_sha256=expected_output_sha256,
+        expected_transcript_sha256=expected_transcript_sha256,
+        confirmation_token=confirmation_token,
+    )
+    if existing.get("ok"):
+        return {**existing, "decision": "fresh-run-authority-already-settled"}
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    try:
+        output_path = Path(str(artifacts.get("output") or directory / "output.md")).resolve(strict=True)
+        transcript_path = Path(
+            str(artifacts.get("transcript") or directory / "transcript.md")
+        ).resolve(strict=True)
+    except OSError:
+        raise OracleStateError(
+            "RECURSIVE_SELF_OBSERVATION_ARTIFACT_UNREADABLE",
+            "run artifacts could not be resolved for settlement",
+            {"run_dir": str(directory)},
+        ) from None
+    if (
+        output_path != (directory / "output.md").resolve()
+        or transcript_path != (directory / "transcript.md").resolve()
+        or output_path.is_symlink()
+        or transcript_path.is_symlink()
+    ):
+        raise OracleStateError(
+            "RECURSIVE_SELF_OBSERVATION_ARTIFACT_UNSAFE",
+            "output and transcript must be regular non-symlink run artifacts",
+            {"run_dir": str(directory)},
+        )
+    expected_hashes = {
+        "expected_state_sha256": expected_state_sha256.strip().casefold(),
+        "expected_output_sha256": expected_output_sha256.strip().casefold(),
+        "expected_transcript_sha256": expected_transcript_sha256.strip().casefold(),
+    }
+    try:
+        actual_hashes = {
+            "expected_state_sha256": sha256_file(state_path),
+            "expected_output_sha256": sha256_file(output_path),
+            "expected_transcript_sha256": sha256_file(transcript_path),
+        }
+    except OSError:
+        raise OracleStateError(
+            "RECURSIVE_SELF_OBSERVATION_ARTIFACT_UNREADABLE",
+            "run artifacts could not be read for settlement",
+            {"run_dir": str(directory)},
+        ) from None
+    if any(actual_hashes[key] != expected_hashes[key] for key in expected_hashes):
+        raise OracleStateError(
+            "RECURSIVE_SELF_OBSERVATION_HASH_MISMATCH",
+            "exact terminal run artifacts changed before authority settlement",
+            {"expected": expected_hashes, "actual": actual_hashes},
+        )
+    evidence = recursive_self_observation_evidence(directory, state)
+    if evidence is None:
+        raise OracleStateError(
+            "RECURSIVE_SELF_OBSERVATION_EVIDENCE_REQUIRED",
+            "exact terminal output does not satisfy the bounded self-observation signature",
+            {"run_dir": str(directory)},
+        )
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    receipt = {
+        "schema": RECURSIVE_SELF_OBSERVATION_SCHEMA,
+        "confirmation_token": USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION,
+        **expected_hashes,
+        "run_id": state.get("run_id"),
+        "project_root": state.get("project_root"),
+        "slug": oracle.get("slug"),
+        "signature": evidence["signature"],
+        "auto_retry": False,
+        "submission_action": "none",
+        "authorized_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    sidecar_path = directory / RECURSIVE_SELF_OBSERVATION_SIDECAR
+    if sidecar_path.exists() or sidecar_path.is_symlink():
+        raise OracleStateError(
+            "RECURSIVE_SELF_OBSERVATION_SETTLEMENT_EXISTS",
+            "append-only settlement path already exists but did not validate",
+            {"path": str(sidecar_path)},
+        )
+    encoded = (json.dumps(receipt, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    try:
+        with sidecar_path.open("xb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileExistsError as exc:
+        raise OracleStateError(
+            "RECURSIVE_SELF_OBSERVATION_SETTLEMENT_EXISTS",
+            "append-only settlement path already exists but did not validate",
+            {"path": str(sidecar_path)},
+        ) from exc
+    payload = load_state(state_path)
+    payload.update({
+        "fresh_run_authority": True,
+        "recursive_self_observation": {
+            "schema": "codex.chatgpt.oracle-settlement-reference/v1",
+            "path": str(sidecar_path),
+            "sha256": sha256_file(sidecar_path),
+        },
+    })
+    _write_json_atomic_fsync(state_path, payload)
+    proven = proven_recursive_self_observation_fresh_run_authority(
+        directory,
+        expected_state_sha256=expected_state_sha256,
+        expected_output_sha256=expected_output_sha256,
+        expected_transcript_sha256=expected_transcript_sha256,
+        confirmation_token=confirmation_token,
+    )
+    if not proven.get("ok"):
+        raise OracleStateError(
+            "RECURSIVE_SELF_OBSERVATION_SETTLEMENT_INVALID",
+            "written append-only settlement failed revalidation",
+            {"error": proven.get("error")},
+        )
+    return {**proven, "decision": "fresh-run-authority-settled", "result": payload}
 
 
 def _state_has_conversation_url(state: dict[str, Any]) -> bool:
@@ -2571,6 +2969,34 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
         return None
     elif not normalized_error.startswith("version resolution failed:"):
         return None
+    elif normalized_error.strip() == (
+        "version resolution failed: ORACLE_VERSION_FAILED: "
+        "Oracle version could not be resolved"
+    ):
+        lifecycle_shape = (
+            (state.get("status"), str(state.get("transport_status") or ""))
+            in {
+                ("failed", "prepared"),
+                ("attention_required", "failed_pre_submit"),
+                ("attention_required", "not_submitted_user_confirmed"),
+            }
+        )
+        command = tuple(str(item) for item in (oracle.get("command") or []))
+        locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
+        if (
+            authority != "pre_submit"
+            or not lifecycle_shape
+            or state.get("terminal_harvested") is not False
+            or not is_devspace_transport(str(state.get("transport") or ""))
+            or str(state.get("mode") or "") != "browser"
+            or str(state.get("task_outcome") or "") != "pending"
+            or stdout_bytes
+            or command != default_oracle_command(platform_name="nt" if command and command[0].casefold().endswith(".cmd") else None)
+            or not locator
+        ):
+            return None
+        failure_reason = "oracle-version-command-failed-before-launch"
+        code = "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED"
     elif "Oracle compatibility is validated only for the tested version" in normalized_error:
         failure_reason = "compatibility-version-drift"
         code = "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED"

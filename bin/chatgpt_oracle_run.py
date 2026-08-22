@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -562,7 +563,9 @@ def host_watchdog_timeout_seconds(config, argv: Sequence[str]) -> float | None:
 
     A tested Oracle browser run can remain inside a blocked CDP evaluation after its own
     browser deadline.  The host deadline is therefore independent and only
-    releases the caller; it never terminates the submitted Oracle process.
+    releases the caller; it never terminates the submitted Oracle process
+    except after a durable exact-recovery terminal harvest
+    (preserve-except-after-durable-harvest).
     """
     values: list[str] = []
     for index, item in enumerate(argv):
@@ -605,24 +608,166 @@ def host_watchdog_timeout_seconds(config, argv: Sequence[str]) -> float | None:
     return watchdog_seconds
 
 
-def wait_for_oracle_process(process: Any, watchdog_timeout_seconds: float | None) -> tuple[int | None, bool]:
-    if watchdog_timeout_seconds is None:
-        return int(process.wait()), False
+def wait_for_oracle_process(
+    process: Any,
+    watchdog_timeout_seconds: float | None,
+    *,
+    terminal_harvest_probe: Callable[[], bool] | None = None,
+    terminate_owned_process: Callable[[Any], None] | None = None,
+    terminal_probe_interval_seconds: float = 1.0,
+) -> tuple[int | None, bool]:
+    """Wait for one exact Oracle process; time alone never ends the wait.
+
+    The host deadline only releases the caller; it never terminates the
+    submitted Oracle process except after a durable exact-recovery harvest
+    (see `exact_run_is_durably_terminal`). Partial or contradictory
+    observations are never authority to stop the owned observer.
+    """
+    if terminal_harvest_probe is not None and (
+        not math.isfinite(terminal_probe_interval_seconds)
+        or terminal_probe_interval_seconds <= 0
+    ):
+        raise OracleRunError(
+            "TERMINAL_PROBE_INTERVAL_INVALID",
+            "terminal harvest probe interval must be a positive finite duration",
+        )
+    watcher_stop = threading.Event()
+    watcher: threading.Thread | None = None
+    if terminal_harvest_probe is not None and terminate_owned_process is not None:
+        def watch_terminal_harvest() -> None:
+            while not watcher_stop.is_set():
+                try:
+                    if terminal_harvest_probe():
+                        terminate_owned_process(process)
+                        return
+                except (OSError, RuntimeError, ValueError, TypeError, KeyError):
+                    # A partial atomic-state observation is never authority to
+                    # terminate the exact observer. Retry without changing state.
+                    pass
+                watcher_stop.wait(terminal_probe_interval_seconds)
+
+        watcher = threading.Thread(
+            target=watch_terminal_harvest,
+            name="oracle-terminal-harvest-watcher",
+            daemon=True,
+        )
+        watcher.start()
     try:
-        return int(process.wait(timeout=watchdog_timeout_seconds)), False
-    except subprocess.TimeoutExpired:
-        poll = getattr(process, "poll", None)
-        if callable(poll):
-            raced_exit_code = poll()
-            if raced_exit_code is not None:
-                return int(raced_exit_code), False
-        return None, True
+        if watchdog_timeout_seconds is None:
+            return int(process.wait()), False
+        try:
+            return int(process.wait(timeout=watchdog_timeout_seconds)), False
+        except subprocess.TimeoutExpired:
+            poll = getattr(process, "poll", None)
+            if callable(poll):
+                raced_exit_code = poll()
+                if raced_exit_code is not None:
+                    return int(raced_exit_code), False
+            return None, True
+    finally:
+        watcher_stop.set()
+        if watcher is not None:
+            watcher.join(timeout=max(1.0, terminal_probe_interval_seconds * 2))
+
+
+def exact_run_is_durably_terminal(layout: Any) -> bool:
+    """Return true only after exact recovery durably harvested a real output.
+
+    A durable terminal harvest requires the full predicate together: the run
+    is semantically complete, the exact session authority is terminal, the
+    terminal output was harvested, and the output is nonempty. Partial or
+    contradictory observations are never authority to stop the owned observer.
+    """
+    state = STATE.load_state(layout.state_path)
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    output_path = Path(str(artifacts.get("output") or layout.output_path))
+    return (
+        state.get("status") == "complete"
+        and state.get("session_authority") == "terminal"
+        and state.get("terminal_harvested") is True
+        and STATE.output_is_nonempty(output_path)
+    )
+
+
+def terminate_owned_oracle_process_tree(
+    process: Any,
+    *,
+    platform_name: str | None = None,
+    run_factory: Callable[..., Any] = subprocess.run,
+) -> None:
+    """Stop only the Popen-owned Oracle tree after durable exact recovery."""
+    poll = getattr(process, "poll", None)
+    if callable(poll) and poll() is not None:
+        return
+    platform = os.name if platform_name is None else platform_name
+    pid = getattr(process, "pid", None)
+    if platform == "nt" and isinstance(pid, int) and pid > 0:
+        taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe"
+        completed = run_factory(
+            [str(taskkill), "/PID", str(pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            **STATE.windows_subprocess_kwargs(platform_name=platform),
+        )
+        if int(getattr(completed, "returncode", 1)) != 0 and (
+            not callable(poll) or poll() is None
+        ):
+            raise OSError("owned Oracle process tree did not stop")
+        return
+    terminate = getattr(process, "terminate", None)
+    if callable(terminate):
+        terminate()
 
 
 ORACLE_VERSION_RESOLUTION_TIMEOUT_SECONDS = 90
 
 
-def resolve_oracle_version(command: Sequence[str], *, run_factory=subprocess.run, platform_name: str | None = None) -> str:
+def cached_oracle_version(
+    command: Sequence[str],
+    *,
+    run_factory: Callable[..., Any] = subprocess.run,
+    platform_name: str | None = None,
+) -> str | None:
+    """Resolve the pinned Oracle from its validated npx cache without npm I/O.
+
+    Accepted only for the fork's exact pinned command shapes: the 0.18.0
+    new-run pin and the recovery pins (0.16.1/0.17.x). The cached package
+    version is returned as `oracle <version>` only when it equals the
+    requested pin; anything else (or a missing/unvalidated cache root)
+    returns None so the caller keeps its fail-closed behavior.
+    """
+    normalized = tuple(str(item) for item in command)
+    executable = Path(normalized[0]).name.casefold() if normalized else ""
+    if executable not in {"npx", "npx.cmd", "npx.exe"}:
+        return None
+    package_spec: str | None = None
+    for item in normalized[1:]:
+        candidate = str(item).strip()
+        if candidate.startswith(f"{STATE.ORACLE_PACKAGE}@"):
+            package_spec = candidate
+            break
+    if package_spec is None:
+        return None
+    requested_version = package_spec.rsplit("@", 1)[-1]
+    if requested_version not in STATE.ORACLE_RECOVERABLE_VERSIONS:
+        return None
+    try:
+        package_root = COMPAT.resolve_package_root(requested_version)
+        version = COMPAT.package_version(package_root)
+    except Exception:
+        return None
+    return f"oracle {version}" if version == requested_version else None
+
+
+def resolve_oracle_version(
+    command: Sequence[str],
+    *,
+    run_factory=subprocess.run,
+    platform_name: str | None = None,
+    cache_resolver: Callable[[Sequence[str]], str | None] = cached_oracle_version,
+) -> str:
     """Resolve Oracle before launch with a bounded cold-cache allowance.
 
     The returned value is still passed immediately to the exact active or
@@ -639,6 +784,9 @@ def resolve_oracle_version(command: Sequence[str], *, run_factory=subprocess.run
         **STATE.windows_subprocess_kwargs(platform_name=platform_name),
     )
     if completed.returncode != 0:
+        cached = cache_resolver(command)
+        if cached is not None:
+            return cached
         raise OracleRunError("ORACLE_VERSION_FAILED", "Oracle version could not be resolved", {"exit_code": completed.returncode})
     lines = [line.strip() for line in f"{completed.stdout or ''}\n{completed.stderr or ''}".splitlines() if line.strip()]
     if not lines:
@@ -1239,7 +1387,7 @@ def execute_run(
                             "status": "armed",
                             "timeout_seconds": watchdog_timeout_seconds,
                             "oracle_process_pid": oracle_process_pid,
-                            "process_action": "preserve",
+                            "process_action": "preserve-except-after-durable-harvest",
                         }
                         if watchdog_timeout_seconds is not None
                         else {"status": "disabled-for-pro"}
@@ -1247,11 +1395,25 @@ def execute_run(
                 )
                 if not config.parallel_parent_id:
                     exit_code, watchdog_expired = wait_for_oracle_process(
-                        process, watchdog_timeout_seconds
+                        process,
+                        watchdog_timeout_seconds,
+                        terminal_harvest_probe=lambda: exact_run_is_durably_terminal(layout),
+                        terminate_owned_process=lambda owned: terminate_owned_oracle_process_tree(
+                            owned,
+                            platform_name=platform_name,
+                            run_factory=run_factory,
+                        ),
                     )
             if config.parallel_parent_id:
                 exit_code, watchdog_expired = wait_for_oracle_process(
-                    process, watchdog_timeout_seconds
+                    process,
+                    watchdog_timeout_seconds,
+                    terminal_harvest_probe=lambda: exact_run_is_durably_terminal(layout),
+                    terminate_owned_process=lambda owned: terminate_owned_oracle_process_tree(
+                        owned,
+                        platform_name=platform_name,
+                        run_factory=run_factory,
+                    ),
                 )
     except Exception as exc:
         code = f"{exc.code}: " if isinstance(exc, OracleRunError) else ""
@@ -1322,7 +1484,7 @@ def _finalize_run_after_process_wait(
         and STATE.output_is_nonempty(latest_output)
     ):
         STATE.cleanup_owned_browser_temp(layout.browser_temp_path)
-        return {
+        payload = {
             "ok": latest_semantic_complete,
             "status": "complete" if latest_semantic_complete else "attention_required",
             "run_dir": str(layout.run_dir),
@@ -1330,6 +1492,9 @@ def _finalize_run_after_process_wait(
             "output_path": str(latest_output),
             "monotonic_race_preserved": True,
         }
+        if latest.get("status") == "complete":
+            payload["decision"] = "exact-recovery-terminal-harvested-stop-owned-observer"
+        return payload
     STATE.write_transcript(layout)
     if watchdog_expired:
         state = STATE.update_state(
@@ -2156,6 +2321,16 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     settle_parser.add_argument("--reason", required=True)
+    recursive_parser = commands.add_parser("settle-recursive-self-observation")
+    recursive_parser.add_argument("--run-dir", type=Path, required=True)
+    recursive_parser.add_argument("--expected-state-sha256", required=True)
+    recursive_parser.add_argument("--expected-output-sha256", required=True)
+    recursive_parser.add_argument("--expected-transcript-sha256", required=True)
+    recursive_parser.add_argument(
+        "--confirmation",
+        choices=(STATE.USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION,),
+        required=True,
+    )
     return parser
 
 
@@ -2209,6 +2384,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 confirmation=args.confirmation,
                 reason=args.reason,
             )
+        elif args.command == "settle-recursive-self-observation":
+            proven = STATE.proven_recursive_self_observation_fresh_run_authority(
+                args.run_dir,
+                expected_state_sha256=args.expected_state_sha256,
+                expected_output_sha256=args.expected_output_sha256,
+                expected_transcript_sha256=args.expected_transcript_sha256,
+                confirmation_token=args.confirmation,
+            )
+            if not bool(proven.get("ok")):
+                payload = proven
+            else:
+                payload = STATE.settle_recursive_self_observation(
+                    args.run_dir,
+                    expected_state_sha256=args.expected_state_sha256,
+                    expected_output_sha256=args.expected_output_sha256,
+                    expected_transcript_sha256=args.expected_transcript_sha256,
+                    confirmation_token=args.confirmation,
+                )
     except STATE.OracleStateError as exc:
         payload = exc.envelope()
     except OracleRunError as exc:

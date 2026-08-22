@@ -1967,3 +1967,376 @@ def test_session_absent_refusal_stays_fail_closed(tmp_path: Path, variant: str) 
     assert verdict["owns_project"] is True
     assert verdict["settlement_eligibility"] is None
     assert verdict["requires_user_confirmation"] is False
+
+
+def _recursive_self_observation_state(tmp_path: Path, run_name: str = "run", **mutations) -> Path:
+    """Build a terminal devspace run whose output reports its own session."""
+    state = load_state()
+    run_dir = tmp_path / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("output.md", "stdout.log", "stderr.log", "transcript.md"):
+        (run_dir / name).write_text("", encoding="utf-8")
+    run_id = "20260822T120000Z-a3aeba967d99"
+    slug = "oracle-test-run-a3aeba967d"
+    output = (
+        f"run ID: {run_id}\nexact slug: {slug}\nstatus: running\n"
+        "task_outcome: pending\noutput.md absent\n"
+        "continue-observing-same-exact-session\n"
+        "observe-or-recover-exact-session-only\n"
+        "observe the original process or recover the exact slug\n"
+        "TASK_OUTCOME: BLOCKED\n"
+    )
+    (run_dir / "output.md").write_text(output, encoding="utf-8")
+    (run_dir / "transcript.md").write_text(output, encoding="utf-8")
+    payload = {
+        "schema": state.STATE_SCHEMA,
+        "run_id": run_id,
+        "project_root": str(tmp_path.resolve()),
+        "mode": "browser",
+        "transport": "devspace",
+        "app_name": "DevSpace",
+        "status": "attention_required",
+        "session_authority": "terminal",
+        "terminal_harvested": True,
+        "transport_status": "complete",
+        "task_outcome": "blocked",
+        "task_outcome_reason": "recursive-self-observation",
+        "oracle": {
+            "resolved_version": "unresolved",
+            "slug": slug,
+            "session_locator": slug,
+        },
+        "artifacts": {
+            "output": str(run_dir / "output.md"),
+            "stdout": str(run_dir / "stdout.log"),
+            "stderr": str(run_dir / "stderr.log"),
+            "transcript": str(run_dir / "transcript.md"),
+        },
+    }
+    payload.update(mutations)
+    state_path = run_dir / "state.json"
+    state.write_json_atomic(state_path, payload)
+    return state_path
+
+
+def test_recursive_self_observation_evidence_detects_exact_terminal_self_report(tmp_path: Path) -> None:
+    state = load_state()
+    state_path = _recursive_self_observation_state(tmp_path)
+    payload = state.load_state(state_path)
+
+    evidence = state.recursive_self_observation_evidence(state_path.parent, payload)
+
+    assert evidence is not None
+    assert evidence["run_id"] == "20260822T120000Z-a3aeba967d99"
+    assert evidence["slug"] == "oracle-test-run-a3aeba967d"
+    assert evidence["signature"] == "post-submit-recursive-self-observation"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"terminal_harvested": False},
+        {"session_authority": "submitted_unknown"},
+        {"task_outcome": "pending"},
+        {"run_id": "20260822T120000Z-different123456"},
+        {"oracle": {"slug": "oracle-different-slug", "session_locator": "oracle-different-slug"}},
+    ],
+)
+def test_recursive_self_observation_evidence_rejects_non_terminal_or_wrong_id(
+    tmp_path: Path, mutation: dict,
+) -> None:
+    state = load_state()
+    state_path = _recursive_self_observation_state(tmp_path, **mutation)
+    payload = state.load_state(state_path)
+
+    assert state.recursive_self_observation_evidence(state_path.parent, payload) is None
+
+
+@pytest.mark.parametrize(
+    "removed_phrase",
+    [
+        "status: running",
+        "task_outcome: pending",
+        "output.md absent",
+        "continue-observing-same-exact-session",
+        "observe-or-recover-exact-session-only",
+        "observe the original process or recover the exact slug",
+    ],
+)
+def test_recursive_self_observation_evidence_requires_phrase_groups(
+    tmp_path: Path, removed_phrase: str,
+) -> None:
+    state = load_state()
+    state_path = _recursive_self_observation_state(tmp_path)
+    output = state_path.parent / "output.md"
+    original = output.read_text(encoding="utf-8")
+    clean = "\n".join(
+        line for line in original.splitlines()
+        if removed_phrase.casefold() not in line.casefold()
+    )
+    output.write_text(clean, encoding="utf-8")
+    payload = state.load_state(state_path)
+
+    assert state.recursive_self_observation_evidence(state_path.parent, payload) is None
+
+
+def test_recursive_self_observation_settlement_is_append_only_and_hash_bound(tmp_path: Path) -> None:
+    state = load_state()
+    state_path = _recursive_self_observation_state(tmp_path)
+    run_dir = state_path.parent
+    state_payload = state.load_state(state_path)
+    hashes = {
+        "expected_state_sha256": state.sha256_file(state_path),
+        "expected_output_sha256": state.sha256_file(run_dir / "output.md"),
+        "expected_transcript_sha256": state.sha256_file(run_dir / "transcript.md"),
+    }
+
+    # Settle writes the sidecar and updates state.
+    settled = state.settle_recursive_self_observation(
+        run_dir,
+        **hashes,
+        confirmation_token=state.USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION,
+    )
+    assert settled["ok"] is True
+    assert settled["decision"] == "fresh-run-authority-settled"
+    assert settled["receipt"]["schema"] == state.RECURSIVE_SELF_OBSERVATION_SCHEMA
+    sidecar = run_dir / state.RECURSIVE_SELF_OBSERVATION_SIDECAR
+    assert sidecar.is_file()
+    assert not sidecar.is_symlink()
+
+    # State was updated.
+    updated = state.load_state(state_path)
+    assert updated["fresh_run_authority"] is True
+    ref = updated.get("recursive_self_observation")
+    assert isinstance(ref, dict)
+    assert ref["schema"] == "codex.chatgpt.oracle-settlement-reference/v1"
+    assert ref["sha256"] == state.sha256_file(sidecar)
+
+    # Replay is idempotent: already-settled, sidecar bytes unchanged.
+    sidecar_before = sidecar.read_bytes()
+    replayed = state.settle_recursive_self_observation(
+        run_dir,
+        **hashes,
+        confirmation_token=state.USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION,
+    )
+    assert replayed["ok"] is True
+    assert replayed["decision"] == "fresh-run-authority-already-settled"
+    assert sidecar.read_bytes() == sidecar_before
+
+    # Proven revalidates with the same hashes.
+    proven = state.proven_recursive_self_observation_fresh_run_authority(
+        run_dir,
+        **hashes,
+        confirmation_token=state.USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION,
+    )
+    assert proven["ok"] is True
+    assert proven["decision"] == "fresh-run-authority-confirmed"
+
+
+def test_recursive_self_observation_settlement_rejects_wrong_token(tmp_path: Path) -> None:
+    state = load_state()
+    state_path = _recursive_self_observation_state(tmp_path)
+    run_dir = state_path.parent
+    hashes = {
+        "expected_state_sha256": state.sha256_file(state_path),
+        "expected_output_sha256": state.sha256_file(run_dir / "output.md"),
+        "expected_transcript_sha256": state.sha256_file(run_dir / "transcript.md"),
+    }
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.settle_recursive_self_observation(
+            run_dir, **hashes, confirmation_token="wrong-token",
+        )
+    assert exc.value.code == "RECURSIVE_SELF_OBSERVATION_CONFIRMATION_REQUIRED"
+    sidecar = run_dir / state.RECURSIVE_SELF_OBSERVATION_SIDECAR
+    assert not sidecar.exists()
+
+
+def test_recursive_self_observation_settlement_rejects_hash_mismatch(tmp_path: Path) -> None:
+    state = load_state()
+    state_path = _recursive_self_observation_state(tmp_path)
+    run_dir = state_path.parent
+    hashes = {
+        "expected_state_sha256": "a" * 64,
+        "expected_output_sha256": "b" * 64,
+        "expected_transcript_sha256": "c" * 64,
+    }
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.settle_recursive_self_observation(
+            run_dir,
+            **hashes,
+            confirmation_token=state.USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION,
+        )
+    assert exc.value.code == "RECURSIVE_SELF_OBSERVATION_HASH_MISMATCH"
+    sidecar = run_dir / state.RECURSIVE_SELF_OBSERVATION_SIDECAR
+    assert not sidecar.exists()
+
+
+def test_recursive_self_observation_settlement_rejects_generic_blocked_output(tmp_path: Path) -> None:
+    """A standard blocked run without the self-observation phrases is not eligible."""
+    state = load_state()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("output.md", "stdout.log", "stderr.log", "transcript.md"):
+        (run_dir / name).write_text("", encoding="utf-8")
+    run_id = "generic1234"
+    slug = "oracle-project-generic1234"
+    (run_dir / "output.md").write_text("ordinary blocker\nTASK_OUTCOME: BLOCKED\n", encoding="utf-8")
+    (run_dir / "transcript.md").write_text("ordinary blocker\n", encoding="utf-8")
+    state_path = run_dir / "state.json"
+    state.write_json_atomic(state_path, {
+        "schema": state.STATE_SCHEMA, "status": "attention_required",
+        "run_id": run_id, "project_root": str(tmp_path.resolve()),
+        "session_authority": "terminal", "terminal_harvested": True,
+        "task_outcome": "blocked", "oracle": {"slug": slug},
+        "artifacts": {"output": str(run_dir / "output.md"), "transcript": str(run_dir / "transcript.md")},
+    })
+    hashes = {
+        "expected_state_sha256": state.sha256_file(state_path),
+        "expected_output_sha256": state.sha256_file(run_dir / "output.md"),
+        "expected_transcript_sha256": state.sha256_file(run_dir / "transcript.md"),
+    }
+
+    with pytest.raises(state.OracleStateError) as exc:
+        state.settle_recursive_self_observation(
+            run_dir,
+            **hashes,
+            confirmation_token=state.USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION,
+        )
+    assert exc.value.code == "RECURSIVE_SELF_OBSERVATION_EVIDENCE_REQUIRED"
+
+
+def test_recursive_self_observation_proven_rejects_tampered_sidecar(tmp_path: Path) -> None:
+    state = load_state()
+    state_path = _recursive_self_observation_state(tmp_path)
+    run_dir = state_path.parent
+    hashes = {
+        "expected_state_sha256": state.sha256_file(state_path),
+        "expected_output_sha256": state.sha256_file(run_dir / "output.md"),
+        "expected_transcript_sha256": state.sha256_file(run_dir / "transcript.md"),
+    }
+    state.settle_recursive_self_observation(
+        run_dir, **hashes,
+        confirmation_token=state.USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION,
+    )
+    sidecar = run_dir / state.RECURSIVE_SELF_OBSERVATION_SIDECAR
+
+    # Tamper the sidecar by appending a byte.
+    sidecar.write_bytes(sidecar.read_bytes() + b"\n")
+
+    proven = state.proven_recursive_self_observation_fresh_run_authority(
+        run_dir, **hashes,
+        confirmation_token=state.USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION,
+    )
+    assert proven["ok"] is False
+    assert proven["decision"] == "fresh-run-authority-rejected"
+    assert "RECURSIVE_SELF_OBSERVATION_RECEIPT_INVALID" in (
+        proven.get("error") or {}).get("code", "")
+
+
+def test_recursive_self_observation_proven_rejects_token_mismatch(tmp_path: Path) -> None:
+    state = load_state()
+    state_path = _recursive_self_observation_state(tmp_path)
+    run_dir = state_path.parent
+    hashes = {
+        "expected_state_sha256": state.sha256_file(state_path),
+        "expected_output_sha256": state.sha256_file(run_dir / "output.md"),
+        "expected_transcript_sha256": state.sha256_file(run_dir / "transcript.md"),
+    }
+    state.settle_recursive_self_observation(
+        run_dir, **hashes,
+        confirmation_token=state.USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION,
+    )
+
+    proven = state.proven_recursive_self_observation_fresh_run_authority(
+        run_dir, **hashes,
+        confirmation_token="wrong-token",
+    )
+    assert proven["ok"] is False
+    assert proven["error"]["code"] in {
+        "RECURSIVE_SELF_OBSERVATION_RECEIPT_INVALID",
+        "RECURSIVE_SELF_OBSERVATION_CONFIRMATION_REQUIRED",
+    }
+
+
+def _host_failure_state(tmp_path: Path, **mutations) -> Path:
+    """Build a devspace pre-submit state for proven_pre_submit_host_failure tests."""
+    state = load_state()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("output.md", "stdout.log", "stderr.log", "transcript.md"):
+        (run_dir / name).write_text("", encoding="utf-8")
+    oracle_locator = "oracle-test-run-a3aeba967d"
+    stderr_text = str(mutations.pop("_stderr", "") or "") or (
+        "version resolution failed: ORACLE_VERSION_FAILED: "
+        "Oracle version could not be resolved\n"
+    )
+    payload = {
+        "schema": state.STATE_SCHEMA,
+        "run_id": "20260822T120000Z-a3aeba967d99",
+        "project_root": str(tmp_path.resolve()),
+        "mode": "browser",
+        "transport": "devspace",
+        "app_name": "DevSpace",
+        "status": "failed",
+        "session_authority": "pre_submit",
+        "terminal_harvested": False,
+        "transport_status": "prepared",
+        "task_outcome": "pending",
+        "oracle": {
+            "resolved_version": "unresolved",
+            "command": list(state.default_oracle_command()),
+            "slug": oracle_locator,
+            "session_locator": oracle_locator,
+        },
+        "artifacts": {
+            "output": str(run_dir / "output.md"),
+            "stdout": str(run_dir / "stdout.log"),
+            "stderr": str(run_dir / "stderr.log"),
+            "transcript": str(run_dir / "transcript.md"),
+        },
+    }
+    payload.update(mutations)
+    (run_dir / "stderr.log").write_text(stderr_text, encoding="utf-8")
+    state_path = run_dir / "state.json"
+    state.write_json_atomic(state_path, payload)
+    return state_path
+
+
+def test_oracle_version_failed_is_classified_as_prelaunch_failure(tmp_path: Path) -> None:
+    state = load_state()
+    state_path = _host_failure_state(tmp_path)
+
+    evidence = state.proven_pre_submit_host_failure(state_path)
+
+    assert evidence is not None
+    assert evidence["code"] == "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED"
+    assert evidence["failure_reason"] == "oracle-version-command-failed-before-launch"
+    assert evidence["output_absent"] is True
+    assert evidence["conversation_url_absent"] is True
+    assert evidence["resolved_version"] == "unresolved"
+
+
+@pytest.mark.parametrize(
+    "mutation,expected",
+    [
+        ({"session_authority": "submitted_unknown"}, None),
+        ({"terminal_harvested": True}, None),
+        ({"transport": "pro-attachment-only"}, None),
+        ({"mode": "headless"}, None),
+        ({"task_outcome": "not_executed"}, None),
+        ({"transport_status": "complete"}, None),
+        ({"_stderr": "version resolution failed: OTHER: generic error\n"}, None),
+        ({"oracle": {"resolved_version": "oracle 0.18.0", "session_locator": "oracle-test-run-a3aeba967d"}}, None),
+    ],
+)
+def test_oracle_version_failed_classification_fails_closed(
+    tmp_path: Path, mutation: dict, expected: object,
+) -> None:
+    state = load_state()
+    state_path = _host_failure_state(tmp_path, **mutation)
+
+    evidence = state.proven_pre_submit_host_failure(state_path)
+
+    assert evidence is expected

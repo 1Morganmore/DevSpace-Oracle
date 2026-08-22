@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -2859,7 +2860,7 @@ def _mutate_process_survival(runner, run_dir, manifest_path):
         "status": "armed",
         "timeout_seconds": 5430,
         "oracle_process_pid": 1234,
-        "process_action": "preserve",
+        "process_action": "preserve-except-after-durable-harvest",
     }
     runner.STATE.write_json_atomic(state_path, state)
 
@@ -5086,3 +5087,717 @@ def test_parallel_recovery_uses_exact_run_mutex_not_parent_submit_mutex(
     expected_run = Path(result["run_dir"]).resolve()
     assert recovery_runs_after_execute == [expected_run]
     assert recovery_runs == [expected_run, expected_run]
+
+
+def test_durable_terminal_recovery_stops_only_the_owned_observer_before_watchdog_expiry() -> None:
+    runner = load_runner()
+    exited = threading.Event()
+    probe_counts = {"value": 0}
+    actions: list[str] = []
+
+    class BlockingProcess:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            if exited.wait(timeout):
+                return 143
+            raise subprocess.TimeoutExpired("oracle", timeout)
+
+        def poll(self):
+            return 143 if exited.is_set() else None
+
+    process = BlockingProcess()
+
+    def terminal_probe() -> bool:
+        probe_counts["value"] += 1
+        return probe_counts["value"] >= 2
+
+    def terminate_owned(candidate) -> None:
+        assert candidate is process
+        actions.append("terminate-owned-tree")
+        exited.set()
+
+    exit_code, watchdog_expired = runner.wait_for_oracle_process(
+        process,
+        4800,
+        terminal_harvest_probe=terminal_probe,
+        terminate_owned_process=terminate_owned,
+        terminal_probe_interval_seconds=0.01,
+    )
+
+    assert (exit_code, watchdog_expired) == (143, False)
+    assert actions == ["terminate-owned-tree"]
+    assert probe_counts["value"] >= 2
+
+
+def test_partial_observation_never_terminates_the_owned_observer() -> None:
+    runner = load_runner()
+    probe_counts = {"value": 0}
+    actions: list[str] = []
+
+    class BlockingProcess:
+        pid = 4343
+
+        def wait(self, timeout=None):
+            time.sleep(0.08)  # several probe intervals with a partial observation
+            raise subprocess.TimeoutExpired("oracle", timeout)
+
+        def poll(self):
+            return None
+
+    process = BlockingProcess()
+
+    def terminal_probe() -> bool:
+        probe_counts["value"] += 1
+        return False
+
+    def terminate_owned(candidate) -> None:
+        actions.append("terminate-owned-tree")
+
+    exit_code, watchdog_expired = runner.wait_for_oracle_process(
+        process,
+        4800,
+        terminal_harvest_probe=terminal_probe,
+        terminate_owned_process=terminate_owned,
+        terminal_probe_interval_seconds=0.01,
+    )
+
+    assert (exit_code, watchdog_expired) == (None, True)
+    assert actions == []
+    assert probe_counts["value"] >= 3
+
+
+def test_terminal_probe_interval_must_be_positive_and_finite() -> None:
+    runner = load_runner()
+
+    class ExitedProcess:
+        pid = 4444
+
+        def wait(self, timeout=None):
+            return 0
+
+    for invalid in (0, -1, float("nan"), float("inf")):
+        with pytest.raises(runner.OracleRunError) as exc:
+            runner.wait_for_oracle_process(
+                ExitedProcess(),
+                4800,
+                terminal_harvest_probe=lambda: False,
+                terminate_owned_process=lambda owned: None,
+                terminal_probe_interval_seconds=invalid,
+            )
+        assert exc.value.code == "TERMINAL_PROBE_INTERVAL_INVALID"
+
+
+def test_exact_run_is_durably_terminal_requires_the_full_predicate(tmp_path: Path) -> None:
+    runner = load_runner()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    state_path = run_dir / "state.json"
+    output_path = run_dir / "output.md"
+    output_path.write_text("durable answer", encoding="utf-8")
+    layout = runner.STATE.RunLayout(
+        "1" * 32,
+        "oracle-project-run",
+        run_dir,
+        state_path,
+        output_path,
+        run_dir / "transcript.md",
+        run_dir / "stdout.log",
+        run_dir / "stderr.log",
+        run_dir / "browser-temp",
+    )
+    base = {
+        "schema": runner.STATE.STATE_SCHEMA,
+        "status": "complete",
+        "session_authority": "terminal",
+        "terminal_harvested": True,
+    }
+
+    def write(**mutations) -> None:
+        payload = {**base, **mutations, "artifacts": {"output": str(output_path)}}
+        runner.STATE.write_json_atomic(state_path, payload)
+
+    write()
+    assert runner.exact_run_is_durably_terminal(layout) is True
+    write(status="attention_required")
+    assert runner.exact_run_is_durably_terminal(layout) is False
+    write(status="complete", session_authority="submitted_unknown")
+    assert runner.exact_run_is_durably_terminal(layout) is False
+    write(session_authority="terminal", terminal_harvested=False)
+    assert runner.exact_run_is_durably_terminal(layout) is False
+    write(terminal_harvested=True)
+    output_path.write_text("", encoding="utf-8")
+    assert runner.exact_run_is_durably_terminal(layout) is False
+
+
+def test_windows_taskkill_targets_the_popen_owned_tree() -> None:
+    runner = load_runner()
+    calls: list[tuple[list[str], dict]] = []
+
+    class LiveProcess:
+        pid = 4242
+
+        def poll(self):
+            return None
+
+    def taskkill(command, **kwargs):
+        calls.append((list(command), kwargs))
+        return subprocess.CompletedProcess(command, 0)
+
+    runner.terminate_owned_oracle_process_tree(
+        LiveProcess(),
+        platform_name="nt",
+        run_factory=taskkill,
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0][-4:] == ["/PID", "4242", "/T", "/F"]
+    assert calls[0][1]["check"] is False
+    assert calls[0][1]["stdin"] == subprocess.DEVNULL
+    assert calls[0][1]["stdout"] == subprocess.DEVNULL
+    assert calls[0][1]["stderr"] == subprocess.DEVNULL
+
+
+def test_owned_observer_tree_termination_skips_an_already_exited_process() -> None:
+    runner = load_runner()
+    calls: list[list[str]] = []
+
+    class ExitedProcess:
+        pid = 4545
+
+        def poll(self):
+            return 0
+
+    runner.terminate_owned_oracle_process_tree(
+        ExitedProcess(),
+        platform_name="nt",
+        run_factory=(
+            lambda command, **kwargs: calls.append(list(command))
+            or subprocess.CompletedProcess(command, 0)
+        ),
+    )
+
+    assert calls == []
+
+
+def test_posix_owned_observer_termination_uses_terminate_only() -> None:
+    runner = load_runner()
+    actions: list[str] = []
+
+    class LiveProcess:
+        pid = 4646
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            actions.append("terminate")
+
+    runner.terminate_owned_oracle_process_tree(LiveProcess(), platform_name="posix")
+
+    assert actions == ["terminate"]
+
+
+def test_durable_terminal_recovery_stops_owned_observer_and_finalizes_with_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_runner()
+    process_actions: list[str] = []
+    recovered: dict = {}
+    original_output: Path | None = None
+
+    class PassthroughMutex:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(
+        runner.STATE, "project_submit_mutex", lambda *args, **kwargs: PassthroughMutex()
+    )
+    monkeypatch.setattr(
+        runner.STATE, "exact_run_recovery_mutex", lambda *args, **kwargs: PassthroughMutex()
+    )
+
+    def terminal_recovery(command, **kwargs):
+        candidate = Path(command[command.index("--write-output") + 1])
+        candidate.write_text(
+            "durable recovered answer\nTASK_OUTCOME: EXECUTED\n",
+            encoding="utf-8",
+        )
+        kwargs["stdout"].write(b"State: completed\n")
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    class StaleObserverProcess:
+        pid = 6060
+        stopped = threading.Event()
+
+        def wait(self, timeout=None):
+            assert original_output is not None
+            recovered.update(
+                recover_run(
+                    runner,
+                    original_output.parent,
+                    action="harvest",
+                    popen_factory=terminal_recovery,
+                )
+            )
+            assert recovered["status"] == "complete"
+            if not self.stopped.wait(timeout=31 if timeout is None else timeout):
+                raise subprocess.TimeoutExpired("oracle", timeout)
+            return 1
+
+        def terminate(self):
+            process_actions.append("terminate")
+            self.stopped.set()
+
+    def stale_observer_popen(command, **kwargs):
+        nonlocal original_output
+        original_output = Path(command[command.index("--write-output") + 1])
+        kwargs["stdout"].write(b"State: running\n")
+        kwargs["stdout"].flush()
+        return StaleObserverProcess()
+
+    result = execute_run(
+        runner,
+        manifest(
+            tmp_path,
+            test_profile=False,
+            run_id="8" * 32,
+            oracle_args=["--browser-timeout", "1s"],
+            task_outcome_contract="v1",
+        ),
+        run_factory=version_runner,
+        popen_factory=stale_observer_popen,
+        platform_name="posix",
+        devspace_compat_factory=lambda: {"ok": True, "ready": True},
+    )
+
+    assert process_actions == ["terminate"]
+    assert result["ok"] is True
+    assert result["status"] == "complete"
+    assert result["decision"] == "exact-recovery-terminal-harvested-stop-owned-observer"
+    assert result["monotonic_race_preserved"] is True
+    assert result["result"] == recovered["result"]
+    assert Path(result["output_path"]).read_text(encoding="utf-8") == (
+        "durable recovered answer\nTASK_OUTCOME: EXECUTED\n"
+    )
+
+
+def test_partial_recovery_state_never_stops_the_owned_observer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = load_runner()
+    process_actions: list[str] = []
+    original_output: Path | None = None
+
+    class PassthroughMutex:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(
+        runner.STATE, "project_submit_mutex", lambda *args, **kwargs: PassthroughMutex()
+    )
+    monkeypatch.setattr(
+        runner.STATE, "exact_run_recovery_mutex", lambda *args, **kwargs: PassthroughMutex()
+    )
+
+    def partial_recovery(command, **kwargs):
+        candidate = Path(command[command.index("--write-output") + 1])
+        candidate.write_text("still working", encoding="utf-8")
+        kwargs["stdout"].write(b"State: running\n")
+        kwargs["stdout"].flush()
+        return Process(0, [])
+
+    class PartialOriginalProcess:
+        pid = 6161
+
+        def wait(self, timeout=None):
+            assert original_output is not None
+            partial = recover_run(
+                runner,
+                original_output.parent,
+                action="harvest",
+                popen_factory=partial_recovery,
+            )
+            assert partial["ok"] is False
+            time.sleep(1.5)  # spans at least one probe interval
+            return 9
+
+        def terminate(self):
+            process_actions.append("terminate")
+
+    def partial_original_popen(command, **kwargs):
+        nonlocal original_output
+        original_output = Path(command[command.index("--write-output") + 1])
+        kwargs["stdout"].write(b"State: running\n")
+        kwargs["stdout"].flush()
+        return PartialOriginalProcess()
+
+    result = execute_run(
+        runner,
+        manifest(
+            tmp_path,
+            test_profile=False,
+            run_id="7" * 32,
+            oracle_args=["--browser-timeout", "1s"],
+        ),
+        run_factory=version_runner,
+        popen_factory=partial_original_popen,
+        platform_name="posix",
+        devspace_compat_factory=lambda: {"ok": True, "ready": True},
+    )
+
+    assert result["ok"] is False
+    assert process_actions == []
+    assert result["result"]["terminal_harvested"] is False
+
+
+def recursive_self_observation_run(runner, tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    run_dir = tmp_path / "runs" / ("9" * 32)
+    run_dir.mkdir(parents=True)
+    output_path = run_dir / "output.md"
+    transcript_path = run_dir / "transcript.md"
+    output_path.write_text("bounded terminal self-observation answer", encoding="utf-8")
+    transcript_path.write_text("terminal transcript", encoding="utf-8")
+    state = {
+        "schema": runner.STATE.STATE_SCHEMA,
+        "run_id": "9" * 32,
+        "project_root": str(tmp_path.resolve()),
+        "status": "complete",
+        "session_authority": "terminal",
+        "terminal_harvested": True,
+        "task_outcome": "blocked",
+        "oracle": {"slug": "oracle-project-9"},
+        "artifacts": {
+            "output": str(output_path),
+            "transcript": str(transcript_path),
+        },
+    }
+    runner.STATE.write_json_atomic(run_dir / "state.json", state)
+    hashes = {
+        "state_sha256": runner.STATE.sha256_file(run_dir / "state.json"),
+        "output_sha256": runner.STATE.sha256_file(output_path),
+        "transcript_sha256": runner.STATE.sha256_file(transcript_path),
+    }
+    return run_dir, hashes
+
+
+def proven_recursive_self_observation_fake(
+    runner,
+    run_dir: Path,
+) -> dict:
+    token = runner.STATE.USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION
+
+    def proven(
+        run_dir_arg,
+        *,
+        expected_state_sha256: str,
+        expected_output_sha256: str,
+        expected_transcript_sha256: str,
+        confirmation_token: str,
+    ) -> dict:
+        directory = Path(run_dir_arg).expanduser().resolve()
+        if confirmation_token.strip().casefold() != token:
+            return {
+                "ok": False,
+                "decision": "rejected",
+                "error": {
+                    "code": "RECURSIVE_SELF_OBSERVATION_CONFIRMATION_REQUIRED",
+                    "message": "confirmation does not authorize a fresh run",
+                },
+            }
+        actual = {
+            "state_sha256": runner.STATE.sha256_file(directory / "state.json"),
+            "output_sha256": runner.STATE.sha256_file(directory / "output.md"),
+            "transcript_sha256": runner.STATE.sha256_file(directory / "transcript.md"),
+        }
+        expected = {
+            "state_sha256": str(expected_state_sha256).strip().casefold(),
+            "output_sha256": str(expected_output_sha256).strip().casefold(),
+            "transcript_sha256": str(expected_transcript_sha256).strip().casefold(),
+        }
+        if actual != expected:
+            return {
+                "ok": False,
+                "decision": "rejected",
+                "error": {
+                    "code": "RECURSIVE_SELF_OBSERVATION_HASH_MISMATCH",
+                    "message": "exact terminal run artifacts changed before authority settlement",
+                    "evidence": {"expected": expected, "actual": actual},
+                },
+            }
+        return {
+            "ok": True,
+            "decision": "recursive-self-observation-fresh-run-authorized",
+            "error": None,
+        }
+
+    return proven
+
+
+def test_settle_recursive_self_observation_cli_validates_and_persists_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runner = load_runner()
+    run_dir, hashes = recursive_self_observation_run(runner, tmp_path)
+    token = runner.STATE.USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION
+    settle_calls: list[dict] = []
+
+    def settle(
+        run_dir_arg,
+        *,
+        expected_state_sha256: str,
+        expected_output_sha256: str,
+        expected_transcript_sha256: str,
+        confirmation_token: str,
+    ) -> dict:
+        settle_calls.append({
+            "run_dir": Path(run_dir_arg).resolve(),
+            "expected_state_sha256": expected_state_sha256,
+            "expected_output_sha256": expected_output_sha256,
+            "expected_transcript_sha256": expected_transcript_sha256,
+            "confirmation_token": confirmation_token,
+        })
+        sidecar = Path(run_dir_arg) / "recursive-self-observation.json"
+        sidecar.write_text(
+            json.dumps({
+                "schema": "codex.chatgpt.oracle-recursive-self-observation/v1",
+                "confirmation": confirmation_token,
+                "state_sha256": expected_state_sha256,
+                "output_sha256": expected_output_sha256,
+                "transcript_sha256": expected_transcript_sha256,
+            }, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "ok": True,
+            "decision": "recursive-self-observation-fresh-run-authorized",
+            "error": None,
+            "sidecar_path": str(sidecar),
+        }
+
+    monkeypatch.setattr(
+        runner.STATE,
+        "proven_recursive_self_observation_fresh_run_authority",
+        proven_recursive_self_observation_fake(runner, run_dir),
+    )
+    monkeypatch.setattr(runner.STATE, "settle_recursive_self_observation", settle)
+
+    exit_code = runner.main([
+        "settle-recursive-self-observation",
+        "--run-dir", str(run_dir),
+        "--confirmation", token,
+        "--expected-state-sha256", hashes["state_sha256"],
+        "--expected-output-sha256", hashes["output_sha256"],
+        "--expected-transcript-sha256", hashes["transcript_sha256"],
+    ])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert len(settle_calls) == 1
+    assert settle_calls[0]["run_dir"] == run_dir.resolve()
+    assert settle_calls[0]["expected_state_sha256"] == hashes["state_sha256"]
+    assert settle_calls[0]["expected_output_sha256"] == hashes["output_sha256"]
+    assert settle_calls[0]["expected_transcript_sha256"] == hashes["transcript_sha256"]
+    assert settle_calls[0]["confirmation_token"] == token
+    payload = json.loads(captured.out)
+    assert payload["ok"] is True
+    assert payload["decision"] == "recursive-self-observation-fresh-run-authorized"
+    sidecar = run_dir / "recursive-self-observation.json"
+    assert sidecar.is_file()
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["confirmation"] == token
+
+
+def test_settle_recursive_self_observation_cli_rejects_hash_mismatch_without_settling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runner = load_runner()
+    run_dir, hashes = recursive_self_observation_run(runner, tmp_path)
+    token = runner.STATE.USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION
+    settle_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        runner.STATE,
+        "proven_recursive_self_observation_fresh_run_authority",
+        proven_recursive_self_observation_fake(runner, run_dir),
+    )
+    monkeypatch.setattr(
+        runner.STATE,
+        "settle_recursive_self_observation",
+        lambda *args, **kwargs: settle_calls.append(kwargs) or {"ok": True},
+    )
+
+    exit_code = runner.main([
+        "settle-recursive-self-observation",
+        "--run-dir", str(run_dir),
+        "--confirmation", token,
+        "--expected-state-sha256", "0" * 64,
+        "--expected-output-sha256", hashes["output_sha256"],
+        "--expected-transcript-sha256", hashes["transcript_sha256"],
+    ])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert settle_calls == []
+    payload = json.loads(captured.out)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "RECURSIVE_SELF_OBSERVATION_HASH_MISMATCH"
+    assert not (run_dir / "recursive-self-observation.json").exists()
+
+
+def test_settle_recursive_self_observation_cli_rejects_wrong_confirmation_token(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runner = load_runner()
+    run_dir, hashes = recursive_self_observation_run(runner, tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        runner.main([
+            "settle-recursive-self-observation",
+            "--run-dir", str(run_dir),
+            "--confirmation", "user-confirmed-no-submission",
+            "--expected-state-sha256", hashes["state_sha256"],
+            "--expected-output-sha256", hashes["output_sha256"],
+            "--expected-transcript-sha256", hashes["transcript_sha256"],
+        ])
+
+    assert exc.value.code == 2
+    assert not (run_dir / "recursive-self-observation.json").exists()
+
+
+def test_cached_oracle_version_resolves_the_pinned_0180_new_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_runner()
+    root = tmp_path / "oracle-cache-root"
+    root.mkdir()
+    monkeypatch.setattr(runner.COMPAT, "resolve_package_root", lambda version: root)
+    monkeypatch.setattr(runner.COMPAT, "package_version", lambda package_root: "0.18.0")
+
+    assert runner.cached_oracle_version(
+        ["npx.cmd", "-y", "@steipete/oracle@0.18.0"]
+    ) == "oracle 0.18.0"
+
+
+@pytest.mark.parametrize("pinned", ["0.16.1", "0.17.0", "0.17.1", "0.17.2", "0.17.3"])
+def test_cached_oracle_version_resolves_the_pinned_recovery_shapes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pinned: str,
+) -> None:
+    runner = load_runner()
+    root = tmp_path / f"oracle-{pinned}"
+    root.mkdir()
+    monkeypatch.setattr(runner.COMPAT, "resolve_package_root", lambda version: root)
+    monkeypatch.setattr(runner.COMPAT, "package_version", lambda package_root: pinned)
+
+    assert runner.cached_oracle_version(
+        ["npx", "-y", f"@steipete/oracle@{pinned}"]
+    ) == f"oracle {pinned}"
+
+
+def test_cached_oracle_version_returns_none_for_unpinned_or_unmatched_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_runner()
+    root = tmp_path / "oracle-cache-root"
+    root.mkdir()
+    monkeypatch.setattr(runner.COMPAT, "resolve_package_root", lambda version: root)
+    monkeypatch.setattr(runner.COMPAT, "package_version", lambda package_root: "0.18.0")
+
+    # Unpinned/unrecognized command shapes are never cache-resolved.
+    assert runner.cached_oracle_version(["npx", "-y", "@steipete/oracle@0.19.0"]) is None
+    assert runner.cached_oracle_version(["npx", "-y", "some-other-package@0.18.0"]) is None
+    assert runner.cached_oracle_version(["node", "oracle-cli.js"]) is None
+    assert runner.cached_oracle_version([]) is None
+    # A requested pin that does not match the validated cached version is None.
+    assert runner.cached_oracle_version(["npx", "-y", "@steipete/oracle@0.16.1"]) is None
+
+
+def test_cached_oracle_version_returns_none_when_cache_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_runner()
+
+    def missing_root(version: str):
+        raise OSError(f"no validated cache root for {version}")
+
+    monkeypatch.setattr(runner.COMPAT, "resolve_package_root", missing_root)
+    monkeypatch.setattr(runner.COMPAT, "package_version", lambda package_root: "0.18.0")
+
+    assert runner.cached_oracle_version(["npx", "-y", "@steipete/oracle@0.18.0"]) is None
+
+
+def test_resolve_oracle_version_falls_back_to_cached_pin_when_version_command_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_runner()
+    root = tmp_path / "oracle-cache-root"
+    root.mkdir()
+    monkeypatch.setattr(runner.COMPAT, "resolve_package_root", lambda version: root)
+    monkeypatch.setattr(runner.COMPAT, "package_version", lambda package_root: "0.18.0")
+
+    failed = subprocess.CompletedProcess(
+        ["npx", "-y", "@steipete/oracle@0.18.0", "--version"],
+        1,
+        stdout="",
+        stderr="",
+    )
+
+    assert runner.resolve_oracle_version(
+        ["npx", "-y", "@steipete/oracle@0.18.0"],
+        run_factory=lambda command, **kwargs: failed,
+    ) == "oracle 0.18.0"
+
+
+def test_resolve_oracle_version_still_raises_when_cache_misses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_runner()
+
+    def missing_root(version: str):
+        raise OSError(f"no validated cache root for {version}")
+
+    monkeypatch.setattr(runner.COMPAT, "resolve_package_root", missing_root)
+    monkeypatch.setattr(runner.COMPAT, "package_version", lambda package_root: "0.18.0")
+
+    with pytest.raises(runner.OracleRunError) as exc:
+        runner.resolve_oracle_version(
+            ["npx", "-y", "@steipete/oracle@0.18.0"],
+            run_factory=lambda command, **kwargs: subprocess.CompletedProcess(
+                command, 1, stdout="", stderr=""
+            ),
+        )
+
+    assert exc.value.code == "ORACLE_VERSION_FAILED"
+
+
+def test_resolve_oracle_version_prefers_a_real_version_over_the_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_runner()
+    root = tmp_path / "oracle-cache-root"
+    root.mkdir()
+    monkeypatch.setattr(runner.COMPAT, "resolve_package_root", lambda version: root)
+    monkeypatch.setattr(runner.COMPAT, "package_version", lambda package_root: "0.18.0")
+
+    assert runner.resolve_oracle_version(
+        ["npx", "-y", "@steipete/oracle@0.18.0"],
+        run_factory=version_runner,
+    ) == "oracle 0.18.0"
