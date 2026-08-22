@@ -70,3 +70,26 @@ nonempty durable output.
 Completion requires the final web verdict, exact durable outputs and receipts,
 and one zero-exit deterministic local gate. No dry-run, fixture, or lower-level
 API substitutes for an approved representative live flow.
+
+## Settlement
+
+Explicit user settlement releases a stuck comprehensive workflow without ever
+restarting a service or submitting a replacement prompt:
+
+- `--cancel-user-stopped` with `--confirmation user-confirmed-provider-stop`
+  settles a terminal-harvested run the provider stopped. The run must be
+  `attention_required` with terminal authority, `terminal_harvested: true`,
+  and a `blocked` / `not_executed` / `legacy_unclassified` outcome. Workflow,
+  scope, and run state must be exact-path and SHA-256 bound; the scope is
+  released with an immutable `codex.chatgpt.oracle-comprehensive-user-stop/v1`
+  receipt.
+- The exact `DEVSPACE_SERVICE_RESTART_REQUIRED` pre-submit error uses
+  `--confirmation user-confirmed-pre-submit-workflow-cancel` with the same
+  command, and only after the managed setup procedure has restarted DevSpace
+  once and verified the preserved roots and endpoints. Settlement itself never
+  restarts the service.
+
+A terminal FAIL review releases the scope through
+`codex.chatgpt.oracle-comprehensive-review-failed/v1`, keeping the
+`attention_required` workflow state and its blocker text; no retry is ever
+submitted automatically.

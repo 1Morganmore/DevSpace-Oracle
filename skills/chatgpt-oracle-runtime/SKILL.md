@@ -195,3 +195,14 @@ Pro/Multi → review → implementation → final web gate flow. Each web stage
 writes the next mission; the host validates only UTF-8, identity, paths, and
 hashes. Use `chatgpt_oracle_multi.py` for independent solver sessions in waves
 of at most five and one merger over handoff files.
+
+A `version resolution failed: DEVSPACE_SERVICE_RESTART_REQUIRED` pre-submit
+failure is auto-settled as a proven pre-submit failure. Restart DevSpace once
+through the managed setup procedure, verify the preserved roots and endpoints,
+then rerun preflight. Settlement itself never restarts the service.
+Comprehensive mode cancels a user-stopped or pre-submit-restart workflow only
+through `chatgpt_oracle_comprehensive.py --cancel-user-stopped` with the exact
+confirmation token (`user-confirmed-provider-stop` or
+`user-confirmed-pre-submit-workflow-cancel`); the settlement is exact-path and
+SHA-256 bound, releases the workflow scope with an immutable receipt, and never
+submits a replacement.
