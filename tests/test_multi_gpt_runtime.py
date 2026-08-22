@@ -130,6 +130,23 @@ def test_runtime_defaults_reject_overrides_and_pin_every_stage_argv() -> None:
     assert "codex.opencodex-real.cmd" in source
     assert "existsSync(openCodexReal) ? openCodexReal : 'codex.cmd'" in source
 
+    # Launch preflight: the resolved CLI must itself accept the pinned contract
+    # before a job is persisted; success is memoized per process, and every stage
+    # keeps its own explicit model/effort args.
+    assert "let EXECUTION_CONTRACT_CANARY = null;" in source
+    assert "if (EXECUTION_CONTRACT_CANARY?.ok) return EXECUTION_CONTRACT_CANARY;" in source
+    assert "function assertCodexCliAcceptsExecutionContract()" in source
+    assert "assertCodexCliAcceptsExecutionContract()" in source
+    assert "MULTI_GPT_CODEX_CANARY_COMMAND" in source
+    assert "spawnSync(probeCommand, args, {" in source
+    assert "'--model', EXECUTION_CONTRACT.model," in source
+    assert "'mcp', 'list', '--json'" in source
+    assert "LUNA_MAX_UNSUPPORTED_BY_CODEX_CLI" in source
+    assert "probe: 'mcp-list-no-run'" in source
+    assert "launch_contract_canary: launchCanary" in source
+    assert "'launch_contract_canary'" in source
+    assert "Object.hasOwn(value, 'launch_contract_canary')" in source
+
 
 def test_job_and_result_surfaces_preserve_contract_evidence() -> None:
     source = SERVER.read_text(encoding="utf-8")
@@ -137,6 +154,147 @@ def test_job_and_result_surfaces_preserve_contract_evidence() -> None:
     assert "enforced_launch_contract: options.enforcedLaunchContract" in source
     assert "requested_contract: job.requested_contract" in source
     assert "enforced_launch_contract: job.enforced_launch_contract" in source
+
+
+def fake_codex_env(tmp_path: Path, *, mode: str = "accept") -> tuple[dict[str, str], Path]:
+    """Point the server's resolved Codex CLI at a deterministic fake binary.
+
+    The canary honors MULTI_GPT_CODEX_CANARY_COMMAND as an override for the
+    probe command only, so tests always point it at the fake by absolute path
+    (deterministic on every platform). The fake is also installed where
+    resolveCodexCommand looks (Windows: APPDATA\\npm\\codex.opencodex-real.cmd;
+    POSIX: a `codex` script prepended to PATH) so the accept path's background
+    stage spawns hit the same fake. Every invocation appends one 'call' line to
+    the returned count file so tests can observe spawn counts; `mode` controls
+    the probe response ('accept' -> JSON array + exit 0, 'reject' -> exit 1).
+    """
+    env = os.environ.copy()
+    count_file = tmp_path / "canary-invocations.txt"
+    env["MG_PROBE_COUNT"] = str(count_file)
+    env["MG_PROBE_MODE"] = mode
+    if os.name == "nt":
+        npm = tmp_path / "fake-appdata" / "npm"
+        npm.mkdir(parents=True, exist_ok=True)
+        fake = npm / "codex.opencodex-real.cmd"
+        fake.write_text(
+            "@echo off\r\n"
+            "setlocal\r\n"
+            '>> "%MG_PROBE_COUNT%" echo call\r\n'
+            'if "%MG_PROBE_MODE%"=="reject" (echo LUNA_MAX probe rejected >&2 & exit /b 1)\r\n'
+            "echo []\r\n"
+            "exit /b 0\r\n",
+            encoding="utf-8",
+        )
+        env["APPDATA"] = str(tmp_path / "fake-appdata")
+    else:
+        bin_dir = tmp_path / "fake-bin"
+        bin_dir.mkdir(exist_ok=True)
+        fake = bin_dir / "codex"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'printf "call\\n" >> "$MG_PROBE_COUNT"\n'
+            'if [ "$MG_PROBE_MODE" = "reject" ]; then\n'
+            '  echo "LUNA_MAX probe rejected" >&2\n'
+            "  exit 1\n"
+            "fi\n"
+            'echo "[]"\n'
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    env["MULTI_GPT_CODEX_CANARY_COMMAND"] = str(fake)
+    return env, count_file
+
+
+def canary_invocation_count(count_file: Path) -> int:
+    if not count_file.exists():
+        return 0
+    return count_file.read_text(encoding="utf-8").count("call")
+
+
+def test_canary_passes_when_codex_cli_accepts_the_execution_contract(tmp_path: Path) -> None:
+    env, count_file = fake_codex_env(tmp_path, mode="accept")
+    result = module_call(
+        "const c = server.assertCodexCliAcceptsExecutionContract(); "
+        "console.log(JSON.stringify({ok:c.ok,command:c.command,model:c.model,"
+        "reasoning_effort:c.reasoning_effort,probe:c.probe}));",
+        env=env,
+    )
+    assert result["ok"] is True
+    assert result["model"] == "gpt-5.6-luna"
+    assert result["reasoning_effort"] == "max"
+    assert result["probe"] == "mcp-list-no-run"
+    assert canary_invocation_count(count_file) == 1
+
+
+def test_canary_acceptance_is_recorded_on_the_persisted_job(tmp_path: Path) -> None:
+    env, _count_file = fake_codex_env(tmp_path, mode="accept")
+    codex_home = tmp_path / "codex-home"
+    env["CODEX_HOME"] = str(codex_home.resolve())
+    response = mcp_response(
+        "tools/call",
+        {"name": "multi_gpt_start", "arguments": {"prompt": "persist with canary"}},
+        env=env,
+    )
+    payload = json.loads(response["result"]["content"][0]["text"])
+    jobs = codex_home / "mcp_servers" / "multi-gpt" / "jobs"
+    assert payload["ok"] is True
+    job_files = list(jobs.glob("*.json"))
+    assert len(job_files) == 1
+    canary = json.loads(job_files[0].read_text(encoding="utf-8"))["launch_contract_canary"]
+    assert canary["ok"] is True
+    assert canary["model"] == "gpt-5.6-luna"
+    assert canary["reasoning_effort"] == "max"
+    assert canary["probe"] == "mcp-list-no-run"
+
+
+def test_canary_rejection_fails_closed_before_job_persistence(tmp_path: Path) -> None:
+    env, count_file = fake_codex_env(tmp_path, mode="reject")
+    codex_home = tmp_path / "codex-home"
+    env["CODEX_HOME"] = str(codex_home.resolve())
+    response = mcp_response(
+        "tools/call",
+        {"name": "multi_gpt_start", "arguments": {"prompt": "must fail before persist"}},
+        env=env,
+    )
+    payload = json.loads(response["result"]["content"][0]["text"])
+    jobs = codex_home / "mcp_servers" / "multi-gpt" / "jobs"
+    assert payload["ok"] is False
+    assert "LUNA_MAX_UNSUPPORTED_BY_CODEX_CLI" in payload["error"]
+    assert not list(jobs.glob("*.json"))
+    assert canary_invocation_count(count_file) == 1
+
+
+def test_canary_fails_closed_when_the_codex_cli_spawn_fails(tmp_path: Path) -> None:
+    # Point the probe override at a nonexistent binary: spawn failure (ENOENT on
+    # POSIX, cmd 'not recognized' on Windows) must fail closed before persistence.
+    env = os.environ.copy()
+    codex_home = tmp_path / "codex-home"
+    env["CODEX_HOME"] = str(codex_home.resolve())
+    env["MULTI_GPT_CODEX_CANARY_COMMAND"] = str(tmp_path / "missing-codex" / "codex.cmd")
+    response = mcp_response(
+        "tools/call",
+        {"name": "multi_gpt_start", "arguments": {"prompt": "must fail closed"}},
+        env=env,
+    )
+    payload = json.loads(response["result"]["content"][0]["text"])
+    jobs = codex_home / "mcp_servers" / "multi-gpt" / "jobs"
+    assert payload["ok"] is False
+    assert "LUNA_MAX_UNSUPPORTED_BY_CODEX_CLI" in payload["error"]
+    assert not list(jobs.glob("*.json"))
+
+
+def test_canary_success_is_memoized_within_one_process(tmp_path: Path) -> None:
+    env, count_file = fake_codex_env(tmp_path, mode="accept")
+    result = module_call(
+        "const a = server.assertCodexCliAcceptsExecutionContract(); "
+        "const b = server.assertCodexCliAcceptsExecutionContract(); "
+        "console.log(JSON.stringify({a:a.ok,b:b.ok,same:a===b}));",
+        env=env,
+    )
+    assert result == {"a": True, "b": True, "same": True}
+    assert canary_invocation_count(count_file) == 1
 
 
 def test_packaging_and_installer_deploy_multi_gpt_sources() -> None:

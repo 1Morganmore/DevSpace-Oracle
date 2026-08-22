@@ -50,7 +50,7 @@ const JOB_STATUSES = new Set(['running', 'completed', 'failed', 'canceled']);
 const JOB_FIELDS = new Set([
   'schema', 'schema_version', 'revision', 'previous_revision_hash', 'job_id', 'status',
   'created_at', 'updated_at', 'owner', 'model', 'reasoning_effort', 'requested_contract',
-  'enforced_launch_contract', 'max_iterations', 'file_count', 'result', 'error',
+  'enforced_launch_contract', 'launch_contract_canary', 'max_iterations', 'file_count', 'result', 'error',
   'canceled_at', 'failed_at', 'recovered_from_backup_at', 'migrated_from_legacy_at',
   'legacy_source_sha256',
 ]);
@@ -86,6 +86,11 @@ function resolveCodexCommand() {
 }
 
 const CODEX_COMMAND = resolveCodexCommand();
+// Launch preflight result: the resolved Codex CLI must itself accept the pinned
+// execution contract (gpt-5.6-luna / max) before any job is persisted. Success is
+// memoized for the life of this process; a rejection is never cached and fails
+// closed at job start, before the first lane spawns.
+let EXECUTION_CONTRACT_CANARY = null;
 const MAX_ERROR_TEXT = 4000;
 const JOBS_DIR = path.join(process.env.CODEX_HOME || path.join(homedir(), '.codex'), 'mcp_servers', 'multi-gpt', 'jobs');
 const JOBS = new Map();
@@ -208,6 +213,10 @@ function validateJobState(value, expectedJobId = null) {
   if (!isPlainObject(value.requested_contract) || Object.keys(value.requested_contract).sort().join('|') !== 'model|reasoning_effort') throw new Error('job state has invalid requested_contract');
   for (const field of ['model', 'reasoning_effort']) if (value.requested_contract[field] !== null && (typeof value.requested_contract[field] !== 'string' || !value.requested_contract[field])) throw new Error('job state has invalid requested_contract');
   if (!isPlainObject(value.enforced_launch_contract) || Object.keys(value.enforced_launch_contract).sort().join('|') !== 'model|reasoning_effort' || value.enforced_launch_contract.model !== value.model || value.enforced_launch_contract.reasoning_effort !== value.reasoning_effort) throw new Error('job state has invalid enforced_launch_contract');
+  if (Object.hasOwn(value, 'launch_contract_canary')) {
+    const canary = value.launch_contract_canary;
+    if (!isPlainObject(canary) || canary.ok !== true || Object.keys(canary).sort().join('|') !== 'command|model|ok|probe|reasoning_effort' || canary.probe !== 'mcp-list-no-run' || canary.model !== value.model || canary.reasoning_effort !== value.reasoning_effort || typeof canary.command !== 'string' || !canary.command) throw new Error('job state has invalid launch_contract_canary');
+  }
   if (!Number.isInteger(value.max_iterations) || value.max_iterations < 1 || value.max_iterations > 10) throw new Error('job state has invalid max_iterations');
   if (!Number.isInteger(value.file_count) || value.file_count < 0) throw new Error('job state has invalid file_count');
   assertNullableObject(value.result, 'result');
@@ -608,7 +617,13 @@ async function startMultiGptJob(args = {}) {
   const options = normalizeOptions(args);
   await ensureJobStoreReady();
   const fileEvidence = await readContextFiles(options.files);
+  // Launch preflight: the resolved Codex CLI must accept the pinned execution
+  // contract. This runs after context-file authorization and the in-memory
+  // capacity check (so unauthorized or over-capacity requests are rejected
+  // without spawning anything) but before any job is persisted and before the
+  // first lane starts.
   if (runningJobCount() >= MAX_RUNNING_JOBS) throw new Error('too many running Multi GPT jobs; limit is ' + MAX_RUNNING_JOBS);
+  const launchCanary = assertCodexCliAcceptsExecutionContract();
   let job = {
     job_id: randomUUID(),
     schema: JOB_SCHEMA,
@@ -621,6 +636,7 @@ async function startMultiGptJob(args = {}) {
     reasoning_effort: options.reasoningEffort,
     requested_contract: options.requestedContract,
     enforced_launch_contract: options.enforcedLaunchContract,
+    launch_contract_canary: launchCanary,
     max_iterations: options.maxIterations,
     file_count: fileEvidence.fileSummaries.length,
     owner: JOB_OWNER,
@@ -753,6 +769,47 @@ function assertExecutionContract(model, reasoningEffort) {
   if (reasoningEffort !== EXECUTION_CONTRACT.reasoning_effort) {
     throw new Error(`Multi GPT execution-contract violation: reasoning_effort must be exactly ${EXECUTION_CONTRACT.reasoning_effort}; received ${JSON.stringify(reasoningEffort)}`);
   }
+}
+
+// Launch preflight: `codex mcp list` is metadata-only and exits fast, but it still
+// resolves the same --model/-c contract that every stage later sends to `codex exec`,
+// so an installed CLI that rejects the pinned gpt-5.6-luna/max contract is discovered
+// before any job is persisted and before the first lane spawns. Success is memoized
+// for this process; failures (nonzero exit, unparseable stdout, spawn errors such as
+// ENOENT or timeout) are never cached and always fail closed with
+// LUNA_MAX_UNSUPPORTED_BY_CODEX_CLI. Every stage keeps its own explicit
+// model/effort args, so this probe never weakens the per-stage contract.
+function assertCodexCliAcceptsExecutionContract() {
+  if (EXECUTION_CONTRACT_CANARY?.ok) return EXECUTION_CONTRACT_CANARY;
+  // MULTI_GPT_CODEX_CANARY_COMMAND overrides only the probe command (tests and
+  // ops can point it at a deterministic fake CLI); production resolves the same
+  // CODEX_COMMAND the stages spawn.
+  const probeCommand = process.env.MULTI_GPT_CODEX_CANARY_COMMAND || CODEX_COMMAND;
+  const args = [
+    '--model', EXECUTION_CONTRACT.model,
+    '-c', `model_reasoning_effort="${EXECUTION_CONTRACT.reasoning_effort}"`,
+    'mcp', 'list', '--json',
+  ];
+  const completed = spawnSync(probeCommand, args, {
+    windowsHide: true,
+    shell: process.platform === 'win32',
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  let parsed = null;
+  try { parsed = JSON.parse(String(completed.stdout || '')); } catch {}
+  if (completed.status !== 0 || !Array.isArray(parsed)) {
+    const detail = truncateText(String(completed.stderr || completed.error?.message || '').trim());
+    throw new Error(`LUNA_MAX_UNSUPPORTED_BY_CODEX_CLI: ${probeCommand} rejected gpt-5.6-luna/max${detail ? `: ${detail}` : ''}`);
+  }
+  EXECUTION_CONTRACT_CANARY = {
+    ok: true,
+    command: probeCommand,
+    model: EXECUTION_CONTRACT.model,
+    reasoning_effort: EXECUTION_CONTRACT.reasoning_effort,
+    probe: 'mcp-list-no-run',
+  };
+  return EXECUTION_CONTRACT_CANARY;
 }
 
 function isPathWithin(candidate, root) {
@@ -2247,6 +2304,7 @@ export {
   MAX_CHILD_STDOUT_BYTES,
   MAX_CHILD_STDERR_BYTES,
   allowedRoots,
+  assertCodexCliAcceptsExecutionContract,
   authorizeContextFile,
   childResourceGuardSnapshot,
   failedJob,
